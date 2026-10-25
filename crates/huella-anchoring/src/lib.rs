@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Anclaje de ediciones a símbolos de código con tree-sitter.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod anchor;
+mod language;
+mod symbols;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use anchor::{AnchorReport, anchor_edit};
+pub use language::Language;
+pub use symbols::{Extraction, ExtractionError, extract_symbols};
