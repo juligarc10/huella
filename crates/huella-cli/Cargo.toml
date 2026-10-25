@@ -16,3 +16,7 @@ serde_json = "1.0.154"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "huella"
+path = "src/main.rs"
