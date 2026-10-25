@@ -1,0 +1,12 @@
+[package]
+name = "huella-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true
