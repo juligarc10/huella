@@ -6,7 +6,7 @@ mod sample;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -65,6 +65,15 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Servidor LSP para el editor (hover y `CodeLens`), por stdin/stdout.
+    Lsp {
+        /// Carpeta de transcripciones a indexar en segundo plano (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+        /// Segundos entre indexados en segundo plano; 0 lo desactiva.
+        #[arg(long, default_value_t = 30)]
+        index_every: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -87,6 +96,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
+        Command::Lsp { projects, index_every } => {
+            let db = cli
+                .db
+                .or_else(huella_engine::default_db_path)
+                .context("no se encontró dónde guardar datos; usa --db")?;
+            let projects = if index_every == 0 { None } else { Some(projects_dir(projects)?) };
+            let config = huella_lsp::Config { db, projects, index_every: Duration::from_secs(index_every.max(1)) };
+            huella_lsp::serve_stdio(&config)?;
+            Ok(())
+        }
     }
 }
 
