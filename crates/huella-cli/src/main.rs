@@ -1,4 +1,4 @@
-//! `huella`: CLI del prototipo F0.
+//! `huella`: CLI de Huella.
 
 mod report;
 mod sample;
@@ -6,12 +6,14 @@ mod sample;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use huella_anchoring::{AnchorReport, Language, anchor_edit, extract_symbols};
 use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
+use huella_store::Store;
 use serde::Serialize;
 
 use crate::report::Summary;
@@ -19,6 +21,9 @@ use crate::report::Summary;
 #[derive(Parser)]
 #[command(name = "huella", version, about = "Ancla las sesiones de agentes de IA a los símbolos del código")]
 struct Cli {
+    /// Base de datos (por defecto `$HUELLA_DB` o la carpeta de datos del usuario).
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -45,6 +50,21 @@ enum Command {
     },
     /// Lista los símbolos que Huella extrae de un fichero.
     Symbols { file: PathBuf },
+    /// Indexa en la base de datos lo nuevo de las transcripciones.
+    Index {
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Muestra qué se habló del símbolo en una posición: `huella why src/app.ts:42`.
+    Why {
+        /// Fichero y línea, separados por dos puntos.
+        #[arg(value_name = "FICHERO:LÍNEA")]
+        location: String,
+        /// Número máximo de ediciones a mostrar.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -60,20 +80,64 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Scan { projects, json, sample, sample_out, sample_offset } => {
-            let projects = match projects {
-                Some(path) => path,
-                None => default_projects_dir()?,
-            };
+            let projects = projects_dir(projects)?;
             let sample = sample.zip(sample_out).map(|(size, path)| SampleRequest { size, offset: sample_offset, path });
             scan(&projects, json.as_deref(), sample)
         }
         Command::Symbols { file } => print_symbols(&file),
+        Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
+        Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
     }
 }
 
-fn default_projects_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("no se encontró HOME; usa --projects")?;
-    Ok(Path::new(&home).join(".claude/projects"))
+fn projects_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    explicit.or_else(huella_engine::default_projects_dir).context("no se encontró la carpeta personal; usa --projects")
+}
+
+fn open_store(explicit: Option<PathBuf>) -> Result<Store> {
+    let path =
+        explicit.or_else(huella_engine::default_db_path).context("no se encontró dónde guardar datos; usa --db")?;
+    Store::open(&path).with_context(|| format!("abriendo {}", path.display()))
+}
+
+fn index(store: &mut Store, projects: &Path) -> Result<()> {
+    let started = Instant::now();
+    let report = huella_engine::index(store, projects)?;
+    let stats = store.stats()?;
+    println!(
+        "Indexado en {:.1} s: {} transcripciones, {} con novedades, {} ediciones nuevas{}",
+        started.elapsed().as_secs_f64(),
+        report.transcripts,
+        report.updated,
+        report.new_edits,
+        if report.restarted > 0 {
+            format!(" ({} releídas desde el principio)", report.restarted)
+        } else {
+            String::new()
+        }
+    );
+    for failure in &report.failures {
+        eprintln!("aviso: {failure}");
+    }
+    println!(
+        "Memoria: {} sesiones, {} ediciones, {} símbolos con historia",
+        stats.sessions, stats.edits, stats.anchored_symbols
+    );
+    Ok(())
+}
+
+fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
+    let (file, line) = location
+        .rsplit_once(':')
+        .and_then(|(file, line)| Some((file, line.parse::<usize>().ok()?)))
+        .context("usa el formato FICHERO:LÍNEA, por ejemplo src/app.ts:42")?;
+    let path = fs::canonicalize(file).with_context(|| format!("no se encontró {file}"))?;
+    let source = fs::read_to_string(&path).with_context(|| format!("leyendo {}", path.display()))?;
+    match huella_engine::memory_at(store, &path, &source, line)? {
+        Some(memory) => print!("{}", huella_engine::render_markdown(&memory, limit)),
+        None => println!("Huella no recuerda ninguna sesión que tocara {file}:{line}."),
+    }
+    Ok(())
 }
 
 struct SampleRequest {
