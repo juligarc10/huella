@@ -1,0 +1,11 @@
+id = "huella"
+name = "Huella"
+version = "0.1.0"
+schema_version = 1
+authors = ["juligarc10"]
+description = "Lo que se habló con la IA sobre cada función, al pasar el ratón."
+repository = "https://github.com/juligarc10/huella"
+
+[language_servers.huella]
+name = "Huella"
+languages = ["TypeScript", "TSX", "JavaScript", "Python", "Rust"]
