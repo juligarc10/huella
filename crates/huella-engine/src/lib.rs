@@ -9,7 +9,7 @@ mod render;
 
 use std::path::PathBuf;
 
-pub use decisions::{ExtractionReport, extract_decisions};
+pub use decisions::{ExtractionOptions, ExtractionReport, extract_decisions};
 pub use index::{IndexReport, index};
 pub use paths::normalize_path;
 pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};

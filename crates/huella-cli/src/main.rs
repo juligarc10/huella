@@ -16,6 +16,7 @@ use huella_core::FileEdit;
 use huella_decisions::DecisionExtractor;
 use huella_decisions::anthropic::Anthropic;
 use huella_decisions::openai::OpenAiCompatible;
+use huella_engine::ExtractionOptions;
 use huella_store::{DecisionFilter, Store};
 use serde::Serialize;
 
@@ -100,6 +101,9 @@ enum DecisionsCommand {
         /// Número máximo de sesiones a procesar.
         #[arg(long)]
         limit: Option<usize>,
+        /// Caracteres por trozo de diálogo (unos 3,5 por token): ajústalo al contexto del modelo.
+        #[arg(long, default_value_t = huella_decisions::DEFAULT_CHUNK_CHARS)]
+        chunk_chars: usize,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -147,9 +151,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
-        Command::Decisions { action: DecisionsCommand::Extract { provider, model, base_url, limit, projects } } => {
+        Command::Decisions {
+            action: DecisionsCommand::Extract { provider, model, base_url, limit, chunk_chars, projects },
+        } => {
             let extractor = build_extractor(provider, model, base_url)?;
-            extract(&mut open_store(cli.db)?, &projects_dir(projects)?, extractor.as_ref(), limit)
+            extract(
+                &mut open_store(cli.db)?,
+                &projects_dir(projects)?,
+                extractor.as_ref(),
+                &ExtractionOptions { limit, chunk_chars },
+            )
         }
         Command::Decisions { action: DecisionsCommand::List { entity, project, all } } => {
             let project = project
@@ -235,10 +246,15 @@ fn build_extractor(
     })
 }
 
-fn extract(store: &mut Store, projects: &Path, extractor: &dyn DecisionExtractor, limit: Option<usize>) -> Result<()> {
+fn extract(
+    store: &mut Store,
+    projects: &Path,
+    extractor: &dyn DecisionExtractor,
+    options: &ExtractionOptions,
+) -> Result<()> {
     let started = Instant::now();
     println!("Extrayendo decisiones con {}…", extractor.id());
-    let report = huella_engine::extract_decisions(store, projects, extractor, limit, |conversation| {
+    let report = huella_engine::extract_decisions(store, projects, extractor, options, |conversation| {
         let first =
             conversation.turns.first().map(|turn| turn.text.split_whitespace().take(8).collect::<Vec<_>>().join(" "));
         println!(

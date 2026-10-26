@@ -13,6 +13,21 @@ use crate::paths::normalize_path;
 /// Sesiones con menos mensajes no suelen contener decisiones.
 const MIN_TURNS: usize = 4;
 
+/// Cómo extraer: cuántas sesiones como mucho y de qué tamaño los trozos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionOptions {
+    pub limit: Option<usize>,
+    /// Caracteres por trozo de diálogo; ajústalo al contexto del modelo
+    /// (unos 3,5 caracteres por token en español).
+    pub chunk_chars: usize,
+}
+
+impl Default for ExtractionOptions {
+    fn default() -> Self {
+        Self { limit: None, chunk_chars: DEFAULT_CHUNK_CHARS }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExtractionReport {
     pub sessions: usize,
@@ -26,7 +41,7 @@ pub struct ExtractionReport {
 }
 
 /// Extrae las decisiones de las sesiones nuevas o que han crecido.
-/// `limit` acota cuántas sesiones se procesan (útil para probar un modelo);
+/// `options.limit` acota cuántas sesiones se procesan (útil para probar un modelo);
 /// `progress` recibe cada sesión antes de procesarla.
 ///
 /// # Errors
@@ -36,7 +51,7 @@ pub fn extract_decisions(
     store: &mut Store,
     projects: &Path,
     extractor: &dyn DecisionExtractor,
-    limit: Option<usize>,
+    options: &ExtractionOptions,
     mut progress: impl FnMut(&Conversation),
 ) -> crate::Result<ExtractionReport> {
     let mut report = ExtractionReport::default();
@@ -50,13 +65,13 @@ pub fn extract_decisions(
             report.unchanged += 1;
             continue;
         }
-        if limit.is_some_and(|limit| report.extracted + report.failures.len() >= limit) {
+        if options.limit.is_some_and(|limit| report.extracted + report.failures.len() >= limit) {
             continue;
         }
         progress(&conversation);
         let mut decisions: Vec<NewDecision> = Vec::new();
         let mut failure = None;
-        for dialogue in chunk_dialogue(&conversation, DEFAULT_CHUNK_CHARS) {
+        for dialogue in chunk_dialogue(&conversation, options.chunk_chars) {
             report.calls += 1;
             let known_titles = decisions.iter().map(|d| d.title.clone()).collect();
             match extractor.extract(&ExtractionRequest { dialogue, known_titles }) {
@@ -185,17 +200,17 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let fake = Fake { requests: RefCell::new(vec![]), fail: false };
 
-        let report = extract_decisions(&mut store, &dir, &fake, None, |_| {}).unwrap();
+        let report = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
         assert_eq!((report.sessions, report.extracted, report.decisions), (1, 1, 1));
         let stored = store.decisions(&DecisionFilter::default()).unwrap();
         assert_eq!(stored[0].project.as_deref(), Some("/repo"));
         assert_eq!(stored[0].extractor, "fake:1");
 
-        let again = extract_decisions(&mut store, &dir, &fake, None, |_| {}).unwrap();
+        let again = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
         assert_eq!((again.unchanged, again.calls), (1, 0), "sin mensajes nuevos no se llama al modelo");
 
         write_session(&dir, "s1", &["¿Rust?", "DECIDE: Rust", "vale", "hecho", "¿y SQLite?", "DECIDE: SQLite"]);
-        let grown = extract_decisions(&mut store, &dir, &fake, None, |_| {}).unwrap();
+        let grown = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
         assert_eq!(grown.extracted, 1);
         assert_eq!(store.decisions(&DecisionFilter::default()).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -208,7 +223,14 @@ mod tests {
         write_session(&dir, "s2", &["a", "DECIDE: B", "b", "c"]);
         let mut store = Store::open_in_memory().unwrap();
         let failing = Fake { requests: RefCell::new(vec![]), fail: true };
-        let report = extract_decisions(&mut store, &dir, &failing, Some(1), |_| {}).unwrap();
+        let report = extract_decisions(
+            &mut store,
+            &dir,
+            &failing,
+            &ExtractionOptions { limit: Some(1), ..ExtractionOptions::default() },
+            |_| {},
+        )
+        .unwrap();
         assert_eq!((report.failures.len(), failing.requests.borrow().len()), (1, 1));
         assert_eq!(store.extracted_turns("s1").unwrap(), None, "se reintentará");
         std::fs::remove_dir_all(&dir).unwrap();

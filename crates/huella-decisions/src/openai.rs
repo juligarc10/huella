@@ -13,6 +13,8 @@ use crate::{
 
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const PROVIDER: &str = "openai-compatible";
+/// Margen de salida; sin él algunos servidores aplican un límite corto por defecto.
+const MAX_TOKENS: u32 = 8192;
 
 pub struct OpenAiCompatible {
     agent: Agent,
@@ -63,6 +65,7 @@ impl DecisionExtractor for OpenAiCompatible {
 fn request_body(model: &str, request: &ExtractionRequest) -> Value {
     json!({
         "model": model,
+        "max_tokens": MAX_TOKENS,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message(request)},
