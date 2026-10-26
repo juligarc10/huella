@@ -26,7 +26,8 @@ pub enum StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Migraciones en orden; la posición + 1 es la versión de esquema.
-const MIGRATIONS: &[&str] = &[r"
+const MIGRATIONS: &[&str] = &[
+    r"
     CREATE TABLE transcript (
         path        TEXT PRIMARY KEY,
         offset      INTEGER NOT NULL,
@@ -66,7 +67,35 @@ const MIGRATIONS: &[&str] = &[r"
         PRIMARY KEY (edit_id, role, qualified_name)
     );
     CREATE INDEX edit_symbol_by_name ON edit_symbol(qualified_name);
-"];
+",
+    r"
+    CREATE TABLE decision (
+        id              INTEGER PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        project         TEXT,
+        title           TEXT NOT NULL,
+        decision        TEXT NOT NULL,
+        rationale       TEXT NOT NULL,
+        alternatives    TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        superseded_by   TEXT,
+        decided_at      TEXT,
+        extractor       TEXT NOT NULL
+    );
+    CREATE INDEX decision_by_session ON decision(session_id);
+    CREATE TABLE decision_entity (
+        decision_id     INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+        entity          TEXT NOT NULL,
+        PRIMARY KEY (decision_id, entity)
+    );
+    CREATE INDEX decision_entity_by_entity ON decision_entity(entity);
+    CREATE TABLE decision_extraction (
+        session_id      TEXT PRIMARY KEY,
+        turns           INTEGER NOT NULL,
+        extractor       TEXT NOT NULL
+    );
+",
+];
 
 /// Edición ya anclada, lista para guardar.
 pub struct IndexedEdit<'a> {
@@ -104,6 +133,58 @@ pub struct SymbolActivity {
     pub edits: usize,
     pub sessions: usize,
     pub last_at: Option<String>,
+}
+
+/// Decisión extraída de una sesión, lista para guardar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDecision {
+    pub title: String,
+    pub decision: String,
+    pub rationale: String,
+    pub alternatives: Vec<String>,
+    pub entities: Vec<String>,
+    /// `accepted`, `proposed`, `rejected` o `superseded`.
+    pub status: String,
+    /// Título de la decisión de la misma sesión que esta reemplaza, o vacío.
+    pub supersedes: String,
+}
+
+/// Lote de decisiones de una sesión con el contexto de dónde salen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDecisions<'a> {
+    pub session_id: &'a str,
+    /// Proyecto (directorio de la sesión normalizado).
+    pub project: Option<&'a str>,
+    pub extractor: &'a str,
+    /// Mensajes del diálogo cuando se extrajo: si crece, hay que volver a extraer.
+    pub turns: usize,
+    pub decided_at: Option<&'a str>,
+    pub decisions: &'a [NewDecision],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDecision {
+    pub id: i64,
+    pub session_id: String,
+    pub project: Option<String>,
+    pub title: String,
+    pub decision: String,
+    pub rationale: String,
+    pub alternatives: Vec<String>,
+    pub entities: Vec<String>,
+    pub status: String,
+    pub superseded_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub extractor: String,
+}
+
+/// Qué decisiones listar.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecisionFilter {
+    pub entity: Option<String>,
+    pub project: Option<String>,
+    /// Incluir las reemplazadas, rechazadas y solo propuestas.
+    pub include_inactive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +329,109 @@ impl Store {
         let rows = statement.query_map([path], |row| {
             let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
             Ok((row.get(0)?, SymbolActivity { edits: count(1)?, sessions: count(2)?, last_at: row.get(3)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Mensajes de diálogo que tenía una sesión cuando se extrajeron sus
+    /// decisiones; `None` si nunca se extrajeron.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn extracted_turns(&self, session_id: &str) -> Result<Option<usize>> {
+        let turns: Option<i64> = self
+            .conn
+            .query_row("SELECT turns FROM decision_extraction WHERE session_id = ?1", [session_id], |row| row.get(0))
+            .optional()?;
+        Ok(turns.map(|n| usize::try_from(n).unwrap_or_default()))
+    }
+
+    /// Sustituye las decisiones de una sesión por las de una extracción nueva y
+    /// marca como reemplazadas las que una decisión posterior dice reemplazar.
+    ///
+    /// # Errors
+    /// Si falla alguna escritura; en ese caso no cambia nada.
+    pub fn replace_decisions(&mut self, batch: &SessionDecisions) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM decision WHERE session_id = ?1", [batch.session_id])?;
+        for decision in batch.decisions {
+            tx.execute(
+                "INSERT INTO decision (session_id, project, title, decision, rationale, alternatives, status,
+                                       decided_at, extractor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    batch.session_id,
+                    batch.project,
+                    decision.title,
+                    decision.decision,
+                    decision.rationale,
+                    serde_json::to_string(&decision.alternatives).unwrap_or_else(|_| "[]".to_owned()),
+                    decision.status,
+                    batch.decided_at,
+                    batch.extractor
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            for entity in &decision.entities {
+                tx.execute(
+                    "INSERT OR IGNORE INTO decision_entity (decision_id, entity) VALUES (?1, ?2)",
+                    params![id, entity],
+                )?;
+            }
+        }
+        for decision in batch.decisions.iter().filter(|d| !d.supersedes.is_empty()) {
+            tx.execute(
+                "UPDATE decision SET status = 'superseded', superseded_by = ?1
+                 WHERE session_id = ?2 AND title = ?3 COLLATE NOCASE AND title <> ?1",
+                params![decision.title, batch.session_id, decision.supersedes],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO decision_extraction (session_id, turns, extractor) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET turns = excluded.turns, extractor = excluded.extractor",
+            params![batch.session_id, i64::try_from(batch.turns).unwrap_or(i64::MAX), batch.extractor],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Decisiones de la más reciente a la más antigua. Por defecto solo las
+    /// vigentes (aceptadas), que son las que conviene recordar.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<StoredDecision>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives, d.status,
+                    d.superseded_by, d.decided_at, d.extractor,
+                    (SELECT group_concat(entity, char(31)) FROM decision_entity WHERE decision_id = d.id)
+             FROM decision d
+             WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM decision_entity e WHERE e.decision_id = d.id AND e.entity = ?1))
+               AND (?2 IS NULL OR d.project = ?2)
+               AND (?3 OR d.status = 'accepted')
+             ORDER BY d.decided_at DESC, d.id",
+        )?;
+        let entity = filter.entity.as_ref().map(|entity| entity.trim().to_lowercase());
+        let rows = statement.query_map(params![entity, filter.project, filter.include_inactive], |row| {
+            let alternatives: String = row.get(6)?;
+            let entities: Option<String> = row.get(11)?;
+            let mut entities: Vec<String> =
+                entities.map(|list| list.split('\u{1f}').map(str::to_owned).collect()).unwrap_or_default();
+            entities.sort();
+            Ok(StoredDecision {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                project: row.get(2)?,
+                title: row.get(3)?,
+                decision: row.get(4)?,
+                rationale: row.get(5)?,
+                alternatives: serde_json::from_str(&alternatives).unwrap_or_default(),
+                entities,
+                status: row.get(7)?,
+                superseded_by: row.get(8)?,
+                decided_at: row.get(9)?,
+                extractor: row.get(10)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -489,6 +673,77 @@ mod tests {
         save(&mut store, 10, &[(&readme, &AnchorOutcome::FileOnly)]);
         assert_eq!(store.stats().unwrap().edits, 1);
         assert_eq!(store.stats().unwrap().anchored_symbols, 0);
+    }
+
+    fn new_decision(title: &str, entities: &[&str], status: &str, supersedes: &str) -> NewDecision {
+        NewDecision {
+            title: title.into(),
+            decision: format!("se decide {title}"),
+            rationale: "porque sí".into(),
+            alternatives: vec!["otra: peor".into()],
+            entities: entities.iter().map(|e| (*e).to_owned()).collect(),
+            status: status.into(),
+            supersedes: supersedes.into(),
+        }
+    }
+
+    fn batch<'a>(session: &'a str, turns: usize, decisions: &'a [NewDecision]) -> SessionDecisions<'a> {
+        SessionDecisions {
+            session_id: session,
+            project: Some("/repo"),
+            extractor: "test:modelo",
+            turns,
+            decided_at: Some("2026-10-25T10:00:00Z"),
+            decisions,
+        }
+    }
+
+    #[test]
+    fn later_decisions_supersede_earlier_ones_in_the_same_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [
+            new_decision("TypeScript para el MVP", &["typescript"], "accepted", ""),
+            new_decision("Rust para todo el producto", &["rust", "python"], "accepted", "typescript para el mvp"),
+        ];
+        store.replace_decisions(&batch("s1", 10, &decisions)).unwrap();
+
+        let active = store.decisions(&DecisionFilter::default()).unwrap();
+        assert_eq!(active.iter().map(|d| d.title.as_str()).collect::<Vec<_>>(), vec!["Rust para todo el producto"]);
+        assert_eq!(active[0].entities, vec!["python", "rust"]);
+        assert_eq!(active[0].alternatives, vec!["otra: peor"]);
+
+        let all = store.decisions(&DecisionFilter { include_inactive: true, ..DecisionFilter::default() }).unwrap();
+        let replaced = all.iter().find(|d| d.title == "TypeScript para el MVP").unwrap();
+        assert_eq!(
+            (replaced.status.as_str(), replaced.superseded_by.as_deref()),
+            ("superseded", Some("Rust para todo el producto"))
+        );
+    }
+
+    #[test]
+    fn decisions_filter_by_entity_and_project() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [
+            new_decision("SQLite local", &["sqlite"], "accepted", ""),
+            new_decision("LSP síncrono", &["lsp"], "accepted", ""),
+        ];
+        store.replace_decisions(&batch("s1", 4, &decisions)).unwrap();
+        let by_entity = DecisionFilter { entity: Some(" SQLite ".into()), ..DecisionFilter::default() };
+        assert_eq!(store.decisions(&by_entity).unwrap().len(), 1);
+        let other_project = DecisionFilter { project: Some("/otro".into()), ..DecisionFilter::default() };
+        assert_eq!(store.decisions(&other_project).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn re_extraction_replaces_a_session_and_records_its_size() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.extracted_turns("s1").unwrap(), None);
+        store.replace_decisions(&batch("s1", 4, &[new_decision("A", &[], "accepted", "")])).unwrap();
+        store.replace_decisions(&batch("s1", 9, &[new_decision("B", &[], "accepted", "")])).unwrap();
+        assert_eq!(store.extracted_turns("s1").unwrap(), Some(9));
+        let titles: Vec<String> =
+            store.decisions(&DecisionFilter::default()).unwrap().into_iter().map(|d| d.title).collect();
+        assert_eq!(titles, vec!["B"]);
     }
 
     #[test]
