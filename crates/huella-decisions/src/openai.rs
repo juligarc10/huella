@@ -1,6 +1,11 @@
 //! Adaptador para servidores con la API de chat de `OpenAI`: Ollama
 //! (`http://localhost:11434/v1`), LM Studio, llama.cpp, vLLM, `OpenRouter`…
+//!
+//! La respuesta se pide en streaming (SSE): un modelo local puede tardar
+//! minutos en un trozo largo, y los proxies cortan las conexiones que pasan
+//! un rato sin enviar datos.
 
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -15,6 +20,8 @@ pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const PROVIDER: &str = "openai-compatible";
 /// Margen de salida; sin él algunos servidores aplican un límite corto por defecto.
 const MAX_TOKENS: u32 = 8192;
+/// Silencio máximo entre dos fragmentos (incluye procesar el prompt).
+const MAX_SILENCE: Duration = Duration::from_secs(300);
 
 pub struct OpenAiCompatible {
     agent: Agent,
@@ -28,8 +35,8 @@ impl OpenAiCompatible {
     pub fn new(base_url: Option<String>, model: String, api_key: Option<String>) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
-            // Los modelos locales pueden tardar minutos en un trozo largo.
-            .timeout_global(Some(Duration::from_secs(900)))
+            .timeout_global(None)
+            .timeout_per_read(Some(MAX_SILENCE))
             .build();
         Self {
             agent: config.into(),
@@ -53,12 +60,12 @@ impl DecisionExtractor for OpenAiCompatible {
         }
         let mut response = call.send_json(request_body(&self.model, request)).map_err(network)?;
         let status = response.status().as_u16();
-        let body = response.body_mut().read_to_string().map_err(network)?;
         if status != 200 {
+            let body = response.body_mut().read_to_string().map_err(network)?;
             return Err(ExtractError::Api { provider: PROVIDER, status, body });
         }
-        let value: Value = serde_json::from_str(&body).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
-        parse_output(&response_text(&value)?)
+        let text = collect_stream(BufReader::new(response.body_mut().as_reader()))?;
+        parse_output(&text)
     }
 }
 
@@ -66,6 +73,7 @@ fn request_body(model: &str, request: &ExtractionRequest) -> Value {
     json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
+        "stream": true,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message(request)},
@@ -77,17 +85,37 @@ fn request_body(model: &str, request: &ExtractionRequest) -> Value {
     })
 }
 
-fn response_text(response: &Value) -> Result<String, ExtractError> {
-    let choice = &response["choices"][0];
-    match choice["finish_reason"].as_str() {
-        Some("length") => return Err(ExtractError::Truncated),
-        Some("content_filter") => return Err(ExtractError::Refused("content_filter".into())),
-        _ => {}
+/// Junta el texto de los eventos SSE (`data: {...}`) hasta `data: [DONE]`.
+/// El razonamiento (`reasoning_content`) se descarta: solo mantiene viva la
+/// conexión.
+fn collect_stream(reader: impl BufRead) -> Result<String, ExtractError> {
+    let network = |error: std::io::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
+    let mut text = String::new();
+    for line in reader.lines() {
+        let line = line.map_err(network)?;
+        let Some(payload) = line.strip_prefix("data:").map(str::trim) else { continue };
+        if payload == "[DONE]" {
+            break;
+        }
+        let event: Value =
+            serde_json::from_str(payload).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
+        if let Some(error) = event.get("error") {
+            return Err(ExtractError::BadResponse(error.to_string()));
+        }
+        let choice = &event["choices"][0];
+        if let Some(fragment) = choice["delta"]["content"].as_str() {
+            text.push_str(fragment);
+        }
+        match choice["finish_reason"].as_str() {
+            Some("length") => return Err(ExtractError::Truncated),
+            Some("content_filter") => return Err(ExtractError::Refused("content_filter".into())),
+            _ => {}
+        }
     }
-    choice["message"]["content"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| ExtractError::BadResponse("sin contenido en la respuesta".into()))
+    if text.trim().is_empty() {
+        return Err(ExtractError::BadResponse("la respuesta llegó vacía".into()));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -95,20 +123,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_uses_json_schema_response_format() {
+    fn request_streams_with_json_schema_response_format() {
         let request = ExtractionRequest { dialogue: "x".into(), known_titles: vec![] };
         let body = request_body("qwen2.5:7b", &request);
+        assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         assert_eq!(body["response_format"]["json_schema"]["schema"], output_schema());
     }
 
     #[test]
-    fn reads_the_message_content_and_detects_truncation() {
-        let ok = json!({"choices": [{"finish_reason": "stop", "message": {"content": "{\"decisions\": []}"}}]});
-        assert_eq!(response_text(&ok).unwrap(), "{\"decisions\": []}");
-        let cut = json!({"choices": [{"finish_reason": "length", "message": {"content": "{"}}]});
-        assert!(matches!(response_text(&cut), Err(ExtractError::Truncated)));
+    fn joins_streamed_content_and_ignores_reasoning() {
+        let stream = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"pienso\"}}]}\n\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"decisions\\\"\"}}]}\n\n\
+                      : comentario de keep-alive\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\": []}\"},\"finish_reason\":\"stop\"}]}\n\n\
+                      data: [DONE]\n";
+        assert_eq!(collect_stream(stream.as_bytes()).unwrap(), "{\"decisions\": []}");
+    }
+
+    #[test]
+    fn truncation_errors_and_empty_streams_are_reported() {
+        let cut = "data: {\"choices\":[{\"delta\":{\"content\":\"{\"},\"finish_reason\":\"length\"}]}\n";
+        assert!(matches!(collect_stream(cut.as_bytes()), Err(ExtractError::Truncated)));
+        let failed = "data: {\"error\":{\"message\":\"context too long\"}}\n";
+        assert!(matches!(collect_stream(failed.as_bytes()), Err(ExtractError::BadResponse(_))));
+        assert!(matches!(collect_stream("data: [DONE]\n".as_bytes()), Err(ExtractError::BadResponse(_))));
     }
 
     #[test]
