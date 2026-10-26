@@ -1,6 +1,7 @@
 //! Casos de uso de Huella: indexar transcripciones y consultar la memoria de
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
+mod decisions;
 mod index;
 mod paths;
 mod query;
@@ -8,6 +9,7 @@ mod render;
 
 use std::path::PathBuf;
 
+pub use decisions::{ExtractionReport, extract_decisions};
 pub use index::{IndexReport, index};
 pub use paths::normalize_path;
 pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};
