@@ -206,7 +206,8 @@ impl Walker<'_> {
             let is_trivia =
                 previous.kind().contains("comment") || matches!(previous.kind(), "attribute_item" | "decorator");
             let is_adjacent = previous.end_position().row + 1 >= start_row;
-            if !is_trivia || !is_adjacent || !self.starts_its_line(previous.start_byte()) {
+            let is_separator = is_section_separator(&self.source[previous.byte_range()]);
+            if !is_trivia || !is_adjacent || is_separator || !self.starts_its_line(previous.start_byte()) {
                 break;
             }
             (start_byte, start_row) = (previous.start_byte(), previous.start_position().row);
@@ -251,6 +252,25 @@ fn is_module_statement(declarator: Node) -> bool {
         statement_parent = statement_parent.and_then(|p| p.parent());
     }
     statement_parent.is_some_and(|p| p.kind() == "program")
+}
+
+/// Comentario que separa secciones (`// ─── Datos ───`, `# ======`, `// #region`,
+/// `// MARK: -`): organiza el fichero, no documenta el símbolo de debajo.
+fn is_section_separator(comment: &str) -> bool {
+    let body = comment.trim_start_matches(['/', '*', '#', ' ', '\t']).trim_start();
+    if ["region", "endregion", "MARK:", "pragma mark"].iter().any(|marker| body.starts_with(marker)) {
+        return true;
+    }
+    let mut longest_run = 0;
+    let mut run = 0;
+    let mut previous = None;
+    for character in comment.chars() {
+        let is_rule = matches!(character, '─' | '━' | '═' | '-' | '=' | '*' | '#' | '~' | '_');
+        run = if is_rule && previous == Some(character) { run + 1 } else { usize::from(is_rule) };
+        longest_run = longest_run.max(run);
+        previous = Some(character);
+    }
+    longest_run >= 3 && !comment.starts_with("/**")
 }
 
 fn is_container(kind: Option<SymbolKind>) -> bool {
@@ -416,6 +436,18 @@ describe('códigos públicos', () => {
         let py = "x = 1\n# comentario suelto\n\n@cache\ndef g():\n    pass\n";
         let symbol = &extract_symbols(Language::Python, py).unwrap().symbols[1];
         assert_eq!((symbol.qualified_name.as_str(), symbol.start_line), ("g", 4));
+    }
+
+    #[test]
+    fn section_separators_do_not_belong_to_the_next_symbol() {
+        let start = |source: &str| extract_symbols(Language::TypeScript, source).unwrap().symbols[0].start_line;
+        assert_eq!(start("// ─── Data ───\nconst providers = [];\n"), 2);
+        assert_eq!(start("// #region helpers\nfunction f() {}\n"), 2);
+        assert_eq!(start("// ----------\n// Suma dos números.\nfunction f() {}\n"), 2);
+        assert_eq!(start("/** Suma -- rápido. */\nfunction f() {}\n"), 1);
+        assert_eq!(start("// Suma dos números.\nfunction f() {}\n"), 1);
+        let python = extract_symbols(Language::Python, "# ===== Datos =====\nX = 1\n").unwrap();
+        assert_eq!(python.symbols[0].start_line, 2);
     }
 
     #[test]
