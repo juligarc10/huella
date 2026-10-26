@@ -168,3 +168,27 @@ impl Anchor {
         self.symbols.is_empty() && self.removed.is_empty()
     }
 }
+
+/// Quién habla en un turno de conversación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speaker {
+    Person,
+    Agent,
+}
+
+/// Un mensaje de la conversación, sin herramientas ni sus resultados.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    pub speaker: Speaker,
+    pub text: String,
+    pub timestamp: Option<String>,
+}
+
+/// El diálogo de una sesión: de ahí salen las decisiones que no tocan código.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    pub session_id: String,
+    pub cwd: Option<PathBuf>,
+    pub turns: Vec<Turn>,
+}

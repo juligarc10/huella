@@ -10,7 +10,9 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use huella_core::{AfterState, EditContext, EditKind, EditOrigin, FileEdit, TranscriptCursor};
+use huella_core::{
+    AfterState, Conversation, EditContext, EditKind, EditOrigin, FileEdit, Speaker, TranscriptCursor, Turn,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -220,6 +222,49 @@ fn last_text_block(content: &Value) -> Option<String> {
         .map(str::trim)
         .rfind(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+/// Diálogo de cada sesión de una transcripción, en orden: mensajes de la
+/// persona y textos del agente. Las herramientas y sus resultados se omiten.
+///
+/// # Errors
+/// Si el fichero no se puede abrir o leer.
+pub fn read_conversations(path: &Path) -> Result<Vec<Conversation>, TranscriptError> {
+    let io_error = |source| TranscriptError::Io { path: path.to_path_buf(), source };
+    let reader = BufReader::new(File::open(path).map_err(io_error)?);
+    let mut conversations: Vec<Conversation> = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(io_error)?;
+        let Ok(event) = serde_json::from_str::<RawEvent>(&line) else { continue };
+        if event.is_meta == Some(true) {
+            continue;
+        }
+        let Some(content) = event.message.as_ref().and_then(|message| message.get("content")) else { continue };
+        let (speaker, text) = match event.kind.as_deref() {
+            Some("user") => (Speaker::Person, user_prompt(content)),
+            Some("assistant") => (Speaker::Agent, all_text_blocks(content)),
+            _ => continue,
+        };
+        let (Some(text), Some(session_id)) = (text, event.session_id) else { continue };
+        let turn = Turn { speaker, text, timestamp: event.timestamp };
+        match conversations.iter_mut().find(|conversation| conversation.session_id == session_id) {
+            Some(conversation) => conversation.turns.push(turn),
+            None => conversations.push(Conversation { session_id, cwd: event.cwd, turns: vec![turn] }),
+        }
+    }
+    Ok(conversations)
+}
+
+fn all_text_blocks(content: &Value) -> Option<String> {
+    let texts: Vec<&str> = content
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
 }
 
 fn truncate(text: &str) -> String {
@@ -462,6 +507,40 @@ mod tests {
         assert_eq!(second.edits.len(), 1);
         assert_eq!(second.edits[0].context.prompt.as_deref(), Some("Primera petición"));
         assert_eq!(second.resume.offset, std::fs::metadata(&path).unwrap().len());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn conversations_keep_only_the_dialogue_grouped_by_session() {
+        let dir = temp_dir("conversation");
+        let path = dir.join("s.jsonl");
+        let line = |session: &str, kind: &str, content: Value| {
+            serde_json::json!({"type": kind, "sessionId": session, "timestamp": "t", "message": {"content": content}})
+                .to_string()
+        };
+        let lines = [
+            line("s1", "user", serde_json::json!("¿Rust o Python?")),
+            line(
+                "s1",
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "Rust."}, {"type": "tool_use"}, {"type": "text", "text": "Por el binario único."}]),
+            ),
+            line("s1", "user", serde_json::json!([{"type": "tool_result", "content": "salida"}])),
+            line("s1", "user", serde_json::json!("<command-name>/clear</command-name>")),
+            line("s2", "user", serde_json::json!("Otra sesión")),
+            "{roto".to_owned(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let conversations = read_conversations(&path).unwrap();
+        assert_eq!(conversations.len(), 2);
+        let texts: Vec<(Speaker, &str)> =
+            conversations[0].turns.iter().map(|turn| (turn.speaker, turn.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![(Speaker::Person, "¿Rust o Python?"), (Speaker::Agent, "Rust.\n\nPor el binario único.")]
+        );
+        assert_eq!(conversations[1].session_id, "s2");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
