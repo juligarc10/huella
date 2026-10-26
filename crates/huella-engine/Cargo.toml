@@ -1,0 +1,17 @@
+[package]
+name = "huella-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dirs = "7.0.0"
+huella-anchoring = { version = "0.1.0", path = "../huella-anchoring" }
+huella-claude-code = { version = "0.1.0", path = "../huella-claude-code" }
+huella-core = { version = "0.1.0", path = "../huella-core" }
+huella-store = { version = "0.1.0", path = "../huella-store" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
