@@ -2,71 +2,102 @@
 
 Memoria de las sesiones con agentes de IA, anclada al código. Huella lee las
 transcripciones de los agentes, averigua qué funciones, clases y métodos tocó
-cada edición, y en fases posteriores servirá ese contexto al instante en el
-editor (LSP) y a otros agentes (MCP).
+cada edición y, al pasar el ratón por ellas en el editor, muestra qué se pidió
+y qué explicó el agente. Sin llamar a ningún modelo y en milisegundos.
 
-**Estado: F0, prototipo de anclaje.** Lee transcripciones de Claude Code,
-ancla cada edición a símbolos de código y mide la tasa de anclaje. Resultados
-en [docs/f0-resultados.md](docs/f0-resultados.md).
+**Estado: F1 en curso.** Memoria persistente en SQLite, indexado incremental,
+servidor LSP (hover y `CodeLens`) y extensión de VS Code. La F0 validó el
+anclaje: [docs/f0-resultados.md](docs/f0-resultados.md).
 
 ## Requisitos
 
 - Rust 1.90 o superior (`rustup` instala la versión estable).
+- Para la extensión de VS Code: Node 18 o superior.
 
-## Uso
+## Instalación
 
 ```sh
-cargo build --release
+cargo install --path crates/huella-cli            # binario `huella` en ~/.cargo/bin
 
-# Ancla todas las ediciones de ~/.claude/projects y muestra las métricas
-./target/release/huella scan
-
-# Además: detalle por edición en JSON y una muestra de 40 casos para validar a mano
-./target/release/huella scan --json ediciones.json --sample 40 --sample-out muestra.md
-
-# Otra muestra sin casos en común con la anterior
-./target/release/huella scan --sample 40 --sample-offset 9 --sample-out muestra-b.md
-
-# Símbolos que Huella reconoce en un fichero
-./target/release/huella symbols src/app.ts
+cd extensions/vscode
+npm install && npm run package
+code --install-extension huella-0.1.0.vsix
 ```
 
-`--projects <carpeta>` cambia la carpeta de transcripciones.
+La extensión arranca `huella lsp`, que indexa las transcripciones de Claude
+Code (`~/.claude/projects`) al abrir el editor y cada 30 segundos.
 
-La muestra y el JSON contienen fragmentos de tu código y rutas locales: se
-escriben solo donde indiques y nada sale de tu máquina.
+## Uso desde la terminal
+
+```sh
+huella index                         # indexa lo nuevo de las transcripciones
+huella why src/app.ts:42             # qué se habló del símbolo en esa línea
+huella symbols src/app.ts            # símbolos que Huella reconoce en un fichero
+huella scan                          # mide la tasa de anclaje (validación de la F0)
+```
+
+Opciones comunes: `--db <fichero>` (por defecto `$HUELLA_DB` o
+`~/Library/Application Support/huella/huella.db` en macOS,
+`~/.local/share/huella/huella.db` en Linux) y `--projects <carpeta>`.
+
+Todo se queda en tu máquina: la base de datos guarda tus peticiones y las
+explicaciones del agente, y `scan --json`/`--sample-out` escriben fragmentos de
+código solo donde indiques.
 
 ## Cómo funciona
 
 1. **Adaptador de Claude Code** (`huella-claude-code`): lee cada `.jsonl` línea
    a línea. Los resultados de `Edit`, `MultiEdit` y `Write` incluyen el fichero
    original completo, así que el fichero tras la edición se reconstruye
-   exactamente sin depender del disco ni de git. Lo que no reconoce se cuenta,
-   no se descarta en silencio.
-2. **Anclaje** (`huella-anchoring`): compara el fichero antes y después línea a
-   línea y asigna cada línea cambiada al símbolo más interno donde empieza su
-   contenido (tree-sitter). Lo que no cae en ningún símbolo es nivel de módulo
-   (imports, sentencias sueltas). Si la transcripción no guardó el original,
-   busca el fragmento en el fichero actual y marca el anclaje como aproximado.
-3. **Símbolos**: reglas declarativas por lenguaje en
-   [`language.rs`](crates/huella-anchoring/src/language.rs). Cada símbolo
-   lleva un hash de su cuerpo normalizado (sin comentarios ni formato) para
-   detectar en el futuro si el código cambió desde la conversación.
+   exactamente. Con cada edición guarda la petición de la persona y el último
+   texto del agente antes de editar: el porqué, sin LLM. Puede retomar una
+   transcripción desde un byte para leer solo lo nuevo.
+2. **Anclaje** (`huella-anchoring`): compara el fichero antes y después y asigna
+   cada línea cambiada al símbolo más interno donde empieza su contenido
+   (tree-sitter). Registra también los símbolos que la edición borró o
+   renombró. Cada símbolo lleva un hash de su cuerpo normalizado.
+3. **Memoria** (`huella-store`): SQLite en modo WAL. Cada lote de una
+   transcripción y su cursor se guardan en una transacción; reindexar no
+   duplica.
+4. **Motor** (`huella-engine`): indexado incremental y consultas. Las rutas de
+   los worktrees (`.claude/worktrees/<nombre>/…`) se llevan al repositorio
+   principal. Si el código actual de un símbolo no coincide con el que dejó la
+   última sesión, lo avisa.
+5. **Servidor LSP** (`huella-lsp`) y extensión de VS Code: hover con las
+   últimas ediciones del símbolo y `CodeLens` con su actividad. Un hilo indexa
+   en segundo plano y pide al editor refrescar los `CodeLens`.
 
 | Crate | Responsabilidad |
 | --- | --- |
-| `huella-core` | Modelo de dominio: ediciones, símbolos, resultado del anclaje. Sin dependencias de infraestructura |
+| `huella-core` | Modelo de dominio. Sin dependencias de infraestructura |
 | `huella-claude-code` | Adaptador de transcripciones de Claude Code |
-| `huella-anchoring` | Extracción de símbolos con tree-sitter y anclaje de ediciones |
+| `huella-anchoring` | Extracción de símbolos y anclaje de ediciones |
+| `huella-store` | Persistencia en SQLite |
+| `huella-engine` | Casos de uso: indexar y consultar |
+| `huella-lsp` | Servidor LSP |
 | `huella-cli` | Binario `huella` |
+| `extensions/vscode` | Extensión de VS Code (envoltorio del servidor) |
 
-Lenguajes con símbolos: TypeScript, TSX, JavaScript, Python y Rust. El resto
-de ficheros se anclan a nivel de fichero.
+Lenguajes con símbolos: TypeScript, TSX, JavaScript, Python y Rust.
+
+## Rendimiento
+
+Hover en un fichero de 1.205 líneas: p95 de 7,6 ms (mediana 5,3 ms) en
+compilación release. Indexar 17 transcripciones (≈140 MB, 1.021 ediciones)
+desde cero: 1 s; incremental: instantáneo.
+
+## Limitaciones conocidas
+
+- Solo se ven las ediciones hechas con las herramientas de edición del agente;
+  los cambios hechos por shell (`sed`, scripts) no aparecen.
+- Un símbolo renombrado no hereda la historia de su nombre anterior (el nombre
+  antiguo queda registrado como borrado).
+- Solo Claude Code; el resto de agentes llegan en la F3.
 
 ## Desarrollo
 
 ```sh
-cargo test                    # tests unitarios de todos los crates
+cargo test                    # tests de todos los crates, incluido el protocolo LSP
 cargo clippy --all-targets    # lints (pedantic activado en el workspace)
 cargo fmt
 ```
