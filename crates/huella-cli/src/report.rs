@@ -29,6 +29,8 @@ pub struct Summary {
     pub symbols_approximate: usize,
     pub module_only_exact: usize,
     pub module_only_approximate: usize,
+    /// Símbolos que dejaron de existir (borrados o renombrados).
+    pub removed_symbols: usize,
     pub with_syntax_errors: usize,
     pub unresolved: BTreeMap<String, usize>,
     pub by_language: BTreeMap<&'static str, LanguageStats>,
@@ -63,10 +65,16 @@ impl Summary {
             stats.anchored += usize::from(report.outcome.is_anchored());
         }
         match &report.outcome {
-            AnchorOutcome::Symbols { confidence: Confidence::Exact, .. } => self.symbols_exact += 1,
-            AnchorOutcome::Symbols { confidence: Confidence::Approximate, .. } => self.symbols_approximate += 1,
-            AnchorOutcome::ModuleOnly { confidence: Confidence::Exact } => self.module_only_exact += 1,
-            AnchorOutcome::ModuleOnly { confidence: Confidence::Approximate } => self.module_only_approximate += 1,
+            AnchorOutcome::Anchored(anchor) => {
+                self.removed_symbols += anchor.removed.len();
+                let counter = match (anchor.is_module_only(), anchor.confidence) {
+                    (false, Confidence::Exact) => &mut self.symbols_exact,
+                    (false, Confidence::Approximate) => &mut self.symbols_approximate,
+                    (true, Confidence::Exact) => &mut self.module_only_exact,
+                    (true, Confidence::Approximate) => &mut self.module_only_approximate,
+                };
+                *counter += 1;
+            }
             AnchorOutcome::FileOnly => self.file_only += 1,
             AnchorOutcome::NoChange => self.no_change += 1,
             AnchorOutcome::Unresolved { reason } => *self.unresolved.entry(reason.clone()).or_default() += 1,
@@ -124,6 +132,7 @@ impl Summary {
             "  solo nivel módulo: {} exactas + {} aproximadas",
             self.module_only_exact, self.module_only_approximate
         );
+        let _ = writeln!(out, "  símbolos borrados o renombrados: {}", self.removed_symbols);
         let _ = writeln!(out, "  sin resolver:      {}", self.unresolved_total());
         for (reason, count) in &self.unresolved {
             let _ = writeln!(out, "    · {reason}: {count}");

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use huella_core::{AfterState, AnchorOutcome, Confidence, FileEdit, Symbol};
+use huella_core::{AfterState, Anchor, AnchorOutcome, Confidence, FileEdit, Symbol};
 use similar::{DiffTag, TextDiff};
 
 use crate::language::Language;
@@ -65,18 +65,29 @@ pub fn anchor_edit(edit: &FileEdit, read_current: impl Fn(&Path) -> Option<Strin
         Err(error) => return unresolved(&error.to_string()),
     };
     let lines = Lines::new(&after);
-    let (symbols, also_module) = assign(&changes, &lines, &extraction.symbols);
-    let outcome = if symbols.is_empty() {
-        AnchorOutcome::ModuleOnly { confidence }
-    } else {
-        AnchorOutcome::Symbols { symbols, also_module, confidence }
+    let (symbols, module_level) = assign(&changes, &lines, &extraction.symbols);
+    let removed = match (&edit.before, confidence) {
+        (Some(before), Confidence::Exact) => removed_symbols(language, before, &extraction.symbols),
+        _ => Vec::new(),
     };
     AnchorReport {
         language: Some(language),
-        outcome,
+        outcome: AnchorOutcome::Anchored(Anchor { symbols, removed, module_level, confidence }),
         changed_lines: changed_line_ranges(&changes, lines.count()),
         has_syntax_errors: extraction.has_syntax_errors,
     }
+}
+
+/// Símbolos del fichero anterior que ya no existen tras la edición (borrados
+/// o renombrados). Sin el nombre antiguo, la historia de un símbolo que se
+/// renombra o elimina quedaría huérfana.
+fn removed_symbols(language: Language, before: &str, after_symbols: &[Symbol]) -> Vec<Symbol> {
+    let Ok(previous) = extract_symbols(language, before) else { return Vec::new() };
+    previous
+        .symbols
+        .into_iter()
+        .filter(|old| !after_symbols.iter().any(|new| new.qualified_name == old.qualified_name))
+        .collect()
 }
 
 /// Cambio en el fichero final, en índices de línea 0-based.
@@ -236,13 +247,17 @@ mod tests {
         anchor_edit(&edit("src/user.ts", before, AfterState::Known(after.into())), |_| None)
     }
 
+    fn anchor_of(report: &AnchorReport) -> &Anchor {
+        report.outcome.anchor().unwrap_or_else(|| panic!("se esperaba un anclaje, llegó {:?}", report.outcome))
+    }
+
     fn anchored_names(report: &AnchorReport) -> (Vec<String>, bool) {
-        match &report.outcome {
-            AnchorOutcome::Symbols { symbols, also_module, .. } => {
-                (symbols.iter().map(|s| s.qualified_name.clone()).collect(), *also_module)
-            }
-            other => panic!("se esperaban símbolos, llegó {other:?}"),
-        }
+        let anchor = anchor_of(report);
+        (anchor.symbols.iter().map(|s| s.qualified_name.clone()).collect(), anchor.module_level)
+    }
+
+    fn removed_names(report: &AnchorReport) -> Vec<String> {
+        anchor_of(report).removed.iter().map(|s| s.qualified_name.clone()).collect()
     }
 
     #[test]
@@ -251,14 +266,15 @@ mod tests {
         let report = anchor_known(Some(SERVICE), &after);
         assert_eq!(anchored_names(&report), (vec!["UserService.register".into()], false));
         assert_eq!(report.changed_lines, vec![(5, 5)]);
-        assert_eq!(report.outcome.confidence(), Some(Confidence::Exact));
+        assert_eq!(anchor_of(&report).confidence, Confidence::Exact);
     }
 
     #[test]
     fn import_change_is_module_level() {
         let after = SERVICE.replace("'./db'", "'./database'");
         let report = anchor_known(Some(SERVICE), &after);
-        assert!(matches!(report.outcome, AnchorOutcome::ModuleOnly { confidence: Confidence::Exact }));
+        assert!(anchor_of(&report).is_module_only());
+        assert!(anchor_of(&report).module_level);
     }
 
     #[test]
@@ -276,6 +292,15 @@ mod tests {
         let after = SERVICE.replace("\n  remove(id: string) {\n    return db.delete(id);\n  }\n", "");
         let report = anchor_known(Some(SERVICE), &after);
         assert_eq!(anchored_names(&report), (vec!["UserService".into()], false));
+        assert_eq!(removed_names(&report), vec!["UserService.remove"]);
+    }
+
+    #[test]
+    fn renaming_a_method_records_the_old_name_as_removed() {
+        let after = SERVICE.replace("remove(id: string)", "delete(id: string)");
+        let report = anchor_known(Some(SERVICE), &after);
+        assert_eq!(anchored_names(&report), (vec!["UserService.delete".into()], false));
+        assert_eq!(removed_names(&report), vec!["UserService.remove"]);
     }
 
     #[test]
@@ -310,7 +335,7 @@ mod tests {
         let fragment = AfterState::FragmentOnly("return db.delete(id);".into());
         let report = anchor_edit(&edit("src/user.ts", None, fragment), |_| Some(SERVICE.into()));
         assert_eq!(anchored_names(&report), (vec!["UserService.remove".into()], false));
-        assert_eq!(report.outcome.confidence(), Some(Confidence::Approximate));
+        assert_eq!(anchor_of(&report).confidence, Confidence::Approximate);
         assert_eq!(report.changed_lines, vec![(9, 9)]);
     }
 

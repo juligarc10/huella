@@ -106,15 +106,8 @@ pub enum Confidence {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AnchorOutcome {
-    /// La edición tocó estos símbolos (los más internos que contienen cada cambio).
-    Symbols {
-        symbols: Vec<Symbol>,
-        /// Además cambió código fuera de cualquier símbolo (imports, etc.).
-        also_module: bool,
-        confidence: Confidence,
-    },
-    /// Solo cambió código de nivel de módulo (imports, sentencias sueltas).
-    ModuleOnly { confidence: Confidence },
+    /// La edición se ancló a código.
+    Anchored(Anchor),
     /// Lenguaje o formato sin extracción de símbolos: se ancla al fichero.
     FileOnly,
     /// El contenido final es idéntico al inicial.
@@ -123,16 +116,35 @@ pub enum AnchorOutcome {
     Unresolved { reason: String },
 }
 
+/// Código que tocó una edición.
+#[derive(Debug, Clone, Serialize)]
+pub struct Anchor {
+    /// Símbolos más internos que contienen cada cambio, en el fichero final.
+    pub symbols: Vec<Symbol>,
+    /// Símbolos que existían antes de la edición y ya no existen.
+    pub removed: Vec<Symbol>,
+    /// Cambió código fuera de cualquier símbolo (imports, sentencias sueltas).
+    pub module_level: bool,
+    pub confidence: Confidence,
+}
+
 impl AnchorOutcome {
     /// La edición quedó anclada a código (símbolo o módulo).
     pub fn is_anchored(&self) -> bool {
-        matches!(self, Self::Symbols { .. } | Self::ModuleOnly { .. })
+        matches!(self, Self::Anchored(_))
     }
 
-    pub fn confidence(&self) -> Option<Confidence> {
+    pub fn anchor(&self) -> Option<&Anchor> {
         match self {
-            Self::Symbols { confidence, .. } | Self::ModuleOnly { confidence } => Some(*confidence),
+            Self::Anchored(anchor) => Some(anchor),
             _ => None,
         }
+    }
+}
+
+impl Anchor {
+    /// Solo cambió código de módulo: ningún símbolo tocado ni borrado.
+    pub fn is_module_only(&self) -> bool {
+        self.symbols.is_empty() && self.removed.is_empty()
     }
 }
