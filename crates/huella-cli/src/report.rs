@@ -22,6 +22,8 @@ pub struct Summary {
     pub rewritten: usize,
     pub replaced: usize,
     pub user_modified: usize,
+    pub with_prompt: usize,
+    pub with_rationale: usize,
     /// Ediciones de ficheros sin extracción de símbolos (markdown, json, css…).
     pub file_only: usize,
     pub no_change: usize,
@@ -58,6 +60,8 @@ impl Summary {
             EditKind::Replace => self.replaced += 1,
         }
         self.user_modified += usize::from(edit.user_modified);
+        self.with_prompt += usize::from(edit.context.prompt.is_some());
+        self.with_rationale += usize::from(edit.context.rationale.is_some());
         self.with_syntax_errors += usize::from(report.has_syntax_errors);
         if let Some(language) = report.language {
             let stats = self.by_language.entry(language.name()).or_default();
@@ -115,6 +119,11 @@ impl Summary {
             out,
             "Ediciones: {} (nuevas {}, reescritas {}, reemplazos {}; modificadas por el usuario {})",
             self.edits, self.created, self.rewritten, self.replaced, self.user_modified
+        );
+        let _ = writeln!(
+            out,
+            "Con contexto: petición {} · explicación del agente {}",
+            self.with_prompt, self.with_rationale
         );
         if self.unknown_edit_shapes > 0 {
             let _ = writeln!(out, "Resultados de edición con forma desconocida: {}", self.unknown_edit_shapes);
@@ -191,6 +200,7 @@ mod tests {
             before: before.map(str::to_owned),
             after,
             user_modified: false,
+            context: huella_core::EditContext::default(),
         }
     }
 

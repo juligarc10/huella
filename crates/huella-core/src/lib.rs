@@ -53,6 +53,17 @@ pub struct FileEdit {
     pub after: AfterState,
     /// El usuario modificó la propuesta del agente antes de aceptarla.
     pub user_modified: bool,
+    pub context: EditContext,
+}
+
+/// Por qué se hizo la edición, tal como quedó en la conversación. Es el
+/// contexto que se puede mostrar sin llamar a ningún modelo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EditContext {
+    /// Lo que pidió la persona en el turno que llevó a la edición.
+    pub prompt: Option<String>,
+    /// Lo que explicó el agente justo antes de editar.
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

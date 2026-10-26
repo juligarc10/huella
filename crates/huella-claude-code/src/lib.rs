@@ -7,10 +7,10 @@
 //! cambia entre versiones, por eso todo lo desconocido se ignora y se cuenta.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use huella_core::{AfterState, EditKind, EditOrigin, FileEdit};
+use huella_core::{AfterState, EditContext, EditKind, EditOrigin, FileEdit};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -46,7 +46,20 @@ impl ParseStats {
 pub struct ParsedTranscript {
     pub edits: Vec<FileEdit>,
     pub stats: ParseStats,
+    /// Dónde seguir leyendo la próxima vez.
+    pub resume: ReadState,
 }
+
+/// Punto de lectura de una transcripción: byte siguiente a la última línea
+/// completa y el contexto de conversación vigente en ese punto.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReadState {
+    pub offset: u64,
+    pub context: EditContext,
+}
+
+/// Longitud máxima guardada de una petición o explicación.
+const MAX_CONTEXT_CHARS: usize = 2000;
 
 /// Busca todas las transcripciones `.jsonl` bajo `root`, ordenadas por ruta.
 ///
@@ -76,13 +89,35 @@ pub fn discover_transcripts(root: &Path) -> Result<Vec<PathBuf>, TranscriptError
 /// Si el fichero no se puede leer. Las líneas que no se entienden no son un
 /// error: se cuentan en [`ParseStats`].
 pub fn read_transcript(path: &Path) -> Result<ParsedTranscript, TranscriptError> {
+    read_transcript_from(path, &ReadState::default())
+}
+
+/// Lee una transcripción a partir de `from`, para indexar solo lo nuevo.
+///
+/// Una última línea sin salto de línea puede estar escribiéndose todavía: no se
+/// consume y se leerá entera la próxima vez.
+///
+/// # Errors
+/// Si el fichero no se puede abrir o leer.
+pub fn read_transcript_from(path: &Path, from: &ReadState) -> Result<ParsedTranscript, TranscriptError> {
     let io_error = |source| TranscriptError::Io { path: path.to_path_buf(), source };
-    let reader = BufReader::new(File::open(path).map_err(io_error)?);
-    let mut parsed = ParsedTranscript::default();
-    for line in reader.lines() {
-        let line = line.map_err(io_error)?;
-        parse_line(&line, &mut parsed);
+    let mut file = File::open(path).map_err(io_error)?;
+    file.seek(SeekFrom::Start(from.offset)).map_err(io_error)?;
+    let mut reader = BufReader::new(file);
+    let mut parser = Parser { parsed: ParsedTranscript::default(), context: from.context.clone() };
+    let mut offset = from.offset;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(io_error)?;
+        if read == 0 || !line.ends_with('\n') {
+            break;
+        }
+        offset += read as u64;
+        parser.parse_line(&line);
     }
+    let Parser { mut parsed, context } = parser;
+    parsed.resume = ReadState { offset, context };
     Ok(parsed)
 }
 
@@ -90,6 +125,10 @@ pub fn read_transcript(path: &Path) -> Result<ParsedTranscript, TranscriptError>
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawEvent {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    is_meta: Option<bool>,
+    message: Option<Value>,
     uuid: Option<String>,
     session_id: Option<String>,
     timestamp: Option<String>,
@@ -97,36 +136,113 @@ struct RawEvent {
     tool_use_result: Option<Value>,
 }
 
-fn parse_line(line: &str, parsed: &mut ParsedTranscript) {
-    if line.trim().is_empty() {
-        return;
-    }
-    parsed.stats.lines += 1;
-    let Ok(event) = serde_json::from_str::<RawEvent>(line) else {
-        parsed.stats.invalid_json += 1;
-        return;
-    };
-    // Los resultados de herramientas fallidas son cadenas de error: no son ediciones.
-    let Some(Value::Object(result)) = &event.tool_use_result else { return };
-    let Some(file_path) = str_field(result, "filePath") else { return };
+/// Lector línea a línea que sigue el hilo de la conversación para saber qué
+/// se pidió y qué explicó el agente antes de cada edición.
+struct Parser {
+    parsed: ParsedTranscript,
+    context: EditContext,
+}
 
-    let origin = EditOrigin {
-        agent: AGENT,
-        session_id: event.session_id.clone().unwrap_or_default(),
-        event_id: event.uuid.clone().unwrap_or_default(),
-        timestamp: event.timestamp.clone(),
-        cwd: event.cwd.clone(),
-    };
-    match edit_from_result(result, origin, PathBuf::from(file_path)) {
-        Some(edit) => {
-            parsed.stats.edits += 1;
-            parsed.edits.push(edit);
+impl Parser {
+    fn parse_line(&mut self, line: &str) {
+        if line.trim().is_empty() {
+            return;
         }
-        None => parsed.stats.unknown_edit_shapes += 1,
+        self.parsed.stats.lines += 1;
+        let Ok(event) = serde_json::from_str::<RawEvent>(line) else {
+            self.parsed.stats.invalid_json += 1;
+            return;
+        };
+        self.track_conversation(&event);
+
+        // Los resultados de herramientas fallidas son cadenas de error: no son ediciones.
+        let Some(Value::Object(result)) = &event.tool_use_result else { return };
+        let Some(file_path) = str_field(result, "filePath") else { return };
+        let origin = EditOrigin {
+            agent: AGENT,
+            session_id: event.session_id.clone().unwrap_or_default(),
+            event_id: event.uuid.clone().unwrap_or_default(),
+            timestamp: event.timestamp.clone(),
+            cwd: event.cwd.clone(),
+        };
+        match edit_from_result(result, origin, PathBuf::from(file_path), self.context.clone()) {
+            Some(edit) => {
+                self.parsed.stats.edits += 1;
+                self.parsed.edits.push(edit);
+            }
+            None => self.parsed.stats.unknown_edit_shapes += 1,
+        }
+    }
+
+    /// Un mensaje de la persona abre un turno nuevo; el último texto del
+    /// asistente es la explicación de lo que va a hacer a continuación.
+    fn track_conversation(&mut self, event: &RawEvent) {
+        if event.is_meta == Some(true) {
+            return;
+        }
+        let Some(content) = event.message.as_ref().and_then(|message| message.get("content")) else { return };
+        match event.kind.as_deref() {
+            Some("user") => {
+                if let Some(prompt) = user_prompt(content) {
+                    self.context = EditContext { prompt: Some(truncate(&prompt)), rationale: None };
+                }
+            }
+            Some("assistant") => {
+                if let Some(text) = last_text_block(content) {
+                    self.context.rationale = Some(truncate(&text));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-fn edit_from_result(result: &Map<String, Value>, origin: EditOrigin, path: PathBuf) -> Option<FileEdit> {
+/// Texto escrito por la persona. Los resultados de herramientas y las salidas
+/// de comandos o avisos internos (empiezan por `<`) no cuentan.
+fn user_prompt(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            if blocks.iter().any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")) {
+                return None;
+            }
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect();
+            texts.join("\n")
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
+}
+
+fn last_text_block(content: &Value) -> Option<String> {
+    content
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .rfind(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn truncate(text: &str) -> String {
+    match text.char_indices().nth(MAX_CONTEXT_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
+fn edit_from_result(
+    result: &Map<String, Value>,
+    origin: EditOrigin,
+    path: PathBuf,
+    context: EditContext,
+) -> Option<FileEdit> {
     let before = str_field(result, "originalFile").map(str::to_owned);
     let user_modified = result.get("userModified").and_then(Value::as_bool).unwrap_or(false);
 
@@ -138,7 +254,7 @@ fn edit_from_result(result: &Map<String, Value>, origin: EditOrigin, path: PathB
         let after = apply_replacements(before.as_deref(), &replacements(result)?);
         (EditKind::Replace, before, after)
     };
-    Some(FileEdit { origin, path, kind, before, after, user_modified })
+    Some(FileEdit { origin, path, kind, before, after, user_modified, context })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,11 +315,21 @@ mod tests {
     use super::*;
 
     fn parse(lines: &[&str]) -> ParsedTranscript {
-        let mut parsed = ParsedTranscript::default();
+        let mut parser = Parser { parsed: ParsedTranscript::default(), context: EditContext::default() };
         for line in lines {
-            parse_line(line, &mut parsed);
+            parser.parse_line(line);
         }
-        parsed
+        parser.parsed
+    }
+
+    fn message_line(kind: &str, content: &Value) -> String {
+        serde_json::json!({"type": kind, "message": {"role": kind, "content": content}}).to_string()
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("huella-cc-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     fn edit_line(result: &Value) -> String {
@@ -291,8 +417,65 @@ mod tests {
     }
 
     #[test]
+    fn edits_carry_the_prompt_and_the_agent_rationale() {
+        let write = edit_line(&serde_json::json!({"type": "create", "filePath": "/repo/a.ts", "content": "x"}));
+        let lines = [
+            message_line("user", &serde_json::json!("Añade validación del email")),
+            message_line(
+                "assistant",
+                &serde_json::json!([{"type": "text", "text": "Valido el email antes de guardar."}, {"type": "tool_use"}]),
+            ),
+            message_line("user", &serde_json::json!([{"type": "tool_result", "content": "ok"}])),
+            message_line("user", &serde_json::json!("<command-name>/clear</command-name>")),
+            write.clone(),
+            message_line("user", &serde_json::json!([{"type": "text", "text": "Ahora los tests"}])),
+            write,
+        ];
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let edits = parse(&lines).edits;
+        assert_eq!(
+            edits[0].context,
+            EditContext {
+                prompt: Some("Añade validación del email".into()),
+                rationale: Some("Valido el email antes de guardar.".into())
+            }
+        );
+        assert_eq!(edits[1].context, EditContext { prompt: Some("Ahora los tests".into()), rationale: None });
+    }
+
+    #[test]
+    fn long_context_is_truncated_on_a_char_boundary() {
+        let long = "ñ".repeat(MAX_CONTEXT_CHARS + 10);
+        let truncated = truncate(&long);
+        assert_eq!(truncated.chars().count(), MAX_CONTEXT_CHARS + 1);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn resumes_reading_without_consuming_a_partial_line() {
+        let dir = temp_dir("resume");
+        let path = dir.join("s.jsonl");
+        let prompt = message_line("user", &serde_json::json!("Primera petición"));
+        let edit = edit_line(&serde_json::json!({"type": "create", "filePath": "/repo/a.ts", "content": "x"}));
+        let (complete, partial) = edit.split_at(20);
+        std::fs::write(&path, format!("{prompt}\n{complete}")).unwrap();
+
+        let first = read_transcript_from(&path, &ReadState::default()).unwrap();
+        assert!(first.edits.is_empty());
+        assert_eq!(first.resume.offset, prompt.len() as u64 + 1);
+        assert_eq!(first.resume.context.prompt.as_deref(), Some("Primera petición"));
+
+        std::fs::write(&path, format!("{prompt}\n{complete}{partial}\n")).unwrap();
+        let second = read_transcript_from(&path, &first.resume).unwrap();
+        assert_eq!(second.edits.len(), 1);
+        assert_eq!(second.edits[0].context.prompt.as_deref(), Some("Primera petición"));
+        assert_eq!(second.resume.offset, std::fs::metadata(&path).unwrap().len());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn reads_fixture_file_and_discovers_it() {
-        let dir = std::env::temp_dir().join(format!("huella-cc-{}", std::process::id()));
+        let dir = temp_dir("discover");
         let project = dir.join("-repo");
         std::fs::create_dir_all(&project).unwrap();
         let line = edit_line(&serde_json::json!({

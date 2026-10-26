@@ -240,6 +240,7 @@ mod tests {
             before: before.map(str::to_owned),
             after,
             user_modified: false,
+            context: huella_core::EditContext::default(),
         }
     }
 
