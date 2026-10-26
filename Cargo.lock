@@ -447,6 +447,7 @@ dependencies = [
  "huella-anchoring",
  "huella-claude-code",
  "huella-core",
+ "huella-decisions",
  "huella-engine",
  "huella-lsp",
  "huella-store",
@@ -480,7 +481,9 @@ dependencies = [
  "huella-anchoring",
  "huella-claude-code",
  "huella-core",
+ "huella-decisions",
  "huella-store",
+ "serde_json",
  "thiserror",
 ]
 

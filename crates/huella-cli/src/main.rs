@@ -13,7 +13,10 @@ use clap::{Parser, Subcommand};
 use huella_anchoring::{AnchorReport, Language, anchor_edit, extract_symbols};
 use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
-use huella_store::Store;
+use huella_decisions::DecisionExtractor;
+use huella_decisions::anthropic::Anthropic;
+use huella_decisions::openai::OpenAiCompatible;
+use huella_store::{DecisionFilter, Store};
 use serde::Serialize;
 
 use crate::report::Summary;
@@ -65,6 +68,11 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Decisiones de proyecto extraídas de las conversaciones.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsCommand,
+    },
     /// Servidor LSP para el editor (hover y `CodeLens`), por stdin/stdout.
     Lsp {
         /// Carpeta de transcripciones a indexar en segundo plano (por defecto ~/.claude/projects).
@@ -74,6 +82,49 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         index_every: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum DecisionsCommand {
+    /// Extrae con un modelo las decisiones de las sesiones nuevas o que han crecido.
+    Extract {
+        /// Proveedor del modelo.
+        #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
+        provider: Provider,
+        /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
+        #[arg(long)]
+        model: Option<String>,
+        /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Número máximo de sesiones a procesar.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Lista las decisiones vigentes.
+    List {
+        /// Solo las que mencionan esta tecnología o concepto (`rust`, `sqlite`…).
+        #[arg(long)]
+        entity: Option<String>,
+        /// Solo las de este proyecto (ruta del repositorio).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Incluye las reemplazadas, rechazadas y solo propuestas.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Provider {
+    /// API de Claude (`ANTHROPIC_API_KEY`).
+    Anthropic,
+    /// Cualquier servidor con la API de chat de `OpenAI`: Ollama, LM Studio, vLLM…
+    /// (clave opcional en `HUELLA_LLM_API_KEY`).
+    OpenaiCompatible,
 }
 
 fn main() -> ExitCode {
@@ -96,6 +147,17 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
+        Command::Decisions { action: DecisionsCommand::Extract { provider, model, base_url, limit, projects } } => {
+            let extractor = build_extractor(provider, model, base_url)?;
+            extract(&mut open_store(cli.db)?, &projects_dir(projects)?, extractor.as_ref(), limit)
+        }
+        Command::Decisions { action: DecisionsCommand::List { entity, project, all } } => {
+            let project = project
+                .map(|path| fs::canonicalize(&path).unwrap_or(path))
+                .map(|path| huella_engine::normalize_path(&path, None));
+            let filter = DecisionFilter { entity, project, include_inactive: all };
+            list_decisions(&open_store(cli.db)?, &filter)
+        }
         Command::Lsp { projects, index_every } => {
             let db = cli
                 .db
@@ -156,6 +218,81 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
         Some(memory) => print!("{}", huella_engine::render_markdown(&memory, limit)),
         None => println!("Huella no recuerda ninguna sesión que tocara {file}:{line}."),
     }
+    Ok(())
+}
+
+fn build_extractor(
+    provider: Provider,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Result<Box<dyn DecisionExtractor>> {
+    Ok(match provider {
+        Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
+        Provider::OpenaiCompatible => {
+            let model = model.context("con openai-compatible indica el modelo con --model (p. ej. qwen2.5:7b)")?;
+            Box::new(OpenAiCompatible::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+        }
+    })
+}
+
+fn extract(store: &mut Store, projects: &Path, extractor: &dyn DecisionExtractor, limit: Option<usize>) -> Result<()> {
+    let started = Instant::now();
+    println!("Extrayendo decisiones con {}…", extractor.id());
+    let report = huella_engine::extract_decisions(store, projects, extractor, limit, |conversation| {
+        let first =
+            conversation.turns.first().map(|turn| turn.text.split_whitespace().take(8).collect::<Vec<_>>().join(" "));
+        println!(
+            "  · sesión {} ({} mensajes): {}…",
+            &conversation.session_id[..8.min(conversation.session_id.len())],
+            conversation.turns.len(),
+            first.unwrap_or_default()
+        );
+    })?;
+    println!(
+        "Hecho en {:.0} s: {} sesiones extraídas ({} llamadas al modelo), {} sin cambios, {} decisiones nuevas",
+        started.elapsed().as_secs_f64(),
+        report.extracted,
+        report.calls,
+        report.unchanged,
+        report.decisions
+    );
+    for failure in &report.failures {
+        eprintln!("aviso: {failure}");
+    }
+    if !report.failures.is_empty() {
+        bail!("{} sesiones fallaron; se reintentarán en la próxima extracción", report.failures.len());
+    }
+    Ok(())
+}
+
+fn list_decisions(store: &Store, filter: &DecisionFilter) -> Result<()> {
+    let decisions = store.decisions(filter)?;
+    if decisions.is_empty() {
+        println!("No hay decisiones que mostrar. Extráelas con `huella decisions extract`.");
+        return Ok(());
+    }
+    for decision in &decisions {
+        let date = decision.decided_at.as_deref().and_then(|at| at.get(..10)).unwrap_or("sin fecha");
+        let status = match (decision.status.as_str(), &decision.superseded_by) {
+            ("superseded", Some(by)) => format!(" · reemplazada por «{by}»"),
+            ("accepted", _) => String::new(),
+            (other, _) => format!(" · {other}"),
+        };
+        println!("● {} — {date}{status}", decision.title);
+        if !decision.entities.is_empty() {
+            println!("  [{}]", decision.entities.join(", "));
+        }
+        println!("  Decisión: {}", decision.decision);
+        println!("  Por qué: {}", decision.rationale);
+        for alternative in &decision.alternatives {
+            println!("  Descartado: {alternative}");
+        }
+        if let Some(project) = &decision.project {
+            println!("  Proyecto: {project}");
+        }
+        println!();
+    }
+    println!("{} decisiones", decisions.len());
     Ok(())
 }
 
