@@ -66,6 +66,15 @@ pub struct EditContext {
     pub rationale: Option<String>,
 }
 
+/// Punto de lectura de una transcripción: byte siguiente a la última línea
+/// completa y el contexto de conversación vigente en ese punto. Permite
+/// indexar solo lo nuevo sin perder qué se estaba pidiendo.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TranscriptCursor {
+    pub offset: u64,
+    pub context: EditContext,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {

@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use huella_core::{AfterState, EditContext, EditKind, EditOrigin, FileEdit};
+use huella_core::{AfterState, EditContext, EditKind, EditOrigin, FileEdit, TranscriptCursor};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -47,15 +47,7 @@ pub struct ParsedTranscript {
     pub edits: Vec<FileEdit>,
     pub stats: ParseStats,
     /// Dónde seguir leyendo la próxima vez.
-    pub resume: ReadState,
-}
-
-/// Punto de lectura de una transcripción: byte siguiente a la última línea
-/// completa y el contexto de conversación vigente en ese punto.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ReadState {
-    pub offset: u64,
-    pub context: EditContext,
+    pub resume: TranscriptCursor,
 }
 
 /// Longitud máxima guardada de una petición o explicación.
@@ -89,7 +81,7 @@ pub fn discover_transcripts(root: &Path) -> Result<Vec<PathBuf>, TranscriptError
 /// Si el fichero no se puede leer. Las líneas que no se entienden no son un
 /// error: se cuentan en [`ParseStats`].
 pub fn read_transcript(path: &Path) -> Result<ParsedTranscript, TranscriptError> {
-    read_transcript_from(path, &ReadState::default())
+    read_transcript_from(path, &TranscriptCursor::default())
 }
 
 /// Lee una transcripción a partir de `from`, para indexar solo lo nuevo.
@@ -99,7 +91,7 @@ pub fn read_transcript(path: &Path) -> Result<ParsedTranscript, TranscriptError>
 ///
 /// # Errors
 /// Si el fichero no se puede abrir o leer.
-pub fn read_transcript_from(path: &Path, from: &ReadState) -> Result<ParsedTranscript, TranscriptError> {
+pub fn read_transcript_from(path: &Path, from: &TranscriptCursor) -> Result<ParsedTranscript, TranscriptError> {
     let io_error = |source| TranscriptError::Io { path: path.to_path_buf(), source };
     let mut file = File::open(path).map_err(io_error)?;
     file.seek(SeekFrom::Start(from.offset)).map_err(io_error)?;
@@ -117,7 +109,7 @@ pub fn read_transcript_from(path: &Path, from: &ReadState) -> Result<ParsedTrans
         parser.parse_line(&line);
     }
     let Parser { mut parsed, context } = parser;
-    parsed.resume = ReadState { offset, context };
+    parsed.resume = TranscriptCursor { offset, context };
     Ok(parsed)
 }
 
@@ -460,7 +452,7 @@ mod tests {
         let (complete, partial) = edit.split_at(20);
         std::fs::write(&path, format!("{prompt}\n{complete}")).unwrap();
 
-        let first = read_transcript_from(&path, &ReadState::default()).unwrap();
+        let first = read_transcript_from(&path, &TranscriptCursor::default()).unwrap();
         assert!(first.edits.is_empty());
         assert_eq!(first.resume.offset, prompt.len() as u64 + 1);
         assert_eq!(first.resume.context.prompt.as_deref(), Some("Primera petición"));
