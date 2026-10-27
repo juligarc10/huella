@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use huella_core::{AnchorOutcome, Confidence, EditContext, EditKind, FileEdit, SymbolKind, TranscriptCursor};
+use huella_core::{
+    AnchorOutcome, Confidence, EditContext, EditKind, FileEdit, Fingerprint, SymbolKind, TranscriptCursor,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +133,18 @@ const MIGRATIONS: &[&str] = &[
         created_at      TEXT NOT NULL
     );
 ",
+    // Huella del cuerpo independiente del nombre (renombrados y movimientos).
+    // Se vuelven a leer las transcripciones desde el principio para rellenarla
+    // en las ediciones ya indexadas que aún tienen transcripción.
+    r"
+    ALTER TABLE edit_symbol ADD COLUMN shape_hash TEXT;
+    ALTER TABLE edit_symbol ADD COLUMN sketch BLOB;
+    ALTER TABLE edit_symbol ADD COLUMN tokens INTEGER;
+    ALTER TABLE edit_symbol ADD COLUMN own_name TEXT;
+    CREATE INDEX edit_symbol_by_shape ON edit_symbol(shape_hash);
+    CREATE INDEX edit_symbol_by_own_name ON edit_symbol(own_name);
+    UPDATE transcript SET offset = 0, prompt = NULL, rationale = NULL;
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -160,7 +174,22 @@ pub struct HistoryEntry {
     pub confidence: Option<String>,
     /// Hash del cuerpo del símbolo justo después de esa edición.
     pub body_hash: String,
+    /// Hash de su forma sin el nombre, si se conoce.
+    pub shape_hash: Option<String>,
     pub context: EditContext,
+}
+
+/// Último estado conocido de un símbolo anclado en una ruta: lo que dejó la
+/// última edición que lo tocó o lo borró.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorState {
+    pub path: String,
+    pub qualified_name: String,
+    pub role: SymbolRole,
+    pub edit_id: String,
+    pub at: Option<String>,
+    /// Vacía en ediciones indexadas antes de existir y sin transcripción.
+    pub fingerprint: Fingerprint,
 }
 
 /// Resumen de la historia de un símbolo para mostrarlo sobre él.
@@ -310,6 +339,23 @@ impl Store {
             tx.pragma_update(None, "user_version", version)?;
         }
         tx.commit()?;
+        self.backfill_own_names()
+    }
+
+    /// Nombre propio de los símbolos anclados antes de existir la columna,
+    /// también los de transcripciones que ya no están.
+    fn backfill_own_names(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare("SELECT rowid, qualified_name FROM edit_symbol WHERE own_name IS NULL")?;
+            let pending: Vec<(i64, String)> =
+                select.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            let mut update = tx.prepare("UPDATE edit_symbol SET own_name = ?2 WHERE rowid = ?1")?;
+            for (rowid, qualified_name) in &pending {
+                update.execute(params![rowid, own_name(qualified_name)])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -362,7 +408,8 @@ impl Store {
     /// Si falla la consulta.
     pub fn history(&self, path: &str, qualified_name: &str) -> Result<Vec<HistoryEntry>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT e.id, e.session_id, e.at, s.role, e.kind, e.confidence, s.body_hash, e.prompt, e.rationale
+            "SELECT e.id, e.session_id, e.at, s.role, e.kind, e.confidence, s.body_hash, e.prompt, e.rationale,
+                    s.shape_hash
              FROM edit_symbol s JOIN edit e ON e.id = s.edit_id
              WHERE e.path = ?1 AND s.qualified_name = ?2
              ORDER BY e.at DESC, e.id DESC",
@@ -372,14 +419,69 @@ impl Store {
                 edit_id: row.get(0)?,
                 session_id: row.get(1)?,
                 at: row.get(2)?,
-                role: if row.get::<_, String>(3)? == "removed" { SymbolRole::Removed } else { SymbolRole::Touched },
+                role: role_from(&row.get::<_, String>(3)?),
                 kind: row.get(4)?,
                 confidence: row.get(5)?,
                 body_hash: row.get(6)?,
+                shape_hash: row.get(9)?,
                 context: EditContext { prompt: row.get(7)?, rationale: row.get(8)? },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Último estado de cada símbolo anclado en un fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_in(&self, path: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "e.path = ?1", &[&path])
+    }
+
+    /// Último estado de todos los símbolos anclados.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn all_anchors(&self) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "1 = 1", &[])
+    }
+
+    /// Último estado de los símbolos que alguna vez tuvieron esta forma, en
+    /// cualquier fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_with_shape(&self, shape_hash: &str) -> Result<Vec<AnchorState>> {
+        let mut found = latest_anchors(&self.conn, "s.shape_hash = ?1", &[&shape_hash])?;
+        // Se filtró por la forma de alguna edición, no necesariamente la última.
+        found.retain(|state| state.fingerprint.shape_hash == shape_hash);
+        Ok(found)
+    }
+
+    /// Último estado de los símbolos cuyo nombre propio (el último tramo del
+    /// cualificado) es `name`, en cualquier fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_named(&self, name: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "s.own_name = ?1", &[&name])
+    }
+
+    /// Último estado de los símbolos de ficheros con este nombre (`user.ts`)
+    /// en cualquier carpeta.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_in_files_named(&self, file_name: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "(e.path = ?1 OR e.path LIKE '%/' || ?1)", &[&file_name])
+    }
+
+    /// Símbolos que borró una edición, con su huella de antes de borrarlos.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn removed_by(&self, edit_id: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "s.edit_id = ?1 AND s.role = 'removed'", &[&edit_id])
     }
 
     /// Actividad de cada símbolo de un fichero, por nombre cualificado.
@@ -745,17 +847,35 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
             serde_json::to_string(indexed.changed_lines).unwrap_or_else(|_| "[]".to_owned()),
         ],
     )?;
-    // Edición ya indexada antes: sus símbolos también lo están.
+    let Some(anchor) = anchor else { return Ok(()) };
+    let roles = anchor.symbols.iter().map(|s| ("touched", s)).chain(anchor.removed.iter().map(|s| ("removed", s)));
+    // Edición ya indexada antes: solo se completa la huella si le falta, sin
+    // añadir símbolos que el anclaje actual nombre de otra forma.
     if inserted == 0 {
+        let mut backfill = tx.prepare_cached(
+            "UPDATE edit_symbol SET shape_hash = ?4, sketch = ?5, tokens = ?6
+             WHERE edit_id = ?1 AND role = ?2 AND qualified_name = ?3 AND shape_hash IS NULL",
+        )?;
+        for (role, symbol) in roles {
+            let fingerprint = &symbol.fingerprint;
+            backfill.execute(params![
+                origin.event_id,
+                role,
+                symbol.qualified_name,
+                fingerprint.shape_hash,
+                fingerprint.sketch_bytes(),
+                i64::try_from(fingerprint.tokens).unwrap_or(i64::MAX)
+            ])?;
+        }
         return Ok(());
     }
-    let Some(anchor) = anchor else { return Ok(()) };
     let mut insert_symbol = tx.prepare_cached(
-        "INSERT OR IGNORE INTO edit_symbol (edit_id, role, qualified_name, kind, start_line, end_line, body_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR IGNORE INTO edit_symbol (edit_id, role, qualified_name, kind, start_line, end_line, body_hash,
+                                            shape_hash, sketch, tokens, own_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
-    let roles = anchor.symbols.iter().map(|s| ("touched", s)).chain(anchor.removed.iter().map(|s| ("removed", s)));
     for (role, symbol) in roles {
+        let fingerprint = &symbol.fingerprint;
         insert_symbol.execute(params![
             origin.event_id,
             role,
@@ -763,10 +883,62 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
             symbol_kind_name(symbol.kind),
             i64::try_from(symbol.start_line).unwrap_or(i64::MAX),
             i64::try_from(symbol.end_line).unwrap_or(i64::MAX),
-            symbol.body_hash
+            symbol.body_hash,
+            fingerprint.shape_hash,
+            fingerprint.sketch_bytes(),
+            i64::try_from(fingerprint.tokens).unwrap_or(i64::MAX),
+            own_name(&symbol.qualified_name)
         ])?;
     }
     Ok(())
+}
+
+/// Último tramo del nombre cualificado: `UserService.register` → `register`.
+fn own_name(qualified_name: &str) -> &str {
+    qualified_name.rsplit(['.', ':']).next().unwrap_or(qualified_name)
+}
+
+/// Última aparición de cada símbolo entre las filas de `edit_symbol` que
+/// cumplen `filter` (sobre `s` y `e`), con `params`.
+fn latest_anchors(conn: &Connection, filter: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<AnchorState>> {
+    let sql = format!(
+        "SELECT e.path, s.qualified_name, s.role, e.id, e.at, s.shape_hash, s.sketch, s.tokens
+         FROM edit_symbol s JOIN edit e ON e.id = s.edit_id
+         WHERE {filter}
+         ORDER BY e.at DESC, e.id DESC"
+    );
+    let mut statement = conn.prepare_cached(&sql)?;
+    let rows = statement.query_map(params, |row| {
+        Ok(AnchorState {
+            path: row.get(0)?,
+            qualified_name: row.get(1)?,
+            role: role_from(&row.get::<_, String>(2)?),
+            edit_id: row.get(3)?,
+            at: row.get(4)?,
+            fingerprint: fingerprint_from(row.get(5)?, row.get::<_, Option<Vec<u8>>>(6)?.as_deref(), row.get(7)?),
+        })
+    })?;
+    let mut seen = std::collections::HashSet::new();
+    let mut latest = Vec::new();
+    for state in rows {
+        let state = state?;
+        if seen.insert((state.path.clone(), state.qualified_name.clone())) {
+            latest.push(state);
+        }
+    }
+    Ok(latest)
+}
+
+fn role_from(role: &str) -> SymbolRole {
+    if role == "removed" { SymbolRole::Removed } else { SymbolRole::Touched }
+}
+
+fn fingerprint_from(shape_hash: Option<String>, sketch: Option<&[u8]>, tokens: Option<i64>) -> Fingerprint {
+    Fingerprint {
+        shape_hash: shape_hash.unwrap_or_default(),
+        sketch: sketch.map(Fingerprint::sketch_from_bytes).unwrap_or_default(),
+        tokens: tokens.and_then(|n| usize::try_from(n).ok()).unwrap_or_default(),
+    }
 }
 
 fn kind_name(kind: EditKind) -> &'static str {
@@ -816,6 +988,7 @@ mod tests {
             start_line: 1,
             end_line: 3,
             body_hash: hash.into(),
+            fingerprint: huella_core::Fingerprint::default(),
             byte_range: 0..10,
             depth: 1,
         }

@@ -37,6 +37,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Mide cuánta memoria sobrevive a refactors hechos fuera de las sesiones
+    /// (renombrar, mover), aplicados en memoria a los anclajes reales.
+    Refactors {
+        /// Anclajes vivos a probar como mucho, repartidos por todos los ficheros.
+        #[arg(long, default_value_t = 600)]
+        limit: usize,
+    },
     /// Ancla todas las ediciones de las transcripciones de Claude Code y mide la tasa de anclaje.
     Scan {
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
@@ -253,6 +260,7 @@ fn run(cli: Cli) -> Result<()> {
             scan(&projects, json.as_deref(), sample)
         }
         Command::Symbols { file } => print_symbols(&file),
+        Command::Refactors { limit } => refactors(&open_store(cli.db)?, limit),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
@@ -426,6 +434,43 @@ fn first_pending(
         .iter()
         .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// `huella refactors`: el criterio de salida de la F3.
+fn refactors(store: &huella_store::Store, limit: usize) -> Result<()> {
+    use huella_engine::refactor_bench::{Refactor, ratio};
+    let started = std::time::Instant::now();
+    let report = huella_engine::refactor_bench::refactor_benchmark(store, limit)?;
+    println!("Anclajes vivos probados: {} ({:.1} s)\n", report.samples, started.elapsed().as_secs_f64());
+    for refactor in Refactor::ALL {
+        let Some(tally) = report.by_refactor.get(&refactor) else { continue };
+        println!(
+            "  {:<34} {:>5} de {:>5}  {:>5.1} %",
+            refactor.label(),
+            tally.survived,
+            tally.applicable,
+            100.0 * ratio(tally.survived, tally.applicable)
+        );
+        for lost in &tally.lost_examples {
+            println!("      perdido: {lost}");
+        }
+    }
+    let survival = report.survival();
+    println!(
+        "\nSobreviven: {:.1} % (criterio: más del 80 %) {}",
+        100.0 * survival,
+        if survival > 0.8 { "✓" } else { "✗" }
+    );
+    println!(
+        "Falsos positivos: {} de {} sondas ({:.1} %): código ajeno en el lugar de una función borrada",
+        report.false_positives,
+        report.probes,
+        100.0 * ratio(report.false_positives, report.probes)
+    );
+    for example in &report.false_positive_examples {
+        println!("      falso positivo: {example}");
+    }
+    Ok(())
 }
 
 /// Abre el proyecto y, si hay, el fichero del primer paso pendiente en su línea.

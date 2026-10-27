@@ -3,9 +3,11 @@
 
 mod decisions;
 mod index;
+pub mod lineage;
 pub mod narration;
 mod paths;
 mod query;
+pub mod refactor_bench;
 mod render;
 mod review;
 pub mod workspace;
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 pub use decisions::{ExtractionOptions, ExtractionReport, extract_decisions};
 pub use index::{IndexReport, index};
 pub use paths::normalize_path;
-pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};
+pub use query::{SymbolLens, SymbolMemory, lenses, lenses_with, memory_at, memory_at_with, memory_of};
 pub use render::render_markdown;
 pub use review::{SessionListing, list_sessions, session_project, session_review};
 

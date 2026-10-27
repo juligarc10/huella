@@ -1,6 +1,6 @@
 //! Extracción de símbolos con tree-sitter y hash normalizado de su cuerpo.
 
-use huella_core::{Symbol, SymbolKind};
+use huella_core::{Fingerprint, SELF_TOKEN, Symbol, SymbolKind};
 use tree_sitter::{Node, Parser};
 
 use crate::language::{Language, Naming, Spec};
@@ -76,27 +76,47 @@ pub fn identifiers(language: Language, source: &str) -> Result<Vec<(usize, Strin
 /// línea, de modo que reformatear no lo cambia pero cambiar la lógica sí.
 pub(crate) fn normalized_hash(node: Node, source: &str) -> String {
     let mut hasher = blake3::Hasher::new();
-    let mut cursor = node.walk();
-    let mut descending = true;
-    loop {
-        if descending && cursor.goto_first_child() {
-            continue;
-        }
-        let current = cursor.node();
-        if current.child_count() == 0 && !current.kind().contains("comment") {
-            hasher.update(source[current.byte_range()].as_bytes());
-            // Separador entre tokens para que `a b` y `ab` no colisionen.
-            hasher.update(&[0x1f]);
-        }
-        if cursor.goto_next_sibling() {
-            descending = true;
-        } else if cursor.goto_parent() {
-            descending = false;
-        } else {
-            break;
-        }
+    for token in leaf_tokens(node, source) {
+        hasher.update(token.as_bytes());
+        // Separador entre tokens para que `a b` y `ab` no colisionen.
+        hasher.update(&[0x1f]);
     }
     hasher.finalize().to_hex()[..16].to_owned()
+}
+
+/// Huella del nodo con su nombre propio sustituido, igual tras renombrarlo.
+fn fingerprint(node: Node, source: &str, own_name: &str) -> Fingerprint {
+    let tokens: Vec<&str> =
+        leaf_tokens(node, source).map(|token| if token == own_name { SELF_TOKEN } else { token }).collect();
+    Fingerprint::from_tokens(&tokens)
+}
+
+/// Texto de las hojas del árbol sin comentarios, en orden.
+fn leaf_tokens<'s>(node: Node, source: &'s str) -> impl Iterator<Item = &'s str> {
+    let mut cursor = node.walk();
+    let mut descending = true;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        while !done {
+            if descending && cursor.goto_first_child() {
+                continue;
+            }
+            let current = cursor.node();
+            let token = (current.child_count() == 0 && !current.kind().contains("comment"))
+                .then(|| &source[current.byte_range()]);
+            if cursor.goto_next_sibling() {
+                descending = true;
+            } else if cursor.goto_parent() {
+                descending = false;
+            } else {
+                done = true;
+            }
+            if token.is_some() {
+                return token;
+            }
+        }
+        None
+    })
 }
 
 #[derive(Default, Clone)]
@@ -200,12 +220,14 @@ impl Walker<'_> {
     fn build_symbol(&self, node: Node, qualified_name: String, kind: SymbolKind, depth: usize) -> Symbol {
         let outer = self.expand_wrappers(node);
         let (start_byte, start_row) = self.leading_trivia_start(outer);
+        let fingerprint = fingerprint(outer, self.source, own_name(&qualified_name));
         Symbol {
             qualified_name,
             kind,
             start_line: start_row + 1,
             end_line: outer.end_position().row + 1,
             body_hash: normalized_hash(outer, self.source),
+            fingerprint,
             byte_range: start_byte..outer.end_byte(),
             depth,
         }
@@ -277,6 +299,11 @@ impl Walker<'_> {
 
 /// La declaración `const`/`let`/`var` del nodo es una sentencia del módulo, no
 /// una variable local de una función anónima o de un bloque.
+/// Último tramo del nombre cualificado: `UserService.register` → `register`.
+fn own_name(qualified_name: &str) -> &str {
+    qualified_name.rsplit(['.', ':']).next().unwrap_or(qualified_name)
+}
+
 fn is_module_statement(declarator: Node) -> bool {
     let Some(declaration) = declarator.parent() else { return false };
     let mut statement_parent = declaration.parent();
@@ -489,6 +516,20 @@ describe('códigos públicos', () => {
         assert_eq!(original, hash("function f(a: number) {\n  // suma uno\n  return a + 1;\n}"));
         assert_ne!(original, hash("function f(a: number) { return a + 2; }"));
         assert_ne!(original, hash("function f(ab: number) { return a + 1; }"));
+    }
+
+    #[test]
+    fn the_fingerprint_survives_renaming_the_symbol_but_not_changing_it() {
+        let first = |source: &str| extract_symbols(Language::TypeScript, source).unwrap().symbols[0].clone();
+        let original =
+            first("function total(xs: number[]): number { return xs.length ? xs[0] + total(xs.slice(1)) : 0; }");
+        let renamed = first("function sum(xs: number[]): number { return xs.length ? xs[0] + sum(xs.slice(1)) : 0; }");
+        let changed =
+            first("function total(xs: number[]): number { return xs.length ? xs[0] * total(xs.slice(1)) : 1; }");
+        assert_ne!(original.body_hash, renamed.body_hash);
+        assert_eq!(original.fingerprint, renamed.fingerprint);
+        assert_ne!(original.fingerprint.shape_hash, changed.fingerprint.shape_hash);
+        assert!(original.fingerprint.similarity(&changed.fingerprint) > 0.5);
     }
 
     #[test]
