@@ -1,5 +1,6 @@
 //! `huella`: CLI de Huella.
 
+mod mcp;
 mod report;
 mod review;
 mod sample;
@@ -80,6 +81,12 @@ enum Command {
     Review {
         #[command(subcommand)]
         action: ReviewCommand,
+    },
+    /// Servidor MCP por stdin/stdout para que los agentes consulten la memoria.
+    Mcp {
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
     },
     /// Servidor LSP para el editor (hover y `CodeLens`), por stdin/stdout.
     Lsp {
@@ -299,6 +306,10 @@ fn run(cli: Cli) -> Result<()> {
                 emit(&review::render_flow(&review, &plan, &points, &narrations, file.as_deref()));
             }
             Ok(())
+        }
+        Command::Mcp { projects } => {
+            let mut context = mcp::Context { store: open_store(cli.db)?, projects: projects_dir(projects)? };
+            mcp::serve(&mut context)
         }
         Command::Lsp { projects, index_every } => {
             let db = cli
