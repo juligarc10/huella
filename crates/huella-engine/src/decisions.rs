@@ -1,7 +1,7 @@
 //! Extracción de decisiones de proyecto de las sesiones indexadas.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use huella_claude_code::{discover_transcripts, read_conversations};
 use huella_core::Conversation;
@@ -62,8 +62,8 @@ pub fn extract_decisions(
         }
         report.sessions += 1;
         let project = session_project(store, &conversation)?;
+        store.set_decisions_project(&conversation.session_id, project.as_deref())?;
         if store.extracted_turns(&conversation.session_id)? == Some(conversation.turns.len()) {
-            store.set_decisions_project(&conversation.session_id, project.as_deref())?;
             report.unchanged += 1;
             continue;
         }
@@ -110,23 +110,33 @@ pub fn extract_decisions(
     Ok(report)
 }
 
-/// Proyecto de una sesión: el repositorio git donde editó más ficheros. El
-/// directorio de arranque no sirve si se lanzó desde una carpeta que agrupa
-/// varios proyectos. Sin ediciones indexadas, se usa ese directorio.
+/// Proyecto de una sesión: donde editó más ficheros. El directorio de arranque
+/// no sirve si se lanzó desde una carpeta que agrupa varios proyectos. Sin
+/// ediciones indexadas, se usa ese directorio.
 fn session_project(store: &Store, conversation: &Conversation) -> crate::Result<Option<String>> {
     let paths = store.session_paths(&conversation.session_id)?;
-    let fallback = conversation.cwd.as_deref().map(|cwd| normalize_path(cwd, None));
-    Ok(project_from_paths(&paths).or(fallback))
+    let cwd = conversation.cwd.as_deref().map(|cwd| normalize_path(cwd, None));
+    Ok(project_from_paths(&paths, cwd.as_deref().map(Path::new)).or(cwd))
 }
 
-fn project_from_paths(paths: &[String]) -> Option<String> {
-    let mut votes: BTreeMap<String, usize> = BTreeMap::new();
-    for path in paths {
-        if let Some(root) = Path::new(path).ancestors().skip(1).find(|dir| dir.join(".git").exists()) {
-            *votes.entry(root.display().to_string()).or_default() += 1;
+/// Cada fichero vota por su repositorio git o, si no lo tiene, por la
+/// subcarpeta del directorio de arranque que lo contiene.
+fn project_from_paths(paths: &[String], cwd: Option<&Path>) -> Option<String> {
+    let mut votes: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    for path in paths.iter().map(Path::new) {
+        let repository = path.ancestors().skip(1).find(|dir| dir.join(".git").exists()).map(Path::to_path_buf);
+        let subfolder = || {
+            let cwd = cwd?;
+            let mut inside = path.strip_prefix(cwd).ok()?.components();
+            let folder = inside.next()?.as_os_str();
+            let is_project = inside.next().is_some() && !folder.to_string_lossy().starts_with('.');
+            is_project.then(|| cwd.join(folder))
+        };
+        if let Some(project) = repository.or_else(subfolder) {
+            *votes.entry(project).or_default() += 1;
         }
     }
-    votes.into_iter().max_by_key(|(_, count)| *count).map(|(root, _)| root)
+    votes.into_iter().max_by_key(|(_, count)| *count).map(|(project, _)| project.display().to_string())
 }
 
 /// Diálogo de todas las sesiones. Una sesión continuada puede repartirse
@@ -244,9 +254,26 @@ mod tests {
         }
         let file = |repo: &str, name: &str| dir.join(repo).join("src").join(name).display().to_string();
         let paths = [file("canjea", "a.ts"), file("canjea", "b.ts"), file("lua", "c.ts"), "/fuera/de/git.ts".into()];
-        assert_eq!(project_from_paths(&paths), Some(dir.join("canjea").display().to_string()));
-        assert_eq!(project_from_paths(&["/fuera/de/git.ts".into()]), None);
+        assert_eq!(project_from_paths(&paths, None), Some(dir.join("canjea").display().to_string()));
+        assert_eq!(project_from_paths(&["/fuera/de/git.ts".into()], None), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_git_the_project_is_the_subfolder_of_the_session_directory() {
+        let cwd = Path::new("/dev");
+        let paths = [
+            "/dev/web/css/a.css".to_owned(),
+            "/dev/web/index.html".into(),
+            "/dev/.claude/x.json".into(),
+            "/dev/notas.md".into(),
+        ];
+        assert_eq!(project_from_paths(&paths, Some(cwd)), Some("/dev/web".into()));
+        assert_eq!(
+            project_from_paths(&["/dev/notas.md".into()], Some(cwd)),
+            None,
+            "un fichero suelto no define proyecto"
+        );
     }
 
     #[test]
