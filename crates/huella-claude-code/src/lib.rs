@@ -213,12 +213,18 @@ fn user_prompt(content: &Value) -> Option<String> {
     (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
 }
 
+/// Último texto del agente en un mensaje. Los modelos recientes guardan a
+/// menudo la explicación entre herramientas como un bloque `thinking` con un
+/// resumen del progreso en lugar de como `text`; ambos valen.
 fn last_text_block(content: &Value) -> Option<String> {
     content
         .as_array()?
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("text") => block.get("text").and_then(Value::as_str),
+            Some("thinking") => block.get("thinking").and_then(Value::as_str),
+            _ => None,
+        })
         .map(str::trim)
         .rfind(|text| !text.is_empty())
         .map(str::to_owned)
@@ -478,6 +484,21 @@ mod tests {
             }
         );
         assert_eq!(edits[1].context, EditContext { prompt: Some("Ahora los tests".into()), rationale: None });
+    }
+
+    #[test]
+    fn progress_notes_stored_as_thinking_count_as_rationale() {
+        let write = edit_line(&serde_json::json!({"type": "create", "filePath": "/repo/a.ts", "content": "x"}));
+        let lines = [
+            message_line("user", &serde_json::json!("Crea el almacenamiento")),
+            message_line("assistant", &serde_json::json!([{"type": "text", "text": "Primero miro el esquema."}])),
+            message_line("assistant", &serde_json::json!([{"type": "thinking", "thinking": ""}])),
+            message_line("assistant", &serde_json::json!([{"type": "thinking", "thinking": "Voy a crear el crate con SQLite."}, {"type": "tool_use"}])),
+            write,
+        ];
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let edits = parse(&lines).edits;
+        assert_eq!(edits[0].context.rationale.as_deref(), Some("Voy a crear el crate con SQLite."));
     }
 
     #[test]
