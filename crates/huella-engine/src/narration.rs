@@ -192,7 +192,7 @@ pub fn narrate(
     for turn in reviewable_turns(plan) {
         let request = turn_request(review, plan, points, turn);
         let hash = input_hash(&model_id, &request);
-        if stored.get(&turn).is_some_and(|s| s.input_hash == hash) {
+        if stored.get(&turn).is_some_and(|s| s.input_hash == hash && validate(s.narration.clone()).is_ok()) {
             report.cached += 1;
             continue;
         }
@@ -212,8 +212,13 @@ pub fn narrate(
     Ok(report)
 }
 
+/// Una respuesta sin resumen no sirve: se descarta para volver a pedirla.
 fn validate(text: String) -> Result<String, ExtractError> {
-    serde_json::from_str::<ModelOutput>(&text).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
+    let output: ModelOutput =
+        serde_json::from_str(&text).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
+    if output.summary.trim().is_empty() {
+        return Err(ExtractError::BadResponse("el modelo no escribió el resumen".into()));
+    }
     Ok(text)
 }
 
@@ -332,6 +337,15 @@ mod tests {
 
         let (changed, changed_plan, changed_points) = review_of(&CODE.replace("> 3", "> 4"));
         assert!(narrations(&store, &changed, &changed_plan, &changed_points).unwrap()[&0].stale);
+    }
+
+    #[test]
+    fn an_empty_summary_is_not_accepted() {
+        let (review, plan, points) = review_of(CODE);
+        let store = Store::open_in_memory().unwrap();
+        let fake = Fake { calls: RefCell::new(vec![]), answer: r#"{"summary": " ", "steps": [], "risks": []}"#.into() };
+        let report = narrate(&store, &review, &plan, &points, &fake, |_| {}).unwrap();
+        assert_eq!((report.narrated, report.failures.len()), (0, 1));
     }
 
     #[test]
