@@ -1,6 +1,5 @@
 //! Tests del protocolo: un cliente en memoria hace de editor.
 
-use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
@@ -275,6 +274,26 @@ fn the_active_review_shows_pending_steps_that_a_code_action_marks_as_reviewed() 
     let republished = client.next_notification("textDocument/publishDiagnostics");
     assert_eq!(republished["diagnostics"], json!([]), "revisado: ya no está pendiente");
     client.shutdown();
+}
+
+#[test]
+fn review_files_get_diagnostics_without_being_opened() {
+    let fixture = Fixture::new("closed");
+    fixture.index();
+    Store::open(&fixture.db).unwrap().set_active_review(Some("s2")).unwrap();
+    let client = Client::start(config(&fixture, Some(&fixture.projects)), false);
+    let published = client.next_notification("textDocument/publishDiagnostics");
+    assert_eq!(published["uri"], fixture.uri());
+    assert_eq!(published["diagnostics"].as_array().unwrap().len(), 1, "{published}");
+    assert_eq!(published["diagnostics"][0]["severity"], 2, "aviso, para que Zed lo liste");
+    client.shutdown();
+}
+
+#[test]
+fn file_paths_round_trip_through_uris() {
+    let uri = path_to_uri("/Users/ana/mi repo/ñ#1.ts").unwrap();
+    assert_eq!(uri.as_str(), "file:///Users/ana/mi%20repo/%C3%B1%231.ts");
+    assert_eq!(uri_to_path(uri.as_str()), Some(PathBuf::from("/Users/ana/mi repo/ñ#1.ts")));
 }
 
 #[test]

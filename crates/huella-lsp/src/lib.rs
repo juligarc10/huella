@@ -9,7 +9,8 @@
 //! propia conexión a SQLite (WAL permite leer mientras se escribe) y pide al
 //! editor que refresque los `CodeLens` cuando hay novedades.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -103,8 +104,12 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         next_request: 0,
         projects: config.projects.clone(),
         review: None,
+        published: HashSet::new(),
     };
     server.reload_review();
+    if server.review.is_some() {
+        server.publish_all(connection)?;
+    }
     let indexed = spawn_indexer(config);
     loop {
         select! {
@@ -166,6 +171,8 @@ struct Server {
     projects: Option<PathBuf>,
     /// Revisión activa (`huella review start`), si la hay.
     review: Option<review::ActiveReview>,
+    /// Documentos con diagnosis publicadas, para poder vaciarlas.
+    published: HashSet<String>,
 }
 
 impl Server {
@@ -206,10 +213,18 @@ impl Server {
         false
     }
 
-    /// Pasos pendientes de la revisión activa en un fichero abierto.
+    /// Pasos pendientes de la revisión activa en un fichero, abierto o no (los
+    /// cerrados se leen del disco).
     fn publish(&self, connection: &Connection, uri: &Uri) -> Result<()> {
-        let diagnostics = match (&self.review, self.document(uri)) {
-            (Some(review), Some((path, source))) => {
+        let diagnostics = match (&self.review, uri_to_path(uri.as_str())) {
+            (Some(review), Some(path)) => {
+                let on_disk;
+                let source = if let Some(text) = self.documents.get(uri) {
+                    text.as_str()
+                } else {
+                    on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+                    on_disk.as_str()
+                };
                 review.diagnostics(&self.store, &huella_engine::normalize_path(&path, None), source)
             }
             _ => Vec::new(),
@@ -222,10 +237,19 @@ impl Server {
         connection.sender.send(Message::Notification(notification)).map_err(|_| ServerError::Disconnected)
     }
 
-    fn publish_all(&self, connection: &Connection) -> Result<()> {
-        for uri in self.documents.keys() {
-            self.publish(connection, uri)?;
+    /// Publica los pasos de todos los ficheros de la revisión y de los
+    /// abiertos, y vacía los que ya no tienen pasos (revisión cambiada o parada).
+    /// Así el panel de diagnósticos del editor lista toda la revisión.
+    fn publish_all(&mut self, connection: &Connection) -> Result<()> {
+        // Claves de texto: `Uri` tiene mutabilidad interior y no conviene en un `HashSet`.
+        let mut targets: HashSet<String> = self.documents.keys().map(|uri| uri.as_str().to_owned()).collect();
+        if let Some(review) = &self.review {
+            targets.extend(review.file_paths().filter_map(path_to_uri).map(|uri| uri.as_str().to_owned()));
         }
+        for uri in targets.union(&self.published).filter_map(|uri| uri.parse::<Uri>().ok()) {
+            self.publish(connection, &uri)?;
+        }
+        self.published = targets;
         Ok(())
     }
 
@@ -385,6 +409,19 @@ fn lens_title(activity: &huella_store::SymbolActivity) -> String {
 fn line_range(start_line: usize, end_line: usize) -> Range {
     let to_lsp = |line: usize| u32::try_from(line.saturating_sub(1)).unwrap_or(u32::MAX);
     Range::new(Position::new(to_lsp(start_line), 0), Position::new(to_lsp(end_line) + 1, 0))
+}
+
+/// `/Users/ana/mi repo/a.ts` → `file:///Users/ana/mi%20repo/a.ts`.
+fn path_to_uri(path: &str) -> Option<Uri> {
+    let mut encoded = String::from("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded.parse().ok()
 }
 
 /// `file:///Users/ana/mi%20repo/a.ts` → `/Users/ana/mi repo/a.ts`.

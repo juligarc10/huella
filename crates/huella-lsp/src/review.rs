@@ -69,7 +69,9 @@ impl ActiveReview {
                 let line = u32::try_from(line.saturating_sub(1)).unwrap_or(0);
                 Diagnostic {
                     range: lsp_types::Range::new(lsp_types::Position::new(line, 0), lsp_types::Position::new(line, u32::MAX)),
-                    severity: Some(if unexplained { DiagnosticSeverity::WARNING } else { DiagnosticSeverity::INFORMATION }),
+                    // Aviso y no información: el panel de diagnósticos de Zed solo
+                    // lista errores y avisos, y un paso pendiente es tarea por hacer.
+                    severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String(format!("paso-{}", index + 1))),
                     source: Some(SOURCE.to_owned()),
                     message,
@@ -78,6 +80,11 @@ impl ActiveReview {
                 }
             })
             .collect()
+    }
+
+    /// Ficheros que tienen pasos en la revisión.
+    pub fn file_paths(&self) -> impl Iterator<Item = &str> {
+        self.review.files.iter().map(|file| file.path.as_str())
     }
 
     /// Lo más útil para decidir: la nota del modelo, la explicación del agente
