@@ -4,6 +4,7 @@ mod mcp;
 mod report;
 mod review;
 mod sample;
+mod search;
 mod web;
 
 use std::fs;
@@ -78,6 +79,24 @@ enum Command {
         /// Número máximo de ediciones a mostrar.
         #[arg(long, default_value_t = 10)]
         limit: usize,
+    },
+    /// Busca en la memoria: peticiones, explicaciones del agente, ficheros,
+    /// símbolos y decisiones. Sin tildes ni mayúsculas que importen.
+    Search {
+        /// Palabras a buscar; la última vale también como prefijo.
+        #[arg(required = true)]
+        words: Vec<String>,
+        /// Solo lo de este proyecto (carpeta).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
+        /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
+        #[arg(long)]
+        all: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
     },
     /// Decisiones de proyecto extraídas de las conversaciones.
     Decisions {
@@ -262,6 +281,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Refactors { limit } => refactors(&open_store(cli.db)?, limit),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
+        Command::Search { words, project, limit, all, projects } => {
+            let mut store = open_store(cli.db)?;
+            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            let project =
+                project.map(|path| huella_engine::normalize_path(&fs::canonicalize(&path).unwrap_or(path), None));
+            let query = huella_store::SearchQuery { text: words.join(" "), project, limit, include_inactive: all };
+            emit(&search::render_hits(&store.search(&query)?));
+            Ok(())
+        }
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
             let extractor = build_model(model)?;

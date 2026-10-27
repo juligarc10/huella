@@ -113,6 +113,21 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "huella_search",
+            "description": "Busca en la memoria de las sesiones por palabras: peticiones de la persona, explicaciones \
+                            del agente, ficheros, símbolos y decisiones. Úsala para encontrar dónde y por qué se hizo \
+                            algo («migración de usuarios», «rate limit») antes de tocar código relacionado.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Palabras a buscar"},
+                    "project": {"type": "string", "description": "Ruta del repositorio, para limitar la búsqueda"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
             "name": "huella_sessions",
             "description": "Sesiones recientes con ediciones, con su proyecto.",
             "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}
@@ -127,6 +142,15 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
         "huella_symbol_history" => symbol_history(&context.store, arguments),
         "huella_decisions" => decisions(&context.store, arguments),
         "huella_review" => review(context, arguments),
+        "huella_search" => {
+            let query = huella_store::SearchQuery {
+                text: arguments["query"].as_str().ok_or_else(|| anyhow::anyhow!("falta `query`"))?.to_owned(),
+                project: arguments["project"].as_str().map(|p| huella_engine::normalize_path(Path::new(p), None)),
+                limit: arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10),
+                include_inactive: false,
+            };
+            Ok(crate::search::render_hits(&context.store.search(&query)?))
+        }
         "huella_sessions" => {
             let limit = arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10);
             let sessions = huella_engine::list_sessions(&context.store, limit)?;
@@ -240,7 +264,10 @@ mod tests {
         let tools = handle(&mut context, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
         let names: Vec<&str> =
             tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["huella_symbol_history", "huella_decisions", "huella_review", "huella_sessions"]);
+        assert_eq!(
+            names,
+            vec!["huella_symbol_history", "huella_decisions", "huella_review", "huella_search", "huella_sessions"]
+        );
     }
 
     #[test]

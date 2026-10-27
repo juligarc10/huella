@@ -145,6 +145,31 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX edit_symbol_by_own_name ON edit_symbol(own_name);
     UPDATE transcript SET offset = 0, prompt = NULL, rationale = NULL;
 ",
+    // Búsqueda de texto. Las decisiones se indexan con disparadores sobre su
+    // tabla; las ediciones, desde Rust al guardarlas (su texto junta varias
+    // tablas y parte los identificadores), y las ya guardadas al abrir.
+    r"
+    CREATE VIRTUAL TABLE edit_fts USING fts5(body, symbols, tokenize = 'unicode61 remove_diacritics 2');
+    CREATE VIRTUAL TABLE decision_fts USING fts5(
+        title, decision, rationale, alternatives,
+        content = 'decision', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2'
+    );
+    INSERT INTO decision_fts(decision_fts) VALUES ('rebuild');
+    CREATE TRIGGER decision_fts_insert AFTER INSERT ON decision BEGIN
+        INSERT INTO decision_fts(rowid, title, decision, rationale, alternatives)
+        VALUES (new.id, new.title, new.decision, new.rationale, new.alternatives);
+    END;
+    CREATE TRIGGER decision_fts_delete AFTER DELETE ON decision BEGIN
+        INSERT INTO decision_fts(decision_fts, rowid, title, decision, rationale, alternatives)
+        VALUES ('delete', old.id, old.title, old.decision, old.rationale, old.alternatives);
+    END;
+    CREATE TRIGGER decision_fts_update AFTER UPDATE ON decision BEGIN
+        INSERT INTO decision_fts(decision_fts, rowid, title, decision, rationale, alternatives)
+        VALUES ('delete', old.id, old.title, old.decision, old.rationale, old.alternatives);
+        INSERT INTO decision_fts(rowid, title, decision, rationale, alternatives)
+        VALUES (new.id, new.title, new.decision, new.rationale, new.alternatives);
+    END;
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -274,6 +299,47 @@ pub struct SessionSummary {
     pub files: usize,
 }
 
+/// Qué buscar en la memoria.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    /// Solo lo de este proyecto (ruta absoluta).
+    pub project: Option<String>,
+    pub limit: usize,
+    /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
+    pub include_inactive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchHit {
+    /// Una petición de una sesión, con lo que tocó.
+    Request {
+        session_id: String,
+        at: Option<String>,
+        prompt: Option<String>,
+        /// Fragmento con las palabras buscadas marcadas con `[` `]`.
+        snippet: String,
+        paths: Vec<String>,
+        symbols: Vec<String>,
+        edits: usize,
+        score: f64,
+    },
+    Decision {
+        decision: StoredDecision,
+        snippet: String,
+        score: f64,
+    },
+}
+
+impl SearchHit {
+    #[must_use]
+    pub fn score(&self) -> f64 {
+        match self {
+            Self::Request { score, .. } | Self::Decision { score, .. } => *score,
+        }
+    }
+}
+
 /// Qué decisiones listar.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionFilter {
@@ -339,7 +405,39 @@ impl Store {
             tx.pragma_update(None, "user_version", version)?;
         }
         tx.commit()?;
-        self.backfill_own_names()
+        self.backfill_own_names()?;
+        self.backfill_edit_search()
+    }
+
+    /// Indexa para la búsqueda las ediciones guardadas antes de existir.
+    fn backfill_edit_search(&mut self) -> Result<()> {
+        let missing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM edit WHERE rowid NOT IN (SELECT rowid FROM edit_fts)",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing == 0 {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare(
+                "SELECT e.rowid, e.path, e.prompt, e.rationale,
+                        (SELECT group_concat(s.qualified_name, ' ') FROM edit_symbol s WHERE s.edit_id = e.id)
+                 FROM edit e WHERE e.rowid NOT IN (SELECT rowid FROM edit_fts)",
+            )?;
+            let rows: Vec<PendingSearchRow> = select
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut insert = tx.prepare("INSERT INTO edit_fts (rowid, body, symbols) VALUES (?1, ?2, ?3)")?;
+            for (rowid, path, prompt, rationale, symbols) in rows {
+                let symbols: Vec<&str> = symbols.as_deref().unwrap_or_default().split(' ').collect();
+                let (body, symbols) = search_body(&path, prompt.as_deref(), rationale.as_deref(), &symbols);
+                insert.execute(params![rowid, body, symbols])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Nombre propio de los símbolos anclados antes de existir la columna,
@@ -749,12 +847,129 @@ impl Store {
         Ok(())
     }
 
+    /// Busca en las peticiones, explicaciones, rutas y símbolos de las
+    /// ediciones y en las decisiones. Las ediciones de una misma petición se
+    /// agrupan; los dos tipos se mezclan por su puesto en su propia lista.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>> {
+        let Some(fts) = fts_query(&query.text) else { return Ok(Vec::new()) };
+        let project_prefix = query.project.as_ref().map(|project| format!("{}/", project.trim_end_matches('/')));
+        let requests = self.search_requests(&fts, project_prefix.as_deref())?;
+        let decisions = self.search_decisions(&fts, query)?;
+        let keys = [
+            requests.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            decisions.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+        ];
+        let mut by_key: HashMap<String, SearchHit> = requests.into_iter().chain(decisions).collect();
+        let mut hits = Vec::new();
+        for (key, score) in fuse_ranks(&keys).into_iter().take(query.limit.max(1)) {
+            if let Some(mut hit) = by_key.remove(&key) {
+                match &mut hit {
+                    SearchHit::Request { score: s, .. } | SearchHit::Decision { score: s, .. } => *s = score,
+                }
+                hits.push(hit);
+            }
+        }
+        Ok(hits)
+    }
+
+    fn search_requests(&self, fts: &str, project_prefix: Option<&str>) -> Result<Vec<(String, SearchHit)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT e.session_id, e.at, e.prompt, e.path, snippet(edit_fts, 0, '[', ']', '…', 12),
+                    (SELECT group_concat(s.qualified_name, char(31)) FROM edit_symbol s
+                     WHERE s.edit_id = e.id AND s.role = 'touched')
+             FROM edit_fts JOIN edit e ON e.rowid = edit_fts.rowid
+             WHERE edit_fts MATCH ?1 AND (?2 IS NULL OR e.path LIKE ?2 || '%')
+             ORDER BY bm25(edit_fts) LIMIT 400",
+        )?;
+        let rows = statement.query_map(params![fts, project_prefix], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        // Agrupa por petición conservando el orden de la mejor edición de cada una.
+        let mut order: Vec<String> = Vec::new();
+        let mut grouped: HashMap<String, SearchHit> = HashMap::new();
+        for row in rows {
+            let (session_id, at, prompt, path, snippet, symbols) = row?;
+            let key = format!("request\u{1f}{session_id}\u{1f}{}", prompt.as_deref().unwrap_or(&path));
+            let hit = grouped.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                SearchHit::Request {
+                    session_id,
+                    at: at.clone(),
+                    prompt,
+                    snippet,
+                    paths: Vec::new(),
+                    symbols: Vec::new(),
+                    edits: 0,
+                    score: 0.0,
+                }
+            });
+            if let SearchHit::Request { at: latest, paths, symbols: all, edits, .. } = hit {
+                *edits += 1;
+                if at > *latest {
+                    latest.clone_from(&at);
+                }
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
+                    if !all.iter().any(|known| known == symbol) {
+                        all.push(symbol.to_owned());
+                    }
+                }
+            }
+        }
+        Ok(order.into_iter().filter_map(|key| grouped.remove(&key).map(|hit| (key, hit))).collect())
+    }
+
+    fn search_decisions(&self, fts: &str, query: &SearchQuery) -> Result<Vec<(String, SearchHit)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT d.id, snippet(decision_fts, -1, '[', ']', '…', 12)
+             FROM decision_fts JOIN decision d ON d.id = decision_fts.rowid
+             WHERE decision_fts MATCH ?1 AND (?2 IS NULL OR d.project = ?2)
+               AND (?3 OR d.status = 'accepted')
+             ORDER BY bm25(decision_fts) LIMIT 100",
+        )?;
+        let ids: Vec<(i64, String)> = statement
+            .query_map(params![fts, query.project, query.include_inactive], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut hits = Vec::new();
+        for (id, snippet) in ids {
+            if let Some(decision) = self.decision(id)? {
+                hits.push((format!("decision\u{1f}{id}"), SearchHit::Decision { decision, snippet, score: 0.0 }));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Una decisión por su id.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decision(&self, id: i64) -> Result<Option<StoredDecision>> {
+        let filter = DecisionFilter { include_inactive: true, ..DecisionFilter::default() };
+        Ok(self.decisions_where(&filter, Some(id))?.into_iter().next())
+    }
+
     /// Decisiones de la más reciente a la más antigua. Por defecto solo las
     /// vigentes (aceptadas), que son las que conviene recordar.
     ///
     /// # Errors
     /// Si falla la consulta.
     pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<StoredDecision>> {
+        self.decisions_where(filter, None)
+    }
+
+    fn decisions_where(&self, filter: &DecisionFilter, id: Option<i64>) -> Result<Vec<StoredDecision>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives, d.status,
                     d.superseded_by, d.decided_at, d.extractor,
@@ -763,10 +978,11 @@ impl Store {
              WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM decision_entity e WHERE e.decision_id = d.id AND e.entity = ?1))
                AND (?2 IS NULL OR d.project = ?2)
                AND (?3 OR d.status = 'accepted')
+               AND (?4 IS NULL OR d.id = ?4)
              ORDER BY d.decided_at DESC, d.id",
         )?;
         let entity = filter.entity.as_ref().map(|entity| entity.trim().to_lowercase());
-        let rows = statement.query_map(params![entity, filter.project, filter.include_inactive], |row| {
+        let rows = statement.query_map(params![entity, filter.project, filter.include_inactive, id], |row| {
             let alternatives: String = row.get(6)?;
             let entities: Option<String> = row.get(11)?;
             let mut entities: Vec<String> =
@@ -847,6 +1063,17 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
             serde_json::to_string(indexed.changed_lines).unwrap_or_else(|_| "[]".to_owned()),
         ],
     )?;
+    if inserted == 1 {
+        let symbols: Vec<&str> = anchor
+            .map(|a| a.symbols.iter().chain(&a.removed).map(|s| s.qualified_name.as_str()).collect())
+            .unwrap_or_default();
+        let (body, symbols) =
+            search_body(indexed.path, edit.context.prompt.as_deref(), edit.context.rationale.as_deref(), &symbols);
+        tx.execute(
+            "INSERT INTO edit_fts (rowid, body, symbols) VALUES (last_insert_rowid(), ?1, ?2)",
+            [body, symbols],
+        )?;
+    }
     let Some(anchor) = anchor else { return Ok(()) };
     let roles = anchor.symbols.iter().map(|s| ("touched", s)).chain(anchor.removed.iter().map(|s| ("removed", s)));
     // Edición ya indexada antes: solo se completa la huella si le falta, sin
@@ -891,6 +1118,66 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
         ])?;
     }
     Ok(())
+}
+
+/// Edición aún sin indexar: rowid, ruta, petición, explicación y símbolos.
+type PendingSearchRow = (i64, String, Option<String>, Option<String>, Option<String>);
+
+/// Texto por el que se encuentra una edición: la prosa (petición,
+/// explicación y ruta), de la que salen los fragmentos, y los símbolos,
+/// también partidos en palabras (`hashPassword` → `hash Password`) para que
+/// «password» los encuentre.
+fn search_body(path: &str, prompt: Option<&str>, rationale: Option<&str>, symbols: &[&str]) -> (String, String) {
+    let body = [prompt, rationale, Some(path)].into_iter().flatten().collect::<Vec<_>>().join("\n");
+    let symbols = symbols
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|symbol| format!("{symbol} {}", split_identifier(symbol)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (body, symbols)
+}
+
+/// `UserService.hashPassword` → `User Service hash Password`.
+fn split_identifier(identifier: &str) -> String {
+    let mut words = String::new();
+    let mut previous: Option<char> = None;
+    for c in identifier.chars() {
+        let boundary = previous.is_some_and(|p| (p.is_lowercase() || p.is_ascii_digit()) && c.is_uppercase());
+        if boundary || (!c.is_alphanumeric() && !words.ends_with(' ')) {
+            words.push(' ');
+        }
+        if c.is_alphanumeric() {
+            words.push(c);
+        }
+        previous = Some(c);
+    }
+    words.trim().to_owned()
+}
+
+/// Consulta FTS5 con las palabras de la persona: todas deben aparecer, la
+/// última también como prefijo (se busca mientras se escribe).
+fn fts_query(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let (last, rest) = words.split_last()?;
+    let mut query: Vec<String> = rest.iter().map(|word| format!("\"{word}\"")).collect();
+    query.push(format!("\"{last}\"*"));
+    Some(query.join(" "))
+}
+
+/// Une listas ordenadas por relevancia sumando 1/(k + puesto) de cada una
+/// (reciprocal rank fusion): no hace falta que sus puntuaciones sean comparables.
+fn fuse_ranks(lists: &[Vec<String>]) -> Vec<(String, f64)> {
+    const K: f64 = 60.0;
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for list in lists {
+        for (rank, key) in (1u32..).zip(list) {
+            *scores.entry(key.clone()).or_default() += 1.0 / (K + f64::from(rank));
+        }
+    }
+    let mut fused: Vec<(String, f64)> = scores.into_iter().collect();
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    fused
 }
 
 /// Último tramo del nombre cualificado: `UserService.register` → `register`.
@@ -1121,6 +1408,83 @@ mod tests {
             decided_at: Some("2026-10-25T10:00:00Z"),
             decisions,
         }
+    }
+
+    fn search(store: &Store, text: &str) -> Vec<SearchHit> {
+        store.search(&SearchQuery { text: text.into(), limit: 10, ..SearchQuery::default() }).unwrap()
+    }
+
+    #[test]
+    fn search_finds_requests_by_words_accents_and_split_identifiers() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "añade la migración de usuarios");
+        let second = edit("e2", "s1", "2026-10-01T10:01:00Z", "añade la migración de usuarios");
+        let other = edit("e3", "s2", "2026-10-02T10:00:00Z", "cambia el color del botón");
+        let hashed = anchored(&[("UserService.hashPassword", "h1")], &[]);
+        save(&mut store, 10, &[(&first, &hashed), (&second, &hashed), (&other, &anchored(&[("Button", "h2")], &[]))]);
+
+        let hits = search(&store, "migracion");
+        assert_eq!(hits.len(), 1, "las dos ediciones de la petición se agrupan: {hits:?}");
+        let SearchHit::Request { session_id, edits, symbols, snippet, .. } = &hits[0] else { panic!("{hits:?}") };
+        assert_eq!((session_id.as_str(), *edits), ("s1", 2));
+        assert_eq!(symbols, &vec!["UserService.hashPassword".to_owned()]);
+        assert!(snippet.contains("[migración]"), "{snippet}");
+
+        assert_eq!(search(&store, "password").len(), 1, "por las palabras del identificador");
+        assert_eq!(search(&store, "bot").len(), 1, "la última palabra vale como prefijo");
+        assert_eq!(search(&store, "migración botón"), Vec::new(), "todas las palabras deben aparecer");
+        assert_eq!(search(&store, "  "), Vec::new());
+    }
+
+    #[test]
+    fn search_finds_active_decisions_and_follows_their_changes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [
+            new_decision("SQLite en local", &["sqlite"], "accepted", ""),
+            new_decision("Postgres en local", &["postgres"], "rejected", ""),
+        ];
+        store.replace_decisions(&batch("s1", 10, &decisions)).unwrap();
+        let titles = |hits: Vec<SearchHit>| -> Vec<String> {
+            hits.into_iter()
+                .filter_map(|hit| match hit {
+                    SearchHit::Decision { decision, .. } => Some(decision.title),
+                    SearchHit::Request { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(titles(search(&store, "local")), vec!["SQLite en local"]);
+        let all = store
+            .search(&SearchQuery { text: "local".into(), limit: 10, include_inactive: true, ..SearchQuery::default() })
+            .unwrap();
+        assert_eq!(titles(all).len(), 2);
+
+        // Volver a extraer la sesión sustituye sus decisiones también en el índice.
+        store.replace_decisions(&batch("s1", 12, &[new_decision("DuckDB en local", &[], "accepted", "")])).unwrap();
+        assert_eq!(titles(search(&store, "local")), vec!["DuckDB en local"]);
+        assert_eq!(search(&store, "sqlite"), Vec::new());
+    }
+
+    #[test]
+    fn edits_saved_before_the_search_index_existed_are_indexed_on_open() {
+        let dir = std::env::temp_dir().join(format!("huella-fts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huella.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = Store::open(&path).unwrap();
+            let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "valida el email");
+            save(&mut store, 10, &[(&first, &anchored(&[("validate", "h1")], &[]))]);
+            store.conn.execute("DELETE FROM edit_fts", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(search(&store, "email").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identifiers_split_into_words() {
+        assert_eq!(split_identifier("UserService.hashPassword"), "User Service hash Password");
+        assert_eq!(split_identifier("parse_v2Config"), "parse v2 Config");
     }
 
     #[test]
