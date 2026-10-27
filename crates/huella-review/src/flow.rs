@@ -180,7 +180,9 @@ fn file_steps(index: usize, file: &FileReview) -> Vec<(FlowStep, BTreeSet<String
             let symbol = owner.map(|i| &symbols[i]);
             let role = match symbol {
                 None => StepRole::Other,
-                Some(s) if s.kind == SymbolKind::Test || is_test_file => StepRole::Test,
+                Some(s) if s.kind == SymbolKind::Test || is_test_file || is_rust_test(&s.qualified_name) => {
+                    StepRole::Test
+                }
                 Some(_) => StepRole::Flow,
             };
             let mentioned = symbol.map(|s| mentions(s, &symbols, &idents, &file.after)).unwrap_or_default();
@@ -345,11 +347,28 @@ fn short_name(qualified: &str) -> String {
     last.trim_start_matches('<').trim_end_matches('>').split(' ').next().unwrap_or(last).to_owned()
 }
 
+/// Tests de Rust: funciones dentro de `mod tests`.
+fn is_rust_test(qualified_name: &str) -> bool {
+    qualified_name == "tests" || qualified_name.starts_with("tests::") || qualified_name.contains("::tests::")
+}
+
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
-    ["/test/", "/tests/", "/__tests__/", ".test.", ".spec.", "_test.", "/test_", ".e2e-spec."]
-        .iter()
-        .any(|m| lower.contains(m))
+    [
+        "/test/",
+        "/tests/",
+        "/__tests__/",
+        ".test.",
+        ".spec.",
+        "_test.",
+        "/test_",
+        ".e2e-spec.",
+        "/tests.rs",
+        "_tests.rs",
+        "/conftest.py",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
 }
 
 /// Recorta el contexto a 3 líneas alrededor de los cambios del paso.
@@ -475,5 +494,6 @@ mod tests {
         assert_eq!(short_name("<Point as Display>::fmt"), "fmt");
         assert_eq!(short_name("Store::open"), "open");
         assert!(is_test_path("/r/src/a.spec.ts") && is_test_path("/r/tests/x.rs") && !is_test_path("/r/src/latest.ts"));
+        assert!(is_test_path("/r/crates/lsp/src/tests.rs") && !is_test_path("/r/src/contests.rs"));
     }
 }
