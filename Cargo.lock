@@ -450,6 +450,7 @@ dependencies = [
  "huella-decisions",
  "huella-engine",
  "huella-lsp",
+ "huella-review",
  "huella-store",
  "serde",
  "serde_json",
@@ -482,6 +483,7 @@ dependencies = [
  "huella-claude-code",
  "huella-core",
  "huella-decisions",
+ "huella-review",
  "huella-store",
  "serde_json",
  "thiserror",
@@ -499,6 +501,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "huella-review"
+version = "0.1.0"
+dependencies = [
+ "huella-core",
+ "serde",
+ "similar",
 ]
 
 [[package]]
