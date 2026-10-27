@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use huella_anchoring::{AnchorReport, Language, anchor_edit, extract_symbols};
 use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
-use huella_decisions::DecisionExtractor;
+use huella_decisions::JsonModel;
 use huella_decisions::anthropic::Anthropic;
 use huella_decisions::openai::OpenAiCompatible;
 use huella_engine::ExtractionOptions;
@@ -308,11 +308,7 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn build_extractor(
-    provider: Provider,
-    model: Option<String>,
-    base_url: Option<String>,
-) -> Result<Box<dyn DecisionExtractor>> {
+fn build_extractor(provider: Provider, model: Option<String>, base_url: Option<String>) -> Result<Box<dyn JsonModel>> {
     Ok(match provider {
         Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
         Provider::OpenaiCompatible => {
@@ -322,14 +318,9 @@ fn build_extractor(
     })
 }
 
-fn extract(
-    store: &mut Store,
-    projects: &Path,
-    extractor: &dyn DecisionExtractor,
-    options: &ExtractionOptions,
-) -> Result<()> {
+fn extract(store: &mut Store, projects: &Path, extractor: &dyn JsonModel, options: &ExtractionOptions) -> Result<()> {
     let started = Instant::now();
-    println!("Extrayendo decisiones con {}…", extractor.id());
+    println!("Extrayendo decisiones con {}…", extractor.model_id());
     let report = huella_engine::extract_decisions(store, projects, extractor, options, |conversation| {
         let first =
             conversation.turns.first().map(|turn| turn.text.split_whitespace().take(8).collect::<Vec<_>>().join(" "));

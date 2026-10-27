@@ -11,10 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use ureq::Agent;
 
-use crate::{
-    DecisionExtractor, ExtractError, ExtractedDecision, ExtractionRequest, SYSTEM_PROMPT, output_schema, parse_output,
-    user_message,
-};
+use crate::{ExtractError, JsonModel};
 
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const PROVIDER: &str = "openai-compatible";
@@ -47,40 +44,39 @@ impl OpenAiCompatible {
     }
 }
 
-impl DecisionExtractor for OpenAiCompatible {
-    fn id(&self) -> String {
+impl JsonModel for OpenAiCompatible {
+    fn model_id(&self) -> String {
         format!("{PROVIDER}:{}", self.model)
     }
 
-    fn extract(&self, request: &ExtractionRequest) -> Result<Vec<ExtractedDecision>, ExtractError> {
+    fn complete_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, ExtractError> {
         let network = |error: ureq::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
         let mut call = self.agent.post(format!("{}/chat/completions", self.base_url));
         if let Some(key) = &self.api_key {
             call = call.header("Authorization", &format!("Bearer {key}"));
         }
-        let mut response = call.send_json(request_body(&self.model, request)).map_err(network)?;
+        let mut response = call.send_json(request_body(&self.model, system, user, schema)).map_err(network)?;
         let status = response.status().as_u16();
         if status != 200 {
             let body = response.body_mut().read_to_string().map_err(network)?;
             return Err(ExtractError::Api { provider: PROVIDER, status, body });
         }
-        let text = collect_stream(BufReader::new(response.body_mut().as_reader()))?;
-        parse_output(&text)
+        collect_stream(BufReader::new(response.body_mut().as_reader()))
     }
 }
 
-fn request_body(model: &str, request: &ExtractionRequest) -> Value {
+fn request_body(model: &str, system: &str, user: &str, schema: &Value) -> Value {
     json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
         "stream": true,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message(request)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "decisions", "strict": true, "schema": output_schema()},
+            "json_schema": {"name": "respuesta", "strict": true, "schema": schema},
         },
     })
 }
@@ -121,11 +117,11 @@ fn collect_stream(reader: impl BufRead) -> Result<String, ExtractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output_schema;
 
     #[test]
     fn request_streams_with_json_schema_response_format() {
-        let request = ExtractionRequest { dialogue: "x".into(), known_titles: vec![] };
-        let body = request_body("qwen2.5:7b", &request);
+        let body = request_body("qwen2.5:7b", "instrucciones", "x", &output_schema());
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
@@ -156,6 +152,6 @@ mod tests {
         let extractor = OpenAiCompatible::new(None, "qwen2.5:7b".into(), Some(" ".into()));
         assert_eq!(extractor.base_url, OLLAMA_BASE_URL);
         assert_eq!(extractor.api_key, None);
-        assert_eq!(extractor.id(), "openai-compatible:qwen2.5:7b");
+        assert_eq!(extractor.model_id(), "openai-compatible:qwen2.5:7b");
     }
 }

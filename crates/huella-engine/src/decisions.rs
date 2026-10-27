@@ -50,7 +50,7 @@ pub struct ExtractionReport {
 pub fn extract_decisions(
     store: &mut Store,
     projects: &Path,
-    extractor: &dyn DecisionExtractor,
+    extractor: &(impl DecisionExtractor + ?Sized),
     options: &ExtractionOptions,
     mut progress: impl FnMut(&Conversation),
 ) -> crate::Result<ExtractionReport> {
