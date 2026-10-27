@@ -516,7 +516,9 @@ name = "huella-lsp"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "huella-anchoring",
  "huella-engine",
+ "huella-review",
  "huella-store",
  "lsp-server",
  "lsp-types",

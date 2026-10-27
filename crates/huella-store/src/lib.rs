@@ -115,6 +115,13 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, turn)
     );
 ",
+    r"
+    CREATE TABLE review_active (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        session_id      TEXT NOT NULL,
+        started_at      TEXT NOT NULL
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -404,6 +411,31 @@ impl Store {
                 params![session_id, step_key],
             )?;
         }
+        Ok(())
+    }
+
+    /// Sesión que se está revisando: el editor muestra sus pasos pendientes.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn active_review(&self) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT session_id FROM review_active WHERE id = 1", [], |row| row.get(0)).optional()?)
+    }
+
+    /// Fija (o quita, con `None`) la sesión que se está revisando.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_active_review(&self, session_id: Option<&str>) -> Result<()> {
+        match session_id {
+            Some(session) => self.conn.execute(
+                "INSERT INTO review_active (id, session_id, started_at)
+                 VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, started_at = excluded.started_at",
+                [session],
+            )?,
+            None => self.conn.execute("DELETE FROM review_active", [])?,
+        };
         Ok(())
     }
 
@@ -915,6 +947,17 @@ mod tests {
         assert_eq!(marks.len(), 1);
         assert_eq!(marks["a.ts#f#Flow"], "h3");
         assert!(store.review_marks("s2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn there_is_at_most_one_active_review() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.active_review().unwrap(), None);
+        store.set_active_review(Some("s1")).unwrap();
+        store.set_active_review(Some("s2")).unwrap();
+        assert_eq!(store.active_review().unwrap().as_deref(), Some("s2"));
+        store.set_active_review(None).unwrap();
+        assert_eq!(store.active_review().unwrap(), None);
     }
 
     #[test]

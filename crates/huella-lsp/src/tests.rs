@@ -113,6 +113,19 @@ impl Client {
         )
     }
 
+    /// Espera la siguiente notificación `method` e ignora el resto de mensajes.
+    fn next_notification(&self, method: &str) -> Value {
+        loop {
+            let message =
+                self.connection.receiver.recv_timeout(Duration::from_secs(10)).expect("no llegó la notificación");
+            if let Message::Notification(notification) = message
+                && notification.method == method
+            {
+                return notification.params;
+            }
+        }
+    }
+
     fn shutdown(mut self) {
         self.request("shutdown", Value::Null);
         self.notify("exit", Value::Null);
@@ -231,6 +244,46 @@ fn hover_p95_stays_under_50_ms_on_a_large_file() {
     let p95 = timings[timings.len() * 95 / 100];
     eprintln!("p95 del hover: {p95:?} · mediana {:?} · {} líneas", timings[timings.len() / 2], large.lines().count());
     assert!(p95 < Duration::from_millis(50), "p95 del hover: {p95:?} sobre {} líneas", large.lines().count());
+    client.shutdown();
+}
+
+#[test]
+fn the_active_review_shows_pending_steps_that_a_code_action_marks_as_reviewed() {
+    let fixture = Fixture::new("review");
+    fixture.index();
+    Store::open(&fixture.db).unwrap().set_active_review(Some("s2")).unwrap();
+    let mut client = Client::start(config(&fixture, Some(&fixture.projects)), false);
+    let uri = fixture.uri();
+    client.open(&uri, V2);
+
+    let published = client.next_notification("textDocument/publishDiagnostics");
+    let diagnostics = published["diagnostics"].as_array().unwrap().clone();
+    assert_eq!(diagnostics.len(), 1, "{published}");
+    let message = diagnostics[0]["message"].as_str().unwrap();
+    assert!(message.contains("paso 1 de 1 pendiente: UserService.register"), "{message}");
+    assert!(message.contains("Aplico trim() antes de guardar."), "{message}");
+    assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);
+
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({"textDocument": {"uri": uri}, "range": diagnostics[0]["range"], "context": {"diagnostics": diagnostics}}),
+    );
+    let command = &actions[0]["command"];
+    assert_eq!(command["command"], "huella.markReviewed");
+    client
+        .request("workspace/executeCommand", json!({"command": command["command"], "arguments": command["arguments"]}));
+    let republished = client.next_notification("textDocument/publishDiagnostics");
+    assert_eq!(republished["diagnostics"], json!([]), "revisado: ya no está pendiente");
+    client.shutdown();
+}
+
+#[test]
+fn without_an_active_review_there_are_no_diagnostics() {
+    let fixture = Fixture::new("noreview");
+    fixture.index();
+    let client = Client::start(config(&fixture, Some(&fixture.projects)), false);
+    client.open(&fixture.uri(), V2);
+    assert_eq!(client.next_notification("textDocument/publishDiagnostics")["diagnostics"], json!([]));
     client.shutdown();
 }
 

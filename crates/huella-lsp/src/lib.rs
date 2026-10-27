@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
+mod review;
+
 use crossbeam_channel::{Receiver, select};
 use huella_store::Store;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -74,6 +76,11 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(false) }),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
+            commands: vec![review::MARK_REVIEWED.to_owned()],
+            ..lsp_types::ExecuteCommandOptions::default()
+        }),
         ..ServerCapabilities::default()
     };
     let (initialize_id, params) = connection.initialize_start()?;
@@ -90,7 +97,14 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         .and_then(|lens| lens.refresh_support)
         .unwrap_or(false);
 
-    let mut server = Server { store: Store::open(&config.db)?, documents: HashMap::new(), next_request: 0 };
+    let mut server = Server {
+        store: Store::open(&config.db)?,
+        documents: HashMap::new(),
+        next_request: 0,
+        projects: config.projects.clone(),
+        review: None,
+    };
+    server.reload_review();
     let indexed = spawn_indexer(config);
     loop {
         select! {
@@ -104,8 +118,13 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
                 server.handle(connection, message)?;
             }
             recv(indexed) -> new_edits => {
-                if new_edits.is_ok_and(|count| count > 0) && can_refresh_lenses {
+                let new_edits = new_edits.unwrap_or_default();
+                if new_edits > 0 && can_refresh_lenses {
                     server.request(connection, CodeLensRefresh::METHOD, serde_json::Value::Null)?;
+                }
+                // La revisión activa puede haber cambiado (otra sesión, o la misma con más ediciones).
+                if server.reload_review_if_changed(new_edits > 0) {
+                    server.publish_all(connection)?;
                 }
             }
         }
@@ -144,21 +163,70 @@ struct Server {
     /// Contenido actual de los ficheros abiertos, que puede no estar guardado.
     documents: HashMap<Uri, String>,
     next_request: i32,
+    projects: Option<PathBuf>,
+    /// Revisión activa (`huella review start`), si la hay.
+    review: Option<review::ActiveReview>,
 }
 
 impl Server {
     fn handle(&mut self, connection: &Connection, message: Message) -> Result<()> {
         match message {
             Message::Request(request) => {
+                let marks_changed = request.method == lsp_types::request::ExecuteCommand::METHOD;
                 let response = self.respond(request);
-                connection.sender.send(Message::Response(response)).map_err(|_| ServerError::Disconnected)
+                connection.sender.send(Message::Response(response)).map_err(|_| ServerError::Disconnected)?;
+                if marks_changed {
+                    self.publish_all(connection)?;
+                }
+                Ok(())
             }
             Message::Notification(notification) => {
-                self.notify(notification);
+                if let Some(uri) = self.notify(notification) {
+                    self.publish(connection, &uri)?;
+                }
                 Ok(())
             }
             Message::Response(_) => Ok(()),
         }
+    }
+
+    fn reload_review(&mut self) {
+        self.review = self.projects.as_deref().and_then(|projects| review::ActiveReview::load(&self.store, projects));
+    }
+
+    /// Recarga la revisión si cambió la sesión activa o si hay ediciones
+    /// nuevas. Devuelve si hay que volver a publicar las diagnosis.
+    fn reload_review_if_changed(&mut self, new_edits: bool) -> bool {
+        let active = self.store.active_review().ok().flatten();
+        let loaded = self.review.as_ref().map(|r| r.session.clone());
+        if active != loaded || (active.is_some() && new_edits) {
+            self.reload_review();
+            return true;
+        }
+        false
+    }
+
+    /// Pasos pendientes de la revisión activa en un fichero abierto.
+    fn publish(&self, connection: &Connection, uri: &Uri) -> Result<()> {
+        let diagnostics = match (&self.review, self.document(uri)) {
+            (Some(review), Some((path, source))) => {
+                review.diagnostics(&self.store, &huella_engine::normalize_path(&path, None), source)
+            }
+            _ => Vec::new(),
+        };
+        let params = lsp_types::PublishDiagnosticsParams { uri: uri.clone(), diagnostics, version: None };
+        let notification = Notification::new(
+            lsp_types::notification::PublishDiagnostics::METHOD.into(),
+            serde_json::to_value(params)?,
+        );
+        connection.sender.send(Message::Notification(notification)).map_err(|_| ServerError::Disconnected)
+    }
+
+    fn publish_all(&self, connection: &Connection) -> Result<()> {
+        for uri in self.documents.keys() {
+            self.publish(connection, uri)?;
+        }
+        Ok(())
     }
 
     fn respond(&self, request: Request) -> Response {
@@ -170,6 +238,10 @@ impl Server {
             }),
             CodeLensRequest::METHOD => parse::<lsp_types::CodeLensParams>(request)
                 .map(|params| serde_json::to_value(self.code_lenses(&params.text_document.uri))),
+            lsp_types::request::CodeActionRequest::METHOD => parse::<lsp_types::CodeActionParams>(request)
+                .map(|params| serde_json::to_value(code_actions(&params.context.diagnostics))),
+            lsp_types::request::ExecuteCommand::METHOD => parse::<lsp_types::ExecuteCommandParams>(request)
+                .map(|params| serde_json::to_value(self.execute(&params))),
             _ => return Response::new_err(id, ErrorCode::MethodNotFound as i32, "método no soportado".into()),
         };
         match result {
@@ -179,27 +251,43 @@ impl Server {
         }
     }
 
-    fn notify(&mut self, notification: Notification) {
+    /// Aplica la notificación y devuelve el documento cuyas diagnosis hay que
+    /// volver a publicar.
+    fn notify(&mut self, notification: Notification) -> Option<Uri> {
         match notification.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                if let Ok(params) = parse_notification::<lsp_types::DidOpenTextDocumentParams>(notification) {
-                    self.documents.insert(params.text_document.uri, params.text_document.text);
-                }
+                let params = parse_notification::<lsp_types::DidOpenTextDocumentParams>(notification).ok()?;
+                self.documents.insert(params.text_document.uri.clone(), params.text_document.text);
+                Some(params.text_document.uri)
             }
             DidChangeTextDocument::METHOD => {
-                if let Ok(mut params) = parse_notification::<lsp_types::DidChangeTextDocumentParams>(notification)
-                    && let Some(change) = params.content_changes.pop()
-                {
-                    self.documents.insert(params.text_document.uri, change.text);
-                }
+                let mut params = parse_notification::<lsp_types::DidChangeTextDocumentParams>(notification).ok()?;
+                let change = params.content_changes.pop()?;
+                self.documents.insert(params.text_document.uri.clone(), change.text);
+                Some(params.text_document.uri)
             }
             DidCloseTextDocument::METHOD => {
                 if let Ok(params) = parse_notification::<lsp_types::DidCloseTextDocumentParams>(notification) {
                     self.documents.remove(&params.text_document.uri);
                 }
+                None
             }
-            _ => {}
+            _ => None,
         }
+    }
+
+    /// `huella.markReviewed`: guarda la marca del paso de la diagnosis.
+    fn execute(&self, params: &lsp_types::ExecuteCommandParams) -> Option<serde_json::Value> {
+        let review = self.review.as_ref()?;
+        if params.command != review::MARK_REVIEWED {
+            return None;
+        }
+        let data = params.arguments.first()?;
+        let (key, hash) = (data["key"].as_str()?, data["hash"].as_str()?);
+        if let Err(error) = self.store.set_review_mark(&review.session, key, hash, true) {
+            eprintln!("huella: no se pudo marcar el paso: {error}");
+        }
+        None
     }
 
     fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
@@ -247,6 +335,32 @@ impl Server {
         let request = Request::new(RequestId::from(format!("huella-{}", self.next_request)), method.into(), params);
         connection.sender.send(Message::Request(request)).map_err(|_| ServerError::Disconnected)
     }
+}
+
+/// Una acción "marcar como revisado" por cada paso pendiente bajo el cursor.
+fn code_actions(diagnostics: &[lsp_types::Diagnostic]) -> Vec<lsp_types::CodeActionOrCommand> {
+    diagnostics
+        .iter()
+        .filter(|d| d.source.as_deref() == Some(review::SOURCE))
+        .filter_map(|d| {
+            let data = d.data.clone()?;
+            let step = d.code.as_ref().map(|code| match code {
+                lsp_types::NumberOrString::String(code) => code.replace('-', " "),
+                lsp_types::NumberOrString::Number(number) => number.to_string(),
+            });
+            Some(lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+                title: format!("Huella: marcar {} como revisado", step.unwrap_or_else(|| "el paso".into())),
+                kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![d.clone()]),
+                command: Some(Command {
+                    title: "Marcar como revisado".into(),
+                    command: review::MARK_REVIEWED.into(),
+                    arguments: Some(vec![data]),
+                }),
+                ..lsp_types::CodeAction::default()
+            }))
+        })
+        .collect()
 }
 
 fn parse<P: serde::de::DeserializeOwned>(request: Request) -> std::result::Result<P, serde_json::Error> {
