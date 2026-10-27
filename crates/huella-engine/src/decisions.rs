@@ -121,7 +121,7 @@ fn session_project(store: &Store, conversation: &Conversation) -> crate::Result<
 
 /// Cada fichero vota por su repositorio git o, si no lo tiene, por la
 /// subcarpeta del directorio de arranque que lo contiene.
-fn project_from_paths(paths: &[String], cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn project_from_paths(paths: &[String], cwd: Option<&Path>) -> Option<String> {
     let mut votes: BTreeMap<PathBuf, usize> = BTreeMap::new();
     for path in paths.iter().map(Path::new) {
         let repository = path.ancestors().skip(1).find(|dir| dir.join(".git").exists()).map(Path::to_path_buf);

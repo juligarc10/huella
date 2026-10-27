@@ -178,6 +178,16 @@ pub struct StoredDecision {
     pub extractor: String,
 }
 
+/// Resumen de una sesión para elegir qué revisar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub first_at: Option<String>,
+    pub last_at: Option<String>,
+    pub edits: usize,
+    pub files: usize,
+}
+
 /// Qué decisiones listar.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionFilter {
@@ -329,6 +339,29 @@ impl Store {
         let rows = statement.query_map([path], |row| {
             let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
             Ok((row.get(0)?, SymbolActivity { edits: count(1)?, sessions: count(2)?, last_at: row.get(3)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sesiones con ediciones, de la más reciente a la más antigua.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT s.id, s.first_at, s.last_at, COUNT(e.id), COUNT(DISTINCT e.path)
+             FROM session s JOIN edit e ON e.session_id = s.id
+             GROUP BY s.id ORDER BY s.last_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                first_at: row.get(1)?,
+                last_at: row.get(2)?,
+                edits: count(3)?,
+                files: count(4)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
