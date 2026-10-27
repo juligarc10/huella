@@ -233,7 +233,8 @@ fn run(cli: Cli) -> Result<()> {
                 emit(&review::render_review(&review, file.as_deref()));
             } else {
                 let plan = huella_review::flow::plan(&review);
-                emit(&review::render_flow(&review, &plan, file.as_deref()));
+                let points = huella_review::attention::attention(&review, &plan);
+                emit(&review::render_flow(&review, &plan, &points, file.as_deref()));
             }
             Ok(())
         }

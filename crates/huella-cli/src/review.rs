@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 use huella_engine::SessionListing;
+use huella_review::attention::{Attention, AttentionKind};
 use huella_review::flow::{FlowStep, StepRole};
 use huella_review::{DiffLine, ExternalReason, FileStatus, Hunk, SessionReview, Step};
 
@@ -150,7 +151,12 @@ fn render_lines(out: &mut String, style: &Style, review: &SessionReview, lines: 
 
 /// Revisión en el orden del flujo: puntos de entrada, lo que van llamando,
 /// tests y otros cambios. Cada línea del diff aparece en un solo paso.
-pub fn render_flow(review: &SessionReview, plan: &[FlowStep], file_filter: Option<&str>) -> String {
+pub fn render_flow(
+    review: &SessionReview,
+    plan: &[FlowStep],
+    points: &[Attention],
+    file_filter: Option<&str>,
+) -> String {
     let style = Style::detect();
     let mut out = String::new();
     let unexplained = plan
@@ -184,6 +190,9 @@ pub fn render_flow(review: &SessionReview, plan: &[FlowStep], file_filter: Optio
                 None => "━━ Cambios sin explicación (terminal, formateadores o a mano)".to_owned(),
             };
             let _ = writeln!(out, "\n{}", style.paint("1;36", &header));
+            for point in points.iter().filter(|p| p.turn == step.turn && p.step.is_none()) {
+                let _ = writeln!(out, "   {}", style.paint("1;33", &format!("⚑ {}", point.message)));
+            }
         }
         if section != Some((step.turn, step.role)) {
             section = Some((step.turn, step.role));
@@ -209,6 +218,9 @@ pub fn render_flow(review: &SessionReview, plan: &[FlowStep], file_filter: Optio
             step.added(),
             step.removed()
         );
+        for point in points.iter().filter(|p| p.step == Some(number) && p.kind != AttentionKind::Unexplained) {
+            let _ = writeln!(out, "{indent}   {}", style.paint("33", &format!("⚑ {}", point.message)));
+        }
         render_sources(&mut out, &style, review, &step.sources, &format!("{indent}   "), step.turn);
         render_lines(&mut out, &style, review, &step.lines, &format!("{indent}   "));
     }

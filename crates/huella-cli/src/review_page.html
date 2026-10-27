@@ -54,6 +54,10 @@
   .why { margin: 0 0 8px; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 6px 6px 0; white-space: pre-wrap; }
   .why .who { font-size: 11px; color: var(--quiet); display: block; margin-bottom: 2px; }
   .external { margin: 0 0 8px; padding: 10px 14px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--warn); border-radius: 0 6px 6px 0; }
+  .flags { margin: 0 0 10px; padding: 0; list-style: none; }
+  .flags li { margin: 0 0 4px; color: var(--warn); font-size: 13px; }
+  .flags li::before { content: "⚑ "; }
+  .turn .flagcount { color: var(--warn); font-weight: 400; margin-left: 6px; }
   .calls { margin: 8px 0 14px; font-size: 13px; color: var(--quiet); }
   .calls a { color: var(--accent); cursor: pointer; font-family: var(--mono); font-size: 12px; margin-right: 8px; }
   pre.diff { margin: 0; padding: 8px 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
@@ -124,6 +128,8 @@ function renderNav() {
       turn = step.turn; role = undefined;
       const info = turn == null ? null : data.turns[turn];
       const head = el("div", "turn", info ? `Turno ${turn + 1}` : "Sin explicación");
+      const flags = data.attention.filter((p) => p.turn === turn && p.kind !== "unexplained").length;
+      if (flags) head.append(el("span", "flagcount", `⚑ ${flags}`));
       head.append(el("small", null, info ? `${shortDate(info.started_at)} · ${clip(info.prompt || "", 90)}` : "Terminal, formateadores o a mano"));
       nav.append(head);
     }
@@ -162,6 +168,12 @@ function renderDetail() {
 
   const turn = step.turn == null ? null : data.turns[step.turn];
   if (turn && turn.prompt) box.append(el("p", "prompt", `Petición: «${clip(turn.prompt, 400)}»`));
+  const points = data.attention.filter((p) => p.kind !== "unexplained" && (p.step === current || (p.step == null && p.turn === step.turn)));
+  if (points.length) {
+    const list = el("ul", "flags");
+    for (const point of points) list.append(el("li", null, point.step == null ? `Este turno ${point.message}` : point.message));
+    box.append(list);
+  }
   const seen = new Set();
   for (const source of step.sources) {
     if (source.kind === "agent" && source.rationale && !seen.has(source.rationale)) {

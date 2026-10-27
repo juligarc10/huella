@@ -153,6 +153,7 @@ pub fn payload(
         .collect();
     json!({
         "session": review.session_id,
+        "attention": huella_review::attention::attention(review, plan),
         "editor": match editor { Editor::Zed => "zed", Editor::Vscode => "vscode" },
         "turns": review.turns,
         "unreconstructable": review.unreconstructable,
