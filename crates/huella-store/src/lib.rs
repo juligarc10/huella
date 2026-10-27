@@ -104,6 +104,17 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, step_key)
     );
 ",
+    r"
+    CREATE TABLE review_narration (
+        session_id      TEXT NOT NULL,
+        turn            INTEGER NOT NULL,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        narration       TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (session_id, turn)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -185,6 +196,16 @@ pub struct StoredDecision {
     pub superseded_by: Option<String>,
     pub decided_at: Option<String>,
     pub extractor: String,
+}
+
+/// Narración de un turno generada por un modelo, con el hash de lo que se le
+/// envió para saber si sigue vigente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredNarration {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub narration: String,
 }
 
 /// Resumen de una sesión para elegir qué revisar.
@@ -383,6 +404,45 @@ impl Store {
                 params![session_id, step_key],
             )?;
         }
+        Ok(())
+    }
+
+    /// Narraciones guardadas de una sesión, por turno.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn narrations(&self, session_id: &str) -> Result<HashMap<usize, StoredNarration>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT turn, input_hash, model, narration FROM review_narration WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| {
+            let turn: i64 = row.get(0)?;
+            Ok((
+                usize::try_from(turn).unwrap_or_default(),
+                StoredNarration { input_hash: row.get(1)?, model: row.get(2)?, narration: row.get(3)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Guarda (o sustituye) la narración de un turno.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_narration(&self, session_id: &str, turn: usize, stored: &StoredNarration) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_narration (session_id, turn, input_hash, model, narration, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id, turn) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 narration = excluded.narration, created_at = excluded.created_at",
+            params![
+                session_id,
+                i64::try_from(turn).unwrap_or(i64::MAX),
+                stored.input_hash,
+                stored.model,
+                stored.narration
+            ],
+        )?;
         Ok(())
     }
 
@@ -855,6 +915,18 @@ mod tests {
         assert_eq!(marks.len(), 1);
         assert_eq!(marks["a.ts#f#Flow"], "h3");
         assert!(store.review_marks("s2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn narrations_are_stored_per_turn_and_replaced() {
+        let store = Store::open_in_memory().unwrap();
+        let first = StoredNarration { input_hash: "h1".into(), model: "m".into(), narration: "{}".into() };
+        store.save_narration("s1", 0, &first).unwrap();
+        let second = StoredNarration { input_hash: "h2".into(), ..first.clone() };
+        store.save_narration("s1", 0, &second).unwrap();
+        store.save_narration("s1", 3, &first).unwrap();
+        let stored = store.narrations("s1").unwrap();
+        assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
     }
 
     #[test]

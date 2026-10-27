@@ -3,6 +3,7 @@
 
 mod decisions;
 mod index;
+pub mod narration;
 mod paths;
 mod query;
 mod render;
