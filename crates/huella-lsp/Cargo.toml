@@ -1,0 +1,19 @@
+[package]
+name = "huella-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5.17"
+huella-engine = { version = "0.1.0", path = "../huella-engine" }
+huella-store = { version = "0.1.0", path = "../huella-store" }
+lsp-server = "0.10.0"
+lsp-types = "0.97.0"
+serde = "1.0.229"
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

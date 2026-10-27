@@ -1,0 +1,70 @@
+{
+  "name": "huella",
+  "displayName": "Huella",
+  "description": "Lo que se habló con la IA sobre cada función, al pasar el ratón.",
+  "version": "0.1.0",
+  "publisher": "juligarc10",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/juligarc10/huella"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:python",
+    "onLanguage:rust"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Huella",
+      "properties": {
+        "huella.serverPath": {
+          "type": "string",
+          "default": "huella",
+          "markdownDescription": "Ruta al binario `huella`. Por defecto se busca en el `PATH` (`cargo install --path crates/huella-cli`)."
+        },
+        "huella.databasePath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base de datos de Huella. Vacío: `$HUELLA_DB` o la carpeta de datos del usuario."
+        },
+        "huella.indexEverySeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "Segundos entre indexados de las transcripciones nuevas. `0` desactiva el indexado desde el editor."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "huella.restart",
+        "title": "Huella: reiniciar el servidor"
+      }
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "npm run check && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js --minify",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -53,15 +53,18 @@ pub fn render(
 
 fn describe(outcome: &AnchorOutcome) -> String {
     match outcome {
-        AnchorOutcome::Symbols { symbols, also_module, confidence } => {
-            let names: Vec<String> = symbols
+        AnchorOutcome::Anchored(anchor) => {
+            let mut parts: Vec<String> = anchor
+                .symbols
                 .iter()
                 .map(|s| format!("`{}` (l. {}–{})", s.qualified_name, s.start_line, s.end_line))
                 .collect();
-            let module = if *also_module { " + nivel módulo" } else { "" };
-            format!("{}{module} · {confidence:?}", names.join(", "))
+            parts.extend(anchor.removed.iter().map(|s| format!("~~`{}`~~ (borrado)", s.qualified_name)));
+            if anchor.module_level {
+                parts.push("nivel módulo".to_owned());
+            }
+            format!("{} · {:?}", parts.join(", "), anchor.confidence)
         }
-        AnchorOutcome::ModuleOnly { confidence } => format!("solo nivel módulo · {confidence:?}"),
         other => format!("{other:?}"),
     }
 }

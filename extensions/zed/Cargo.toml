@@ -1,0 +1,16 @@
+[package]
+name = "huella-zed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Zed compila la extensión por su cuenta a WebAssembly: no forma parte del
+# workspace del servidor.
+[workspace]

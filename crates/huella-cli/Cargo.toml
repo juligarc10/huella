@@ -11,6 +11,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 huella-anchoring = { version = "0.1.0", path = "../huella-anchoring" }
 huella-claude-code = { version = "0.1.0", path = "../huella-claude-code" }
 huella-core = { version = "0.1.0", path = "../huella-core" }
+huella-decisions = { version = "0.1.0", path = "../huella-decisions" }
+huella-engine = { version = "0.1.0", path = "../huella-engine" }
+huella-lsp = { version = "0.1.0", path = "../huella-lsp" }
+huella-store = { version = "0.1.0", path = "../huella-store" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 

@@ -1,2 +1,6 @@
 /target
 /.claude/worktrees/
+node_modules/
+/extensions/vscode/dist/
+*.vsix
+/extensions/zed/target/
