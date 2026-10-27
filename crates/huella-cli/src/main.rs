@@ -129,6 +129,17 @@ enum ReviewCommand {
         #[arg(long, default_value_t = 15)]
         limit: usize,
     },
+    /// Activa la revisión de una sesión en el editor: sus pasos pendientes
+    /// aparecen como diagnosis y una acción de código los marca revisados.
+    Start {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Quita la revisión activa del editor.
+    Stop,
     /// Genera con un modelo el resumen de cada turno, notas por paso y riesgos.
     Narrate {
         /// Id de la sesión o su comienzo.
@@ -236,6 +247,23 @@ fn run(cli: Cli) -> Result<()> {
             emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
             Ok(())
         }
+        Command::Review { action: ReviewCommand::Start { session, projects } } => {
+            let store = open_store(cli.db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let steps = huella_review::flow::plan(&review).len();
+            store.set_active_review(Some(&review.session_id))?;
+            println!(
+                "Revisión activa: sesión {} ({steps} pasos). Los editores con Huella la muestran como diagnosis \
+                 en unos segundos; `huella review stop` la quita.",
+                &review.session_id[..8.min(review.session_id.len())]
+            );
+            Ok(())
+        }
+        Command::Review { action: ReviewCommand::Stop } => {
+            open_store(cli.db)?.set_active_review(None)?;
+            println!("Sin revisión activa.");
+            Ok(())
+        }
         Command::Review { action: ReviewCommand::Narrate { session, model, projects } } => {
             let model = build_model(model)?;
             let store = open_store(cli.db)?;
@@ -256,6 +284,8 @@ fn run(cli: Cli) -> Result<()> {
             let store = open_store(cli.db)?;
             let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
+            // La misma revisión aparece también en el editor mientras se hace en la web.
+            store.set_active_review(Some(&review.session_id))?;
             web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
         }
         Command::Review { action: ReviewCommand::Show { session, file, by_file, projects } } => {
