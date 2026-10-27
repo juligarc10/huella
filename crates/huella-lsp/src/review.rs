@@ -11,7 +11,7 @@ use huella_engine::narration::Narration;
 use huella_review::attention::Attention;
 use huella_review::flow::FlowStep;
 use huella_review::{DiffLine, SessionReview, Step};
-use huella_store::Store;
+use huella_store::{ReviewWorkspace, Store};
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
 use serde_json::json;
 
@@ -23,6 +23,8 @@ pub(crate) struct ActiveReview {
     review: SessionReview,
     plan: Vec<FlowStep>,
     narrations: BTreeMap<usize, Narration>,
+    /// Worktree de `huella review zed`, si la sesión tiene uno.
+    workspace: Option<ReviewWorkspace>,
 }
 
 impl ActiveReview {
@@ -35,7 +37,8 @@ impl ActiveReview {
         let plan = huella_review::flow::plan(&review);
         let points: Vec<Attention> = huella_review::attention::attention(&review, &plan);
         let narrations = huella_engine::narration::narrations(store, &review, &plan, &points).unwrap_or_default();
-        Some(Self { session, review, plan, narrations })
+        let workspace = store.review_workspace(&session).ok().flatten();
+        Some(Self { session, review, plan, narrations, workspace })
     }
 
     /// Pasos pendientes de un fichero como diagnosis, contra su contenido actual.
@@ -82,9 +85,26 @@ impl ActiveReview {
             .collect()
     }
 
-    /// Ficheros que tienen pasos en la revisión.
-    pub fn file_paths(&self) -> impl Iterator<Item = &str> {
-        self.review.files.iter().map(|file| file.path.as_str())
+    /// Ficheros que tienen pasos en la revisión. Con worktree de revisión, sus
+    /// copias en él: es el proyecto abierto en el editor y así su panel de
+    /// diagnósticos los lista.
+    pub fn file_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.review.files.iter().map(|file| match &self.workspace {
+            Some(workspace) => match file.path.strip_prefix(&workspace.repo) {
+                Some(relative) if relative.starts_with('/') => format!("{}{relative}", workspace.path),
+                _ => file.path.clone(),
+            },
+            None => file.path.clone(),
+        })
+    }
+
+    /// Marca como revisados los ficheros preparados (stage) en el worktree de
+    /// revisión. Devuelve si marcó alguno.
+    pub fn sync_workspace(&self, store: &Store) -> bool {
+        let Some(workspace) = &self.workspace else { return false };
+        huella_engine::workspace::sync_workspace_marks(store, &self.review, &self.plan, workspace)
+            .inspect_err(|error| eprintln!("huella: no se pudo leer el worktree de revisión: {error}"))
+            .is_ok_and(|marked| marked > 0)
     }
 
     /// Lo más útil para decidir: la nota del modelo, la explicación del agente

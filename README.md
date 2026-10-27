@@ -70,6 +70,7 @@ huella review list                   # sesiones recientes con ediciones
 huella review show 84e33d8e          # guion en la terminal (--by-file para verlo por fichero)
 huella review open 84e33d8e          # en el navegador, con enlaces a Zed (--editor vscode)
 huella review start 84e33d8e --open  # en el editor: abre el proyecto y cada paso pendiente es una diagnosis
+huella review zed 84e33d8e           # en Zed, con su vista de cambios de git (ver abajo)
 huella review stop
 huella review narrate 84e33d8e --provider openai-compatible --base-url … --model …
 ```
@@ -94,6 +95,24 @@ Cómo se arma el guion:
 Los pasos revisados se guardan con un hash de su contenido: si el código del
 paso cambia, vuelve a quedar pendiente. Web, editor y terminal comparten las
 marcas.
+
+#### En Zed, con su vista de cambios
+
+```sh
+huella review zed 84e33d8e         # prepara el worktree, activa la revisión y abre Zed
+huella review zed 84e33d8e --done  # borra el worktree y su rama al terminar
+```
+
+Zed no admite vistas propias, así que Huella le da un repositorio cuyo diff de
+git es exactamente la sesión: un worktree en `.claude/worktrees/huella-review-<id>`
+(rama `huella/review-<id>`) con un commit del estado de cada fichero al empezar
+la sesión y su estado final sin commitear. En la vista de cambios de git de Zed
+(Project Diff) se ve cada fichero completo con sus cambios; **preparar (stage)
+un fichero entero marca sus pasos como revisados** (quitarlo del stage no los
+desmarca). Los avisos de Huella explican cada paso y el panel de diagnósticos
+lista lo pendiente. Los ficheros de la sesión fuera del repositorio no se
+incluyen. `.claude/worktrees/` se añade a `.git/info/exclude` del repositorio
+para que el worktree no aparezca como cambio.
 
 ### Extraer decisiones
 

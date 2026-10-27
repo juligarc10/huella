@@ -122,6 +122,15 @@ const MIGRATIONS: &[&str] = &[
         started_at      TEXT NOT NULL
     );
 ",
+    r"
+    CREATE TABLE review_workspace (
+        session_id      TEXT PRIMARY KEY,
+        repo            TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        branch          TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -203,6 +212,17 @@ pub struct StoredDecision {
     pub superseded_by: Option<String>,
     pub decided_at: Option<String>,
     pub extractor: String,
+}
+
+/// Worktree de git con el estado previo de la sesión en un commit y su
+/// resultado como cambios sin commitear, para revisarla con las herramientas
+/// de git del editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewWorkspace {
+    pub session_id: String,
+    pub repo: String,
+    pub path: String,
+    pub branch: String,
 }
 
 /// Narración de un turno generada por un modelo, con el hash de lo que se le
@@ -411,6 +431,48 @@ impl Store {
                 params![session_id, step_key],
             )?;
         }
+        Ok(())
+    }
+
+    /// Worktree de git preparado para revisar una sesión en el editor.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_workspace(&self, session_id: &str) -> Result<Option<ReviewWorkspace>> {
+        let found = self
+            .conn
+            .query_row(
+                "SELECT session_id, repo, path, branch FROM review_workspace WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(ReviewWorkspace {
+                        session_id: row.get(0)?,
+                        repo: row.get(1)?,
+                        path: row.get(2)?,
+                        branch: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(found)
+    }
+
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_review_workspace(&self, workspace: &ReviewWorkspace) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_workspace (session_id, repo, path, branch, created_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id) DO UPDATE SET repo = excluded.repo, path = excluded.path, branch = excluded.branch",
+            params![workspace.session_id, workspace.repo, workspace.path, workspace.branch],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_review_workspace(&self, session_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM review_workspace WHERE session_id = ?1", [session_id])?;
         Ok(())
     }
 
@@ -947,6 +1009,21 @@ mod tests {
         assert_eq!(marks.len(), 1);
         assert_eq!(marks["a.ts#f#Flow"], "h3");
         assert!(store.review_marks("s2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn review_workspaces_are_remembered_per_session() {
+        let store = Store::open_in_memory().unwrap();
+        let workspace = ReviewWorkspace {
+            session_id: "s1".into(),
+            repo: "/repo".into(),
+            path: "/repo/.claude/worktrees/huella-review-s1".into(),
+            branch: "huella/review-s1".into(),
+        };
+        store.save_review_workspace(&workspace).unwrap();
+        assert_eq!(store.review_workspace("s1").unwrap(), Some(workspace));
+        store.delete_review_workspace("s1").unwrap();
+        assert_eq!(store.review_workspace("s1").unwrap(), None);
     }
 
     #[test]

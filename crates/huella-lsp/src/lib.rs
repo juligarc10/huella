@@ -108,6 +108,7 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
     };
     server.reload_review();
     if server.review.is_some() {
+        server.sync_workspace();
         server.publish_all(connection)?;
     }
     let indexed = spawn_indexer(config);
@@ -128,7 +129,8 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
                     server.request(connection, CodeLensRefresh::METHOD, serde_json::Value::Null)?;
                 }
                 // La revisión activa puede haber cambiado (otra sesión, o la misma con más ediciones).
-                if server.reload_review_if_changed(new_edits > 0) {
+                let reloaded = server.reload_review_if_changed(new_edits > 0);
+                if server.sync_workspace() || reloaded {
                     server.publish_all(connection)?;
                 }
             }
@@ -201,6 +203,11 @@ impl Server {
         self.review = self.projects.as_deref().and_then(|projects| review::ActiveReview::load(&self.store, projects));
     }
 
+    /// Lleva a marcas lo preparado en el worktree de revisión. Devuelve si cambió algo.
+    fn sync_workspace(&self) -> bool {
+        self.review.as_ref().is_some_and(|review| review.sync_workspace(&self.store))
+    }
+
     /// Recarga la revisión si cambió la sesión activa o si hay ediciones
     /// nuevas. Devuelve si hay que volver a publicar las diagnosis.
     fn reload_review_if_changed(&mut self, new_edits: bool) -> bool {
@@ -244,7 +251,8 @@ impl Server {
         // Claves de texto: `Uri` tiene mutabilidad interior y no conviene en un `HashSet`.
         let mut targets: HashSet<String> = self.documents.keys().map(|uri| uri.as_str().to_owned()).collect();
         if let Some(review) = &self.review {
-            targets.extend(review.file_paths().filter_map(path_to_uri).map(|uri| uri.as_str().to_owned()));
+            targets
+                .extend(review.file_paths().filter_map(|path| path_to_uri(&path)).map(|uri| uri.as_str().to_owned()));
         }
         for uri in targets.union(&self.published).filter_map(|uri| uri.parse::<Uri>().ok()) {
             self.publish(connection, &uri)?;

@@ -8,6 +8,7 @@ mod paths;
 mod query;
 mod render;
 mod review;
+pub mod workspace;
 
 use std::path::PathBuf;
 
@@ -26,6 +27,8 @@ pub enum EngineError {
     Transcript(#[from] huella_claude_code::TranscriptError),
     #[error(transparent)]
     Extraction(#[from] huella_anchoring::ExtractionError),
+    #[error("{0}")]
+    Git(String),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]
