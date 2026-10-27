@@ -6,4 +6,4 @@ mod symbols;
 
 pub use anchor::{AnchorReport, anchor_edit};
 pub use language::Language;
-pub use symbols::{Extraction, ExtractionError, extract_symbols};
+pub use symbols::{Extraction, ExtractionError, extract_symbols, identifiers};

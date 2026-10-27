@@ -40,6 +40,38 @@ pub fn extract_symbols(language: Language, source: &str) -> Result<Extraction, E
     Ok(Extraction { symbols: walker.symbols, has_syntax_errors: root.has_error() })
 }
 
+/// Identificadores del fichero (`foo`, `bar` en `foo.bar()`, nombres de tipo…)
+/// con el byte donde empiezan, en orden. Sirve para aproximar qué símbolos
+/// menciona cada uno sin depender de la gramática concreta.
+///
+/// # Errors
+/// Como [`extract_symbols`].
+pub fn identifiers(language: Language, source: &str) -> Result<Vec<(usize, String)>, ExtractionError> {
+    let mut parser = Parser::new();
+    parser.set_language(&language.grammar()).map_err(|_| ExtractionError::IncompatibleGrammar(language.name()))?;
+    let tree = parser.parse(source, None).ok_or(ExtractionError::ParseFailed)?;
+    let mut found = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    let mut descending = true;
+    loop {
+        if descending && cursor.goto_first_child() {
+            continue;
+        }
+        let node = cursor.node();
+        if node.child_count() == 0 && node.kind().ends_with("identifier") {
+            found.push((node.start_byte(), source[node.byte_range()].to_owned()));
+        }
+        if cursor.goto_next_sibling() {
+            descending = true;
+        } else if cursor.goto_parent() {
+            descending = false;
+        } else {
+            break;
+        }
+    }
+    Ok(found)
+}
+
 /// Hash estable del código de un nodo: ignora comentarios, espacios y saltos de
 /// línea, de modo que reformatear no lo cambia pero cambiar la lógica sí.
 pub(crate) fn normalized_hash(node: Node, source: &str) -> String {
@@ -457,6 +489,20 @@ describe('códigos públicos', () => {
         assert_eq!(original, hash("function f(a: number) {\n  // suma uno\n  return a + 1;\n}"));
         assert_ne!(original, hash("function f(a: number) { return a + 2; }"));
         assert_ne!(original, hash("function f(ab: number) { return a + 1; }"));
+    }
+
+    #[test]
+    fn identifiers_cover_calls_members_and_types() {
+        let source = "function a(x: User) { return repo.save(build(x)); }";
+        let names: Vec<String> =
+            identifiers(Language::TypeScript, source).unwrap().into_iter().map(|(_, name)| name).collect();
+        assert_eq!(names, vec!["a", "x", "User", "repo", "save", "build", "x"]);
+        let rust: Vec<String> = identifiers(Language::Rust, "fn f() { Store::open(p).history() }")
+            .unwrap()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(rust, vec!["f", "Store", "open", "p", "history"]);
     }
 
     #[test]
