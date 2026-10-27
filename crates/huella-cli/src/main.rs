@@ -142,6 +142,9 @@ enum ReviewCommand {
         /// Solo los ficheros cuya ruta contiene este texto.
         #[arg(long)]
         file: Option<String>,
+        /// Fichero a fichero en lugar de en el orden del flujo.
+        #[arg(long)]
+        by_file: bool,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -200,9 +203,14 @@ fn run(cli: Cli) -> Result<()> {
             emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
             Ok(())
         }
-        Command::Review { action: ReviewCommand::Show { session, file, projects } } => {
+        Command::Review { action: ReviewCommand::Show { session, file, by_file, projects } } => {
             let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
-            emit(&review::render_review(&review, file.as_deref()));
+            if by_file {
+                emit(&review::render_review(&review, file.as_deref()));
+            } else {
+                let plan = huella_review::flow::plan(&review);
+                emit(&review::render_flow(&review, &plan, file.as_deref()));
+            }
             Ok(())
         }
         Command::Lsp { projects, index_every } => {

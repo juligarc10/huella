@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 use huella_engine::SessionListing;
+use huella_review::flow::{FlowStep, StepRole};
 use huella_review::{DiffLine, ExternalReason, FileStatus, Hunk, SessionReview, Step};
 
 /// Colores ANSI solo si la salida es una terminal.
@@ -84,8 +85,22 @@ fn render_hunk(out: &mut String, style: &Style, review: &SessionReview, hunk: &H
             &format!("@@ -{} +{} @@  +{} −{}", hunk.old_start, hunk.new_start, hunk.added(), hunk.removed())
         )
     );
-    let mut seen_turns = BTreeSet::new();
-    for &source in &hunk.sources {
+    render_sources(out, style, review, &hunk.sources, "  ", None);
+    render_lines(out, style, review, &hunk.lines, "");
+}
+
+/// Turno, explicación del agente o aviso de cambio externo de cada origen.
+/// `under_turn`: el turno cuya cabecera ya se mostró; sus peticiones no se repiten.
+fn render_sources(
+    out: &mut String,
+    style: &Style,
+    review: &SessionReview,
+    sources: &[usize],
+    indent: &str,
+    under_turn: Option<usize>,
+) {
+    let mut seen_turns: BTreeSet<usize> = under_turn.into_iter().collect();
+    for &source in sources {
         match &review.steps[source] {
             Step::Agent { turn, at, rationale } => {
                 if seen_turns.insert(*turn) {
@@ -93,13 +108,13 @@ fn render_hunk(out: &mut String, style: &Style, review: &SessionReview, hunk: &H
                     let when = at.as_deref().map(short_date).unwrap_or_default();
                     let _ = writeln!(
                         out,
-                        "  {} {when} · «{}»",
+                        "{indent}{} {when} · «{}»",
                         style.paint("1;34", &format!("turno {}", turn + 1)),
                         prompt.unwrap_or_default()
                     );
                 }
                 if let Some(rationale) = rationale {
-                    let _ = writeln!(out, "    ▸ {}", clip(rationale, 220));
+                    let _ = writeln!(out, "{indent}  ▸ {}", clip(rationale, 220));
                 }
             }
             Step::External { reason } => {
@@ -112,11 +127,14 @@ fn render_hunk(out: &mut String, style: &Style, review: &SessionReview, hunk: &H
                         "cambio posterior a la última edición del agente (terminal o a mano): sin explicación"
                     }
                 };
-                let _ = writeln!(out, "  {}", style.paint("1;33", &format!("⚠ {text} (líneas marcadas con !)")));
+                let _ = writeln!(out, "{indent}{}", style.paint("1;33", &format!("⚠ {text} (líneas marcadas con !)")));
             }
         }
     }
-    for line in &hunk.lines {
+}
+
+fn render_lines(out: &mut String, style: &Style, review: &SessionReview, lines: &[DiffLine], indent: &str) {
+    for line in lines {
         let rendered = match line {
             DiffLine::Context(text) => format!("  {text}"),
             // Las líneas sin explicación se marcan aparte dentro del bloque.
@@ -126,8 +144,75 @@ fn render_hunk(out: &mut String, style: &Style, review: &SessionReview, hunk: &H
             },
             DiffLine::Removed(text) => style.paint("31", &format!("- {text}")),
         };
-        let _ = writeln!(out, "{rendered}");
+        let _ = writeln!(out, "{indent}{rendered}");
     }
+}
+
+/// Revisión en el orden del flujo: puntos de entrada, lo que van llamando,
+/// tests y otros cambios. Cada línea del diff aparece en un solo paso.
+pub fn render_flow(review: &SessionReview, plan: &[FlowStep], file_filter: Option<&str>) -> String {
+    let style = Style::detect();
+    let mut out = String::new();
+    let unexplained = plan
+        .iter()
+        .filter(|step| step.sources.iter().any(|&s| matches!(review.steps[s], Step::External { .. })))
+        .count();
+    let _ = writeln!(
+        out,
+        "{} · {} turnos · {} ficheros · {} pasos ({} con cambios sin explicación)",
+        style.paint("1", &format!("Sesión {}", &review.session_id[..8.min(review.session_id.len())])),
+        review.turns.len(),
+        review.files.len(),
+        plan.len(),
+        unexplained
+    );
+    let root = common_root(review.files.iter().map(|file| file.path.as_str()));
+    let mut section = None;
+    for (number, step) in plan.iter().enumerate() {
+        let path = &review.files[step.file].path;
+        if file_filter.is_some_and(|filter| !path.contains(filter)) {
+            continue;
+        }
+        if section.is_none_or(|(turn, _)| turn != step.turn) {
+            let header = match step.turn.and_then(|turn| review.turns.get(turn)) {
+                Some(turn) => format!(
+                    "━━ Turno {} · {} · «{}»",
+                    turn.index + 1,
+                    turn.started_at.as_deref().map(short_date).unwrap_or_default(),
+                    turn.prompt.as_deref().map(|p| clip(p, 120)).unwrap_or_default()
+                ),
+                None => "━━ Cambios sin explicación (terminal, formateadores o a mano)".to_owned(),
+            };
+            let _ = writeln!(out, "\n{}", style.paint("1;36", &header));
+        }
+        if section != Some((step.turn, step.role)) {
+            section = Some((step.turn, step.role));
+            let title = match step.role {
+                StepRole::Flow => "Flujo",
+                StepRole::Test => "Tests",
+                StepRole::Other => "Otros cambios",
+            };
+            let _ = writeln!(out, "{}", style.paint("2", &format!("   {title}")));
+        }
+        let indent = "  ".repeat(step.depth.min(6));
+        let name = path.strip_prefix(&root).unwrap_or(path);
+        let (label, location) = match &step.symbol {
+            Some(symbol) => (symbol.qualified_name.clone(), format!("{name}:{}", symbol.start_line)),
+            None => ("(fuera de funciones)".to_owned(), name.to_owned()),
+        };
+        let _ = writeln!(
+            out,
+            "\n{indent}{} {}  {}  +{} −{}",
+            style.paint("1", &format!("{}.", number + 1)),
+            style.paint("1", &label),
+            style.paint("2", &location),
+            step.added(),
+            step.removed()
+        );
+        render_sources(&mut out, &style, review, &step.sources, &format!("{indent}   "), step.turn);
+        render_lines(&mut out, &style, review, &step.lines, &format!("{indent}   "));
+    }
+    out
 }
 
 /// Prefijo de directorio común, para mostrar rutas cortas.
