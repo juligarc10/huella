@@ -95,6 +95,15 @@ const MIGRATIONS: &[&str] = &[
         extractor       TEXT NOT NULL
     );
 ",
+    r"
+    CREATE TABLE review_mark (
+        session_id      TEXT NOT NULL,
+        step_key        TEXT NOT NULL,
+        content_hash    TEXT NOT NULL,
+        reviewed_at     TEXT NOT NULL,
+        PRIMARY KEY (session_id, step_key)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -341,6 +350,40 @@ impl Store {
             Ok((row.get(0)?, SymbolActivity { edits: count(1)?, sessions: count(2)?, last_at: row.get(3)? }))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Pasos revisados de una sesión: clave del paso → hash del contenido
+    /// que se revisó.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_marks(&self, session_id: &str) -> Result<HashMap<String, String>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT step_key, content_hash FROM review_mark WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Marca (o desmarca) un paso como revisado con el contenido que se vio.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_review_mark(&self, session_id: &str, step_key: &str, content_hash: &str, reviewed: bool) -> Result<()> {
+        if reviewed {
+            self.conn.execute(
+                "INSERT INTO review_mark (session_id, step_key, content_hash, reviewed_at)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(session_id, step_key) DO UPDATE SET content_hash = excluded.content_hash,
+                                                                 reviewed_at = excluded.reviewed_at",
+                params![session_id, step_key, content_hash],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM review_mark WHERE session_id = ?1 AND step_key = ?2",
+                params![session_id, step_key],
+            )?;
+        }
+        Ok(())
     }
 
     /// Sesiones con ediciones, de la más reciente a la más antigua.
@@ -799,6 +842,19 @@ mod tests {
         let titles: Vec<String> =
             store.decisions(&DecisionFilter::default()).unwrap().into_iter().map(|d| d.title).collect();
         assert_eq!(titles, vec!["B"]);
+    }
+
+    #[test]
+    fn review_marks_remember_the_reviewed_content() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_review_mark("s1", "a.ts#f#Flow", "h1", true).unwrap();
+        store.set_review_mark("s1", "a.ts#g#Flow", "h2", true).unwrap();
+        store.set_review_mark("s1", "a.ts#f#Flow", "h3", true).unwrap();
+        store.set_review_mark("s1", "a.ts#g#Flow", "h2", false).unwrap();
+        let marks = store.review_marks("s1").unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks["a.ts#f#Flow"], "h3");
+        assert!(store.review_marks("s2").unwrap().is_empty());
     }
 
     #[test]

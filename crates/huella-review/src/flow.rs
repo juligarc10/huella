@@ -65,6 +65,29 @@ impl FlowStep {
     pub fn removed(&self) -> usize {
         self.lines.iter().filter(|line| matches!(line, DiffLine::Removed(_))).count()
     }
+
+    /// Identidad estable del paso dentro de la sesión, para recordar si se revisó.
+    pub fn key(&self, review: &SessionReview) -> String {
+        let symbol = self.symbol.as_ref().map_or("(otros)", |s| s.qualified_name.as_str());
+        format!("{}#{symbol}#{:?}", review.files[self.file].path, self.role)
+    }
+
+    /// Hash de lo que se revisa: si el diff del paso cambia, la marca de
+    /// revisado deja de valer.
+    pub fn content_hash(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for line in &self.lines {
+            let (tag, text) = match line {
+                DiffLine::Context(text) => ("c", text),
+                DiffLine::Added { text, .. } => ("a", text),
+                DiffLine::Removed(text) => ("r", text),
+            };
+            hasher.update(tag.as_bytes());
+            hasher.update(text.as_bytes());
+            hasher.update(b"\n");
+        }
+        hasher.finalize().to_hex()[..16].to_owned()
+    }
 }
 
 /// Plan de revisión: por turnos (cada petición suele ser un caso de uso) y,
@@ -208,10 +231,14 @@ fn is_blank(line: &DiffLine) -> bool {
     }
 }
 
-/// Un paso llama a otro si su cuerpo menciona el nombre corto del otro.
+/// Un paso llama a otro si su cuerpo menciona el nombre corto del otro. Solo
+/// se enlaza con código del flujo: un test que define `DATABASE_URL` no es lo
+/// que llama una función que usa la variable de entorno del mismo nombre.
 fn link_calls(steps: &mut [FlowStep], names: &[BTreeSet<String>]) {
-    let short_names: Vec<Option<String>> =
-        steps.iter().map(|step| step.symbol.as_ref().map(|s| short_name(&s.qualified_name))).collect();
+    let short_names: Vec<Option<String>> = steps
+        .iter()
+        .map(|step| step.symbol.as_ref().filter(|_| step.role == StepRole::Flow).map(|s| short_name(&s.qualified_name)))
+        .collect();
     for (from, mentioned) in names.iter().enumerate() {
         let calls = short_names
             .iter()
