@@ -1,6 +1,7 @@
 //! `huella`: CLI de Huella.
 
 mod report;
+mod review;
 mod sample;
 
 use std::fs;
@@ -74,6 +75,11 @@ enum Command {
         #[command(subcommand)]
         action: DecisionsCommand,
     },
+    /// Revisión de lo que cambió en una sesión, con el porqué de cada bloque.
+    Review {
+        #[command(subcommand)]
+        action: ReviewCommand,
+    },
     /// Servidor LSP para el editor (hover y `CodeLens`), por stdin/stdout.
     Lsp {
         /// Carpeta de transcripciones a indexar en segundo plano (por defecto ~/.claude/projects).
@@ -119,6 +125,26 @@ enum DecisionsCommand {
         /// Incluye las reemplazadas, rechazadas y solo propuestas.
         #[arg(long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    /// Sesiones recientes con ediciones.
+    List {
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
+    },
+    /// Cambios netos de una sesión, fichero a fichero, con su origen.
+    Show {
+        /// Id de la sesión o su comienzo (los 8 primeros caracteres bastan).
+        session: String,
+        /// Solo los ficheros cuya ruta contiene este texto.
+        #[arg(long)]
+        file: Option<String>,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
     },
 }
 
@@ -168,6 +194,17 @@ fn run(cli: Cli) -> Result<()> {
             let filter = DecisionFilter { entity, project, include_inactive: all };
             list_decisions(&open_store(cli.db)?, &filter)
         }
+        Command::Review { action: ReviewCommand::List { limit } } => {
+            let mut store = open_store(cli.db)?;
+            huella_engine::index(&mut store, &projects_dir(None)?)?;
+            emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
+            Ok(())
+        }
+        Command::Review { action: ReviewCommand::Show { session, file, projects } } => {
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            emit(&review::render_review(&review, file.as_deref()));
+            Ok(())
+        }
         Command::Lsp { projects, index_every } => {
             let db = cli
                 .db
@@ -179,6 +216,13 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Escribe en la salida estándar sin fallar si quien lee la cierra antes
+/// (`huella review show … | head`).
+fn emit(text: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
 }
 
 fn projects_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
