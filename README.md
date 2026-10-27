@@ -37,7 +37,9 @@ La extensión arranca `huella lsp`, que indexa las transcripciones de Claude
 Code (`~/.claude/projects`) al abrir el editor y cada 30 segundos.
 
 **Zed**: con el binario instalado, en la paleta de comandos ejecuta
-`zed: install dev extension` y elige `extensions/zed`. Zed debe ver
+`zed: install dev extension` y elige `extensions/zed` del checkout principal
+(no de un worktree: Zed enlaza esa carpeta y deja de cargar la extensión si
+desaparece). Zed debe ver
 `~/.cargo/bin` en su `PATH` para compilarla (ábrelo desde una terminal si lo
 lanzaste antes de instalar Rust). Zed muestra el hover; los `CodeLens` puede
 no pintarlos.
@@ -67,7 +69,7 @@ huella decisions list --entity rust --project ~/dev/huella --all
 huella review list                   # sesiones recientes con ediciones
 huella review show 84e33d8e          # guion en la terminal (--by-file para verlo por fichero)
 huella review open 84e33d8e          # en el navegador, con enlaces a Zed (--editor vscode)
-huella review start 84e33d8e         # en el editor: cada paso pendiente es una diagnosis
+huella review start 84e33d8e --open  # en el editor: abre el proyecto y cada paso pendiente es una diagnosis
 huella review stop
 huella review narrate 84e33d8e --provider openai-compatible --base-url … --model …
 ```
