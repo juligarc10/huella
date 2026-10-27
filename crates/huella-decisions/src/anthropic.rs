@@ -5,10 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use ureq::Agent;
 
-use crate::{
-    DecisionExtractor, ExtractError, ExtractedDecision, ExtractionRequest, SYSTEM_PROMPT, output_schema, parse_output,
-    user_message,
-};
+use crate::{ExtractError, JsonModel};
 
 pub const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -48,19 +45,19 @@ impl Anthropic {
     }
 }
 
-impl DecisionExtractor for Anthropic {
-    fn id(&self) -> String {
+impl JsonModel for Anthropic {
+    fn model_id(&self) -> String {
         format!("{PROVIDER}:{}", self.model)
     }
 
-    fn extract(&self, request: &ExtractionRequest) -> Result<Vec<ExtractedDecision>, ExtractError> {
+    fn complete_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, ExtractError> {
         let network = |error: ureq::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
         let mut response = self
             .agent
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
-            .send_json(request_body(&self.model, request))
+            .send_json(request_body(&self.model, system, user, schema))
             .map_err(network)?;
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().map_err(network)?;
@@ -68,18 +65,18 @@ impl DecisionExtractor for Anthropic {
             return Err(ExtractError::Api { provider: PROVIDER, status, body });
         }
         let value: Value = serde_json::from_str(&body).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
-        parse_output(&response_text(&value)?)
+        response_text(&value)
     }
 }
 
 /// Cuerpo de la petición: salida estructurada con `output_config.format`.
-fn request_body(model: &str, request: &ExtractionRequest) -> Value {
+fn request_body(model: &str, system: &str, user: &str, schema: &Value) -> Value {
     json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_message(request)}],
-        "output_config": {"format": {"type": "json_schema", "schema": output_schema()}},
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "output_config": {"format": {"type": "json_schema", "schema": schema}},
     })
 }
 
@@ -104,11 +101,11 @@ fn response_text(response: &Value) -> Result<String, ExtractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output_schema;
 
     #[test]
     fn request_uses_structured_output_and_the_chosen_model() {
-        let request = ExtractionRequest { dialogue: "### Persona\nhola\n\n".into(), known_titles: vec![] };
-        let body = request_body("claude-haiku-5-5", &request);
+        let body = request_body("claude-haiku-5-5", "instrucciones", "### Persona\nhola\n\n", &output_schema());
         assert_eq!(body["model"], "claude-haiku-5-5");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"], output_schema());
@@ -136,7 +133,7 @@ mod tests {
     #[test]
     fn identifies_itself_by_provider_and_model() {
         let extractor = Anthropic::new("clave".into(), None, Some("http://localhost:9/".into()));
-        assert_eq!(extractor.id(), "anthropic:claude-haiku-5-5");
+        assert_eq!(extractor.model_id(), "anthropic:claude-haiku-5-5");
         assert_eq!(extractor.base_url, "http://localhost:9");
     }
 }

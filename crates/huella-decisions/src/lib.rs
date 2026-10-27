@@ -80,6 +80,30 @@ pub enum ExtractError {
     BadResponse(String),
 }
 
+/// Un modelo que responde con JSON ajustado a un esquema. Los adaptadores
+/// solo implementan esto; la extracción de decisiones y la narración de
+/// revisiones se construyen encima.
+pub trait JsonModel {
+    /// Identificador estable (`anthropic:claude-haiku-5-5`).
+    fn model_id(&self) -> String;
+
+    /// Texto JSON de la respuesta a `user` con las instrucciones `system`.
+    ///
+    /// # Errors
+    /// Si falla la llamada, el modelo la rechaza o la respuesta se corta.
+    fn complete_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, ExtractError>;
+}
+
+impl<M: JsonModel + ?Sized> DecisionExtractor for M {
+    fn id(&self) -> String {
+        self.model_id()
+    }
+
+    fn extract(&self, request: &ExtractionRequest) -> Result<Vec<ExtractedDecision>, ExtractError> {
+        parse_output(&self.complete_json(SYSTEM_PROMPT, &user_message(request), &output_schema())?)
+    }
+}
+
 /// Un modelo capaz de extraer decisiones de un trozo de diálogo.
 pub trait DecisionExtractor {
     /// Identificador estable (`anthropic:claude-haiku-5-5`) para saber con qué

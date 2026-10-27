@@ -1,7 +1,10 @@
 //! `huella`: CLI de Huella.
 
+mod mcp;
 mod report;
+mod review;
 mod sample;
+mod web;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +16,7 @@ use clap::{Parser, Subcommand};
 use huella_anchoring::{AnchorReport, Language, anchor_edit, extract_symbols};
 use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
-use huella_decisions::DecisionExtractor;
+use huella_decisions::JsonModel;
 use huella_decisions::anthropic::Anthropic;
 use huella_decisions::openai::OpenAiCompatible;
 use huella_engine::ExtractionOptions;
@@ -74,6 +77,17 @@ enum Command {
         #[command(subcommand)]
         action: DecisionsCommand,
     },
+    /// Revisión de lo que cambió en una sesión, con el porqué de cada bloque.
+    Review {
+        #[command(subcommand)]
+        action: ReviewCommand,
+    },
+    /// Servidor MCP por stdin/stdout para que los agentes consulten la memoria.
+    Mcp {
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Servidor LSP para el editor (hover y `CodeLens`), por stdin/stdout.
     Lsp {
         /// Carpeta de transcripciones a indexar en segundo plano (por defecto ~/.claude/projects).
@@ -89,15 +103,8 @@ enum Command {
 enum DecisionsCommand {
     /// Extrae con un modelo las decisiones de las sesiones nuevas o que han crecido.
     Extract {
-        /// Proveedor del modelo.
-        #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
-        provider: Provider,
-        /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
-        #[arg(long)]
-        model: Option<String>,
-        /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
-        #[arg(long)]
-        base_url: Option<String>,
+        #[command(flatten)]
+        model: ModelArgs,
         /// Número máximo de sesiones a procesar.
         #[arg(long)]
         limit: Option<usize>,
@@ -120,6 +127,103 @@ enum DecisionsCommand {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    /// Sesiones recientes con ediciones.
+    List {
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
+    },
+    /// Activa la revisión de una sesión en el editor: sus pasos pendientes
+    /// aparecen como diagnosis y una acción de código los marca revisados.
+    Start {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Abre en el editor el proyecto de la sesión, en el primer paso pendiente.
+        #[arg(long)]
+        open: bool,
+        /// Editor que abre `--open`.
+        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
+        editor: web::Editor,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Revisa la sesión en Zed con su vista de cambios de git: prepara un
+    /// worktree donde el diff es exactamente lo que hizo la sesión, activa la
+    /// revisión y lo abre. Preparar (stage) un fichero entero lo marca revisado.
+    Zed {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Termina: borra el worktree y su rama temporal.
+        #[arg(long)]
+        done: bool,
+        /// No abre Zed; solo prepara el worktree.
+        #[arg(long)]
+        no_open: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Quita la revisión activa del editor.
+    Stop,
+    /// Genera con un modelo el resumen de cada turno, notas por paso y riesgos.
+    Narrate {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Abre la revisión guiada de una sesión en el navegador.
+    Open {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Editor al que llevan los enlaces «Abrir en…».
+        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
+        editor: web::Editor,
+        /// Puerto local (0 = uno libre).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// No abre el navegador; solo imprime la URL.
+        #[arg(long)]
+        no_browser: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Cambios netos de una sesión, en el orden del flujo, con su origen.
+    Show {
+        /// Id de la sesión o su comienzo (los 8 primeros caracteres bastan).
+        session: String,
+        /// Solo los ficheros cuya ruta contiene este texto.
+        #[arg(long)]
+        file: Option<String>,
+        /// Fichero a fichero en lugar de en el orden del flujo.
+        #[arg(long)]
+        by_file: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+}
+
+/// Qué modelo usar para las tareas que lo necesitan.
+#[derive(clap::Args)]
+struct ModelArgs {
+    /// Proveedor del modelo.
+    #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
+    provider: Provider,
+    /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
+    #[arg(long)]
+    model: Option<String>,
+    /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
+    #[arg(long)]
+    base_url: Option<String>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -151,10 +255,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
-        Command::Decisions {
-            action: DecisionsCommand::Extract { provider, model, base_url, limit, chunk_chars, projects },
-        } => {
-            let extractor = build_extractor(provider, model, base_url)?;
+        Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
+            let extractor = build_model(model)?;
             let mut store = open_store(cli.db)?;
             let projects = projects_dir(projects)?;
             // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
@@ -168,6 +270,11 @@ fn run(cli: Cli) -> Result<()> {
             let filter = DecisionFilter { entity, project, include_inactive: all };
             list_decisions(&open_store(cli.db)?, &filter)
         }
+        Command::Review { action } => review_command(cli.db, action),
+        Command::Mcp { projects } => {
+            let mut context = mcp::Context { store: open_store(cli.db)?, projects: projects_dir(projects)? };
+            mcp::serve(&mut context)
+        }
         Command::Lsp { projects, index_every } => {
             let db = cli
                 .db
@@ -179,6 +286,171 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Subcomandos de `huella review`.
+fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
+    match action {
+        ReviewCommand::List { limit } => {
+            let mut store = open_store(db)?;
+            huella_engine::index(&mut store, &projects_dir(None)?)?;
+            emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
+            Ok(())
+        }
+        ReviewCommand::Start { session, open, editor, projects } => {
+            let mut store = open_store(db)?;
+            let projects = projects_dir(projects)?;
+            huella_engine::index(&mut store, &projects)?;
+            let review = huella_engine::session_review(&projects, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            store.set_active_review(Some(&review.session_id))?;
+            println!(
+                "Revisión activa: sesión {} ({} pasos). Los editores con Huella la muestran como diagnosis \
+                 en unos segundos; `huella review stop` la quita.",
+                &review.session_id[..8.min(review.session_id.len())],
+                plan.len()
+            );
+            let project = huella_engine::session_project(&store, &review.session_id)?;
+            match &project {
+                Some(project) => println!("Proyecto: {project} (ábrelo en el editor para ver la revisión)"),
+                None => println!("La sesión no tiene un proyecto claro: abre la carpeta de sus ficheros."),
+            }
+            if open {
+                open_in_editor(editor, project.as_deref(), first_pending(&store, &review, &plan)?);
+            }
+            Ok(())
+        }
+        ReviewCommand::Zed { session, done, no_open, projects } => review_zed(db, &session, done, !no_open, projects),
+        ReviewCommand::Stop => {
+            open_store(db)?.set_active_review(None)?;
+            println!("Sin revisión activa.");
+            Ok(())
+        }
+        ReviewCommand::Narrate { session, model, projects } => {
+            let model = build_model(model)?;
+            let store = open_store(db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let points = huella_review::attention::attention(&review, &plan);
+            println!("Narrando la revisión con {}…", model.model_id());
+            let report = huella_engine::narration::narrate(&store, &review, &plan, &points, model.as_ref(), |turn| {
+                println!("  · turno {}", turn + 1);
+            })?;
+            println!("Hecho: {} turnos narrados, {} ya estaban al día", report.narrated, report.cached);
+            for failure in &report.failures {
+                eprintln!("aviso: {failure}");
+            }
+            Ok(())
+        }
+        ReviewCommand::Open { session, editor, port, no_browser, projects } => {
+            let store = open_store(db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            // La misma revisión aparece también en el editor mientras se hace en la web.
+            store.set_active_review(Some(&review.session_id))?;
+            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
+        }
+        ReviewCommand::Show { session, file, by_file, projects } => {
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            if by_file {
+                emit(&review::render_review(&review, file.as_deref()));
+            } else {
+                let plan = huella_review::flow::plan(&review);
+                let points = huella_review::attention::attention(&review, &plan);
+                let narrations = huella_engine::narration::narrations(&open_store(db)?, &review, &plan, &points)?;
+                emit(&review::render_flow(&review, &plan, &points, &narrations, file.as_deref()));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `huella review zed`: prepara el worktree de revisión y lo abre en Zed, o lo
+/// borra con `--done`.
+fn review_zed(db: Option<PathBuf>, session: &str, done: bool, open: bool, projects: Option<PathBuf>) -> Result<()> {
+    let mut store = open_store(db)?;
+    let projects = projects_dir(projects)?;
+    huella_engine::index(&mut store, &projects)?;
+    let review = huella_engine::session_review(&projects, session)?;
+    let short = &review.session_id[..8.min(review.session_id.len())];
+    if done {
+        if huella_engine::workspace::remove_workspace(&store, &review.session_id)? {
+            println!("Worktree de revisión de {short} borrado (las marcas se conservan).");
+        } else {
+            println!("La sesión {short} no tenía worktree de revisión.");
+        }
+        if store.active_review()?.as_deref() == Some(review.session_id.as_str()) {
+            store.set_active_review(None)?;
+        }
+        return Ok(());
+    }
+    let prepared = huella_engine::workspace::prepare_workspace(&store, &review)?;
+    let plan = huella_review::flow::plan(&review);
+    store.set_active_review(Some(&review.session_id))?;
+    let workspace = &prepared.workspace;
+    println!(
+        "{} {} ({} ficheros, rama {})",
+        if prepared.reused { "Worktree de revisión ya preparado:" } else { "Worktree de revisión preparado:" },
+        workspace.path,
+        prepared.files,
+        workspace.branch
+    );
+    for path in &prepared.outside {
+        println!("  fuera del repositorio, no incluido: {path}");
+    }
+    println!(
+        "En Zed: la vista de cambios de git (Project Diff) muestra lo que hizo la sesión {short}; \
+         prepara (stage) un fichero para marcarlo revisado. Huella explica cada paso con avisos.\n\
+         Al terminar: huella review zed {short} --done"
+    );
+    if open {
+        let file = first_pending(&store, &review, &plan)?.map(|(path, line)| {
+            let in_workspace = path
+                .strip_prefix(&workspace.repo)
+                .map_or(path.clone(), |relative| format!("{}{relative}", workspace.path));
+            (in_workspace, line)
+        });
+        open_in_editor(web::Editor::Zed, Some(&workspace.path), file);
+    }
+    Ok(())
+}
+
+/// Fichero y línea del primer paso sin revisar.
+fn first_pending(
+    store: &huella_store::Store,
+    review: &huella_review::SessionReview,
+    plan: &[huella_review::flow::FlowStep],
+) -> Result<Option<(String, usize)>> {
+    let marks = store.review_marks(&review.session_id)?;
+    Ok(plan
+        .iter()
+        .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
+        .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// Abre el proyecto y, si hay, el fichero del primer paso pendiente en su línea.
+fn open_in_editor(editor: web::Editor, project: Option<&str>, file: Option<(String, usize)>) {
+    let mut command = std::process::Command::new(match editor {
+        web::Editor::Zed => "zed",
+        web::Editor::Vscode => "code",
+    });
+    command.args(project);
+    if let Some((path, line)) = file {
+        if matches!(editor, web::Editor::Vscode) {
+            command.arg("-g");
+        }
+        command.arg(format!("{path}:{line}"));
+    }
+    if let Err(error) = command.spawn() {
+        eprintln!("No se pudo abrir el editor ({error}); ¿está su comando en el PATH?");
+    }
+}
+
+/// Escribe en la salida estándar sin fallar si quien lee la cierra antes
+/// (`huella review show … | head`).
+fn emit(text: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
 }
 
 fn projects_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -231,11 +503,8 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn build_extractor(
-    provider: Provider,
-    model: Option<String>,
-    base_url: Option<String>,
-) -> Result<Box<dyn DecisionExtractor>> {
+fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
+    let ModelArgs { provider, model, base_url } = args;
     Ok(match provider {
         Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
         Provider::OpenaiCompatible => {
@@ -245,14 +514,9 @@ fn build_extractor(
     })
 }
 
-fn extract(
-    store: &mut Store,
-    projects: &Path,
-    extractor: &dyn DecisionExtractor,
-    options: &ExtractionOptions,
-) -> Result<()> {
+fn extract(store: &mut Store, projects: &Path, extractor: &dyn JsonModel, options: &ExtractionOptions) -> Result<()> {
     let started = Instant::now();
-    println!("Extrayendo decisiones con {}…", extractor.id());
+    println!("Extrayendo decisiones con {}…", extractor.model_id());
     let report = huella_engine::extract_decisions(store, projects, extractor, options, |conversation| {
         let first =
             conversation.turns.first().map(|turn| turn.text.split_whitespace().take(8).collect::<Vec<_>>().join(" "));

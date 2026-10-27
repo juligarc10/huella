@@ -95,6 +95,42 @@ const MIGRATIONS: &[&str] = &[
         extractor       TEXT NOT NULL
     );
 ",
+    r"
+    CREATE TABLE review_mark (
+        session_id      TEXT NOT NULL,
+        step_key        TEXT NOT NULL,
+        content_hash    TEXT NOT NULL,
+        reviewed_at     TEXT NOT NULL,
+        PRIMARY KEY (session_id, step_key)
+    );
+",
+    r"
+    CREATE TABLE review_narration (
+        session_id      TEXT NOT NULL,
+        turn            INTEGER NOT NULL,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        narration       TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (session_id, turn)
+    );
+",
+    r"
+    CREATE TABLE review_active (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        session_id      TEXT NOT NULL,
+        started_at      TEXT NOT NULL
+    );
+",
+    r"
+    CREATE TABLE review_workspace (
+        session_id      TEXT PRIMARY KEY,
+        repo            TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        branch          TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -176,6 +212,37 @@ pub struct StoredDecision {
     pub superseded_by: Option<String>,
     pub decided_at: Option<String>,
     pub extractor: String,
+}
+
+/// Worktree de git con el estado previo de la sesión en un commit y su
+/// resultado como cambios sin commitear, para revisarla con las herramientas
+/// de git del editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewWorkspace {
+    pub session_id: String,
+    pub repo: String,
+    pub path: String,
+    pub branch: String,
+}
+
+/// Narración de un turno generada por un modelo, con el hash de lo que se le
+/// envió para saber si sigue vigente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredNarration {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub narration: String,
+}
+
+/// Resumen de una sesión para elegir qué revisar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub first_at: Option<String>,
+    pub last_at: Option<String>,
+    pub edits: usize,
+    pub files: usize,
 }
 
 /// Qué decisiones listar.
@@ -329,6 +396,169 @@ impl Store {
         let rows = statement.query_map([path], |row| {
             let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
             Ok((row.get(0)?, SymbolActivity { edits: count(1)?, sessions: count(2)?, last_at: row.get(3)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Pasos revisados de una sesión: clave del paso → hash del contenido
+    /// que se revisó.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_marks(&self, session_id: &str) -> Result<HashMap<String, String>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT step_key, content_hash FROM review_mark WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Marca (o desmarca) un paso como revisado con el contenido que se vio.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_review_mark(&self, session_id: &str, step_key: &str, content_hash: &str, reviewed: bool) -> Result<()> {
+        if reviewed {
+            self.conn.execute(
+                "INSERT INTO review_mark (session_id, step_key, content_hash, reviewed_at)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(session_id, step_key) DO UPDATE SET content_hash = excluded.content_hash,
+                                                                 reviewed_at = excluded.reviewed_at",
+                params![session_id, step_key, content_hash],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM review_mark WHERE session_id = ?1 AND step_key = ?2",
+                params![session_id, step_key],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Worktree de git preparado para revisar una sesión en el editor.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_workspace(&self, session_id: &str) -> Result<Option<ReviewWorkspace>> {
+        let found = self
+            .conn
+            .query_row(
+                "SELECT session_id, repo, path, branch FROM review_workspace WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(ReviewWorkspace {
+                        session_id: row.get(0)?,
+                        repo: row.get(1)?,
+                        path: row.get(2)?,
+                        branch: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(found)
+    }
+
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_review_workspace(&self, workspace: &ReviewWorkspace) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_workspace (session_id, repo, path, branch, created_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id) DO UPDATE SET repo = excluded.repo, path = excluded.path, branch = excluded.branch",
+            params![workspace.session_id, workspace.repo, workspace.path, workspace.branch],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_review_workspace(&self, session_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM review_workspace WHERE session_id = ?1", [session_id])?;
+        Ok(())
+    }
+
+    /// Sesión que se está revisando: el editor muestra sus pasos pendientes.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn active_review(&self) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT session_id FROM review_active WHERE id = 1", [], |row| row.get(0)).optional()?)
+    }
+
+    /// Fija (o quita, con `None`) la sesión que se está revisando.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_active_review(&self, session_id: Option<&str>) -> Result<()> {
+        match session_id {
+            Some(session) => self.conn.execute(
+                "INSERT INTO review_active (id, session_id, started_at)
+                 VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, started_at = excluded.started_at",
+                [session],
+            )?,
+            None => self.conn.execute("DELETE FROM review_active", [])?,
+        };
+        Ok(())
+    }
+
+    /// Narraciones guardadas de una sesión, por turno.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn narrations(&self, session_id: &str) -> Result<HashMap<usize, StoredNarration>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT turn, input_hash, model, narration FROM review_narration WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| {
+            let turn: i64 = row.get(0)?;
+            Ok((
+                usize::try_from(turn).unwrap_or_default(),
+                StoredNarration { input_hash: row.get(1)?, model: row.get(2)?, narration: row.get(3)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Guarda (o sustituye) la narración de un turno.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_narration(&self, session_id: &str, turn: usize, stored: &StoredNarration) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_narration (session_id, turn, input_hash, model, narration, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id, turn) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 narration = excluded.narration, created_at = excluded.created_at",
+            params![
+                session_id,
+                i64::try_from(turn).unwrap_or(i64::MAX),
+                stored.input_hash,
+                stored.model,
+                stored.narration
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Sesiones con ediciones, de la más reciente a la más antigua.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT s.id, s.first_at, s.last_at, COUNT(e.id), COUNT(DISTINCT e.path)
+             FROM session s JOIN edit e ON e.session_id = s.id
+             GROUP BY s.id ORDER BY s.last_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                first_at: row.get(1)?,
+                last_at: row.get(2)?,
+                edits: count(3)?,
+                files: count(4)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -766,6 +996,57 @@ mod tests {
         let titles: Vec<String> =
             store.decisions(&DecisionFilter::default()).unwrap().into_iter().map(|d| d.title).collect();
         assert_eq!(titles, vec!["B"]);
+    }
+
+    #[test]
+    fn review_marks_remember_the_reviewed_content() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_review_mark("s1", "a.ts#f#Flow", "h1", true).unwrap();
+        store.set_review_mark("s1", "a.ts#g#Flow", "h2", true).unwrap();
+        store.set_review_mark("s1", "a.ts#f#Flow", "h3", true).unwrap();
+        store.set_review_mark("s1", "a.ts#g#Flow", "h2", false).unwrap();
+        let marks = store.review_marks("s1").unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks["a.ts#f#Flow"], "h3");
+        assert!(store.review_marks("s2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn review_workspaces_are_remembered_per_session() {
+        let store = Store::open_in_memory().unwrap();
+        let workspace = ReviewWorkspace {
+            session_id: "s1".into(),
+            repo: "/repo".into(),
+            path: "/repo/.claude/worktrees/huella-review-s1".into(),
+            branch: "huella/review-s1".into(),
+        };
+        store.save_review_workspace(&workspace).unwrap();
+        assert_eq!(store.review_workspace("s1").unwrap(), Some(workspace));
+        store.delete_review_workspace("s1").unwrap();
+        assert_eq!(store.review_workspace("s1").unwrap(), None);
+    }
+
+    #[test]
+    fn there_is_at_most_one_active_review() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.active_review().unwrap(), None);
+        store.set_active_review(Some("s1")).unwrap();
+        store.set_active_review(Some("s2")).unwrap();
+        assert_eq!(store.active_review().unwrap().as_deref(), Some("s2"));
+        store.set_active_review(None).unwrap();
+        assert_eq!(store.active_review().unwrap(), None);
+    }
+
+    #[test]
+    fn narrations_are_stored_per_turn_and_replaced() {
+        let store = Store::open_in_memory().unwrap();
+        let first = StoredNarration { input_hash: "h1".into(), model: "m".into(), narration: "{}".into() };
+        store.save_narration("s1", 0, &first).unwrap();
+        let second = StoredNarration { input_hash: "h2".into(), ..first.clone() };
+        store.save_narration("s1", 0, &second).unwrap();
+        store.save_narration("s1", 3, &first).unwrap();
+        let stored = store.narrations("s1").unwrap();
+        assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
     }
 
     #[test]

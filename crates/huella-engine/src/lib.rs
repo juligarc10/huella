@@ -3,9 +3,12 @@
 
 mod decisions;
 mod index;
+pub mod narration;
 mod paths;
 mod query;
 mod render;
+mod review;
+pub mod workspace;
 
 use std::path::PathBuf;
 
@@ -14,6 +17,7 @@ pub use index::{IndexReport, index};
 pub use paths::normalize_path;
 pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};
 pub use render::render_markdown;
+pub use review::{SessionListing, list_sessions, session_project, session_review};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -23,6 +27,12 @@ pub enum EngineError {
     Transcript(#[from] huella_claude_code::TranscriptError),
     #[error(transparent)]
     Extraction(#[from] huella_anchoring::ExtractionError),
+    #[error("{0}")]
+    Git(String),
+    #[error("ninguna sesión empieza por «{0}»")]
+    SessionNotFound(String),
+    #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]
+    AmbiguousSession { prefix: String, candidates: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
