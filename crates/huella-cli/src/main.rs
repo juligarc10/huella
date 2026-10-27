@@ -96,15 +96,8 @@ enum Command {
 enum DecisionsCommand {
     /// Extrae con un modelo las decisiones de las sesiones nuevas o que han crecido.
     Extract {
-        /// Proveedor del modelo.
-        #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
-        provider: Provider,
-        /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
-        #[arg(long)]
-        model: Option<String>,
-        /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
-        #[arg(long)]
-        base_url: Option<String>,
+        #[command(flatten)]
+        model: ModelArgs,
         /// Número máximo de sesiones a procesar.
         #[arg(long)]
         limit: Option<usize>,
@@ -135,6 +128,16 @@ enum ReviewCommand {
     List {
         #[arg(long, default_value_t = 15)]
         limit: usize,
+    },
+    /// Genera con un modelo el resumen de cada turno, notas por paso y riesgos.
+    Narrate {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
     },
     /// Abre la revisión guiada de una sesión en el navegador.
     Open {
@@ -169,6 +172,20 @@ enum ReviewCommand {
     },
 }
 
+/// Qué modelo usar para las tareas que lo necesitan.
+#[derive(clap::Args)]
+struct ModelArgs {
+    /// Proveedor del modelo.
+    #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
+    provider: Provider,
+    /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
+    #[arg(long)]
+    model: Option<String>,
+    /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
+    #[arg(long)]
+    base_url: Option<String>,
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Provider {
     /// API de Claude (`ANTHROPIC_API_KEY`).
@@ -198,10 +215,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Symbols { file } => print_symbols(&file),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
-        Command::Decisions {
-            action: DecisionsCommand::Extract { provider, model, base_url, limit, chunk_chars, projects },
-        } => {
-            let extractor = build_extractor(provider, model, base_url)?;
+        Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
+            let extractor = build_model(model)?;
             let mut store = open_store(cli.db)?;
             let projects = projects_dir(projects)?;
             // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
@@ -221,6 +236,22 @@ fn run(cli: Cli) -> Result<()> {
             emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
             Ok(())
         }
+        Command::Review { action: ReviewCommand::Narrate { session, model, projects } } => {
+            let model = build_model(model)?;
+            let store = open_store(cli.db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let points = huella_review::attention::attention(&review, &plan);
+            println!("Narrando la revisión con {}…", model.model_id());
+            let report = huella_engine::narration::narrate(&store, &review, &plan, &points, model.as_ref(), |turn| {
+                println!("  · turno {}", turn + 1);
+            })?;
+            println!("Hecho: {} turnos narrados, {} ya estaban al día", report.narrated, report.cached);
+            for failure in &report.failures {
+                eprintln!("aviso: {failure}");
+            }
+            Ok(())
+        }
         Command::Review { action: ReviewCommand::Open { session, editor, port, no_browser, projects } } => {
             let store = open_store(cli.db)?;
             let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
@@ -234,7 +265,8 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let plan = huella_review::flow::plan(&review);
                 let points = huella_review::attention::attention(&review, &plan);
-                emit(&review::render_flow(&review, &plan, &points, file.as_deref()));
+                let narrations = huella_engine::narration::narrations(&open_store(cli.db)?, &review, &plan, &points)?;
+                emit(&review::render_flow(&review, &plan, &points, &narrations, file.as_deref()));
             }
             Ok(())
         }
@@ -308,7 +340,8 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn build_extractor(provider: Provider, model: Option<String>, base_url: Option<String>) -> Result<Box<dyn JsonModel>> {
+fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
+    let ModelArgs { provider, model, base_url } = args;
     Ok(match provider {
         Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
         Provider::OpenaiCompatible => {

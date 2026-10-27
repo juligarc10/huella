@@ -1,10 +1,11 @@
 //! `huella review`: revisión en la terminal de lo que cambió una sesión.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 use huella_engine::SessionListing;
+use huella_engine::narration::Narration;
 use huella_review::attention::{Attention, AttentionKind};
 use huella_review::flow::{FlowStep, StepRole};
 use huella_review::{DiffLine, ExternalReason, FileStatus, Hunk, SessionReview, Step};
@@ -155,6 +156,7 @@ pub fn render_flow(
     review: &SessionReview,
     plan: &[FlowStep],
     points: &[Attention],
+    narrations: &BTreeMap<usize, Narration>,
     file_filter: Option<&str>,
 ) -> String {
     let style = Style::detect();
@@ -190,6 +192,15 @@ pub fn render_flow(
                 None => "━━ Cambios sin explicación (terminal, formateadores o a mano)".to_owned(),
             };
             let _ = writeln!(out, "\n{}", style.paint("1;36", &header));
+            if let Some(narration) = step.turn.and_then(|turn| narrations.get(&turn)) {
+                let outdated = if narration.stale { ", desfasado: el turno ha cambiado" } else { "" };
+                let _ = writeln!(out, "   💬 {}", clip(&narration.summary, 600));
+                let _ =
+                    writeln!(out, "      {}", style.paint("2", &format!("generado por {}{outdated}", narration.model)));
+                for (_, risk) in narration.risks.iter().filter(|(step, _)| step.is_none()) {
+                    let _ = writeln!(out, "   {}", style.paint("1;33", &format!("⚑ {risk} (modelo)")));
+                }
+            }
             for point in points.iter().filter(|p| p.turn == step.turn && p.step.is_none()) {
                 let _ = writeln!(out, "   {}", style.paint("1;33", &format!("⚑ {}", point.message)));
             }
@@ -220,6 +231,14 @@ pub fn render_flow(
         );
         for point in points.iter().filter(|p| p.step == Some(number) && p.kind != AttentionKind::Unexplained) {
             let _ = writeln!(out, "{indent}   {}", style.paint("33", &format!("⚑ {}", point.message)));
+        }
+        if let Some(narration) = step.turn.and_then(|turn| narrations.get(&turn)) {
+            if let Some(note) = narration.step_notes.get(&number) {
+                let _ = writeln!(out, "{indent}   💬 {}", clip(note, 300));
+            }
+            for (_, risk) in narration.risks.iter().filter(|(step, _)| *step == Some(number)) {
+                let _ = writeln!(out, "{indent}   {}", style.paint("33", &format!("⚑ {risk} (modelo)")));
+            }
         }
         render_sources(&mut out, &style, review, &step.sources, &format!("{indent}   "), step.turn);
         render_lines(&mut out, &style, review, &step.lines, &format!("{indent}   "));

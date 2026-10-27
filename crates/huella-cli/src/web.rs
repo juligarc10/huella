@@ -72,7 +72,11 @@ fn handle(
             Ok(request.respond(Response::from_string(page).with_header(content_type("text/html; charset=utf-8")))?)
         }
         (Method::Get, "/api/review") => {
-            let body = payload(review, plan, &store.review_marks(&review.session_id)?, options.editor).to_string();
+            let points = huella_review::attention::attention(review, plan);
+            let narrations = huella_engine::narration::narrations(store, review, plan, &points)?;
+            let mut value = payload(review, plan, &store.review_marks(&review.session_id)?, options.editor);
+            value["narrations"] = serde_json::to_value(&narrations)?;
+            let body = value.to_string();
             Ok(request.respond(Response::from_string(body).with_header(content_type("application/json")))?)
         }
         (Method::Post, "/api/mark") => {

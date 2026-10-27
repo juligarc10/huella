@@ -54,6 +54,9 @@
   .why { margin: 0 0 8px; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 6px 6px 0; white-space: pre-wrap; }
   .why .who { font-size: 11px; color: var(--quiet); display: block; margin-bottom: 2px; }
   .external { margin: 0 0 8px; padding: 10px 14px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--warn); border-radius: 0 6px 6px 0; }
+  .summary { margin: 0 0 10px; padding: 10px 14px; border-left: 3px solid var(--quiet); background: var(--panel); border-radius: 0 6px 6px 0; }
+  .summary .who, .note .who { font-size: 11px; color: var(--quiet); display: block; margin-bottom: 2px; }
+  .note { margin: 0 0 8px; padding: 8px 14px; border-left: 3px dashed var(--quiet); }
   .flags { margin: 0 0 10px; padding: 0; list-style: none; }
   .flags li { margin: 0 0 4px; color: var(--warn); font-size: 13px; }
   .flags li::before { content: "⚑ "; }
@@ -168,10 +171,25 @@ function renderDetail() {
 
   const turn = step.turn == null ? null : data.turns[step.turn];
   if (turn && turn.prompt) box.append(el("p", "prompt", `Petición: «${clip(turn.prompt, 400)}»`));
+  const narration = step.turn == null || !data.narrations ? null : data.narrations[step.turn];
+  if (narration) {
+    const who = `Generado por ${narration.model}${narration.stale ? " · desfasado: el turno ha cambiado" : ""}`;
+    const summary = el("div", "summary");
+    summary.append(el("span", "who", `Resumen del turno · ${who}`), document.createTextNode(narration.summary));
+    box.append(summary);
+    const note = narration.step_notes[current];
+    if (note) {
+      const block = el("div", "note");
+      block.append(el("span", "who", `Nota del paso · ${who}`), document.createTextNode(note));
+      box.append(block);
+    }
+  }
   const points = data.attention.filter((p) => p.kind !== "unexplained" && (p.step === current || (p.step == null && p.turn === step.turn)));
-  if (points.length) {
+  const risks = narration ? narration.risks.filter(([at]) => at === current || at == null) : [];
+  if (points.length || risks.length) {
     const list = el("ul", "flags");
     for (const point of points) list.append(el("li", null, point.step == null ? `Este turno ${point.message}` : point.message));
+    for (const [at, risk] of risks) list.append(el("li", null, `${at == null ? "Turno: " : ""}${risk} (modelo)`));
     box.append(list);
   }
   const seen = new Set();
