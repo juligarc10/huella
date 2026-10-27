@@ -3,6 +3,7 @@
 mod report;
 mod review;
 mod sample;
+mod web;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -135,7 +136,24 @@ enum ReviewCommand {
         #[arg(long, default_value_t = 15)]
         limit: usize,
     },
-    /// Cambios netos de una sesión, fichero a fichero, con su origen.
+    /// Abre la revisión guiada de una sesión en el navegador.
+    Open {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Editor al que llevan los enlaces «Abrir en…».
+        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
+        editor: web::Editor,
+        /// Puerto local (0 = uno libre).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// No abre el navegador; solo imprime la URL.
+        #[arg(long)]
+        no_browser: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Cambios netos de una sesión, en el orden del flujo, con su origen.
     Show {
         /// Id de la sesión o su comienzo (los 8 primeros caracteres bastan).
         session: String,
@@ -202,6 +220,12 @@ fn run(cli: Cli) -> Result<()> {
             huella_engine::index(&mut store, &projects_dir(None)?)?;
             emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
             Ok(())
+        }
+        Command::Review { action: ReviewCommand::Open { session, editor, port, no_browser, projects } } => {
+            let store = open_store(cli.db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
         }
         Command::Review { action: ReviewCommand::Show { session, file, by_file, projects } } => {
             let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;

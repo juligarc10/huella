@@ -216,7 +216,7 @@ pub fn render_flow(review: &SessionReview, plan: &[FlowStep], file_filter: Optio
 }
 
 /// Prefijo de directorio común, para mostrar rutas cortas.
-fn common_root<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn common_root<'a>(paths: impl Iterator<Item = &'a str>) -> String {
     let mut root: Option<String> = None;
     for path in paths {
         let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
