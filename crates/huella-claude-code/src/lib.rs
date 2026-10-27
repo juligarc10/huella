@@ -493,7 +493,10 @@ mod tests {
             message_line("user", &serde_json::json!("Crea el almacenamiento")),
             message_line("assistant", &serde_json::json!([{"type": "text", "text": "Primero miro el esquema."}])),
             message_line("assistant", &serde_json::json!([{"type": "thinking", "thinking": ""}])),
-            message_line("assistant", &serde_json::json!([{"type": "thinking", "thinking": "Voy a crear el crate con SQLite."}, {"type": "tool_use"}])),
+            message_line(
+                "assistant",
+                &serde_json::json!([{"type": "thinking", "thinking": "Voy a crear el crate con SQLite."}, {"type": "tool_use"}]),
+            ),
             write,
         ];
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
