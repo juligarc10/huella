@@ -5,13 +5,18 @@ transcripciones de los agentes, averigua qué funciones, clases y métodos tocó
 cada edición y, al pasar el ratón por ellas en el editor, muestra qué se pidió
 y qué explicó el agente. Sin llamar a ningún modelo y en milisegundos.
 
-También extrae con un modelo de lenguaje, el que elijas, las decisiones de
-proyecto que no tocan código ("Rust en vez de Python") con su porqué y las
-alternativas descartadas.
+Y guía la **revisión** de lo que hizo una sesión: por turnos, siguiendo el
+flujo del código desde el punto de entrada, con el porqué de cada paso, las
+líneas que el agente no explicó resaltadas y puntos de atención. Rápida, pero
+completa: cada línea cambiada aparece en algún paso.
 
-**Estado: F1.** Memoria persistente en SQLite, indexado incremental, servidor
-LSP (hover y `CodeLens`), extensiones de VS Code y Zed, y extracción de
-decisiones. La F0 validó el anclaje: [docs/f0-resultados.md](docs/f0-resultados.md).
+También extrae con un modelo de lenguaje, el que elijas, las decisiones de
+proyecto que no tocan código ("Rust en vez de Python") y las ofrece por MCP a
+cualquier agente.
+
+**Estado: F2.** Revisión guiada en la terminal, en una página web local y en
+el editor; servidor MCP. Antes: memoria en el editor (F1) y validación del
+anclaje (F0, [docs/f0-resultados.md](docs/f0-resultados.md)).
 
 ## Requisitos
 
@@ -37,6 +42,13 @@ Code (`~/.claude/projects`) al abrir el editor y cada 30 segundos.
 lanzaste antes de instalar Rust). Zed muestra el hover; los `CodeLens` puede
 no pintarlos.
 
+**Agentes (MCP)**: registra el servidor en tu agente, por ejemplo en Claude
+Code:
+
+```sh
+claude mcp add huella -- huella mcp
+```
+
 ## Uso desde la terminal
 
 ```sh
@@ -48,6 +60,38 @@ huella scan                          # mide la tasa de anclaje (validación de l
 huella decisions list                # decisiones vigentes
 huella decisions list --entity rust --project ~/dev/huella --all
 ```
+
+### Revisar una sesión
+
+```sh
+huella review list                   # sesiones recientes con ediciones
+huella review show 84e33d8e          # guion en la terminal (--by-file para verlo por fichero)
+huella review open 84e33d8e          # en el navegador, con enlaces a Zed (--editor vscode)
+huella review start 84e33d8e         # en el editor: cada paso pendiente es una diagnosis
+huella review stop
+huella review narrate 84e33d8e --provider openai-compatible --base-url … --model …
+```
+
+Cómo se arma el guion:
+
+1. **Diff neto por fichero**, reconstruido desde las transcripciones. Cada línea
+   añadida sabe qué edición la escribió y con qué explicación.
+2. **Cambios sin explicación**: lo que cambió entre dos ediciones del agente
+   (terminal, formateadores, a mano) y lo que difiere del fichero actual si
+   ninguna sesión posterior lo tocó. Se marcan en ámbar (`!` en la terminal).
+3. **Orden**: por turnos (cada petición suele ser un caso de uso) y, dentro de
+   cada turno, el flujo desde lo que nadie llama (un endpoint, un comando)
+   hacia lo que va llamando; luego los tests y los otros cambios. Cada línea
+   del diff pertenece a un único paso.
+4. **Puntos de atención** sin modelo: símbolos borrados que aún se mencionan,
+   turnos sin tests, pasos largos, `TODO`, `unwrap()`, `@ts-ignore`…
+5. **Narración** opcional con un modelo: resumen del turno como flujo, una nota
+   por paso y riesgos. Se guarda con el modelo que la escribió y se marca como
+   desfasada si el turno cambia.
+
+Los pasos revisados se guardan con un hash de su contenido: si el código del
+paso cambia, vuelve a quedar pendiente. Web, editor y terminal comparten las
+marcas.
 
 ### Extraer decisiones
 
@@ -97,9 +141,14 @@ código solo donde indiques.
    los worktrees (`.claude/worktrees/<nombre>/…`) se llevan al repositorio
    principal. Si el código actual de un símbolo no coincide con el que dejó la
    última sesión, lo avisa.
-5. **Servidor LSP** (`huella-lsp`) y extensión de VS Code: hover con las
-   últimas ediciones del símbolo y `CodeLens` con su actividad. Un hilo indexa
-   en segundo plano y pide al editor refrescar los `CodeLens`.
+5. **Servidor LSP** (`huella-lsp`) y extensiones de VS Code y Zed: hover con
+   las últimas ediciones del símbolo, `CodeLens` con su actividad y los pasos
+   pendientes de la revisión activa como diagnosis. Un hilo indexa en segundo
+   plano.
+6. **Revisión** (`huella-review`): diff neto con el origen de cada línea, plan
+   por turnos y flujo, y puntos de atención.
+7. **MCP** (`huella mcp`): historia de símbolos, decisiones y guion de
+   revisión para cualquier agente.
 
 | Crate | Responsabilidad |
 | --- | --- |
@@ -109,6 +158,7 @@ código solo donde indiques.
 | `huella-store` | Persistencia en SQLite |
 | `huella-engine` | Casos de uso: indexar y consultar |
 | `huella-lsp` | Servidor LSP |
+| `huella-review` | Modelo de revisión, plan por flujo y puntos de atención |
 | `huella-cli` | Binario `huella` |
 | `huella-decisions` | Extracción de decisiones con modelos intercambiables |
 | `extensions/vscode` | Extensión de VS Code (envoltorio del servidor) |
@@ -128,12 +178,15 @@ Extracción de decisiones con Qwen3.6-35B-A3B en llama.cpp propio: 13 sesiones
 
 ## Limitaciones conocidas
 
-- Solo se ven las ediciones hechas con las herramientas de edición del agente;
-  los cambios hechos por shell (`sed`, scripts) no aparecen.
+- La historia de un símbolo solo incluye las ediciones hechas con las
+  herramientas del agente; en la revisión, los cambios por shell sí aparecen,
+  como cambios sin explicación.
 - Un símbolo renombrado no hereda la historia de su nombre anterior (el nombre
   antiguo queda registrado como borrado).
-- Las decisiones se ven desde la terminal; en el editor y por MCP llegan en la F2.
-- Una decisión solo puede reemplazar a otra de la misma sesión.
+- Una decisión solo puede reemplazar a otra de la misma sesión, y la calidad
+  de la extracción depende del modelo: conviene repasarlas.
+- El orden por flujo se basa en nombres: dos funciones con el mismo nombre en
+  ficheros distintos pueden enlazarse por error.
 - Solo Claude Code; el resto de agentes llegan en la F3.
 
 ## Desarrollo
