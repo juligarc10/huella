@@ -16,7 +16,7 @@ pub use index::{IndexReport, index};
 pub use paths::normalize_path;
 pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};
 pub use render::render_markdown;
-pub use review::{SessionListing, list_sessions, session_review};
+pub use review::{SessionListing, list_sessions, session_project, session_review};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {

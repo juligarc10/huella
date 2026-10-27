@@ -141,6 +141,12 @@ enum ReviewCommand {
     Start {
         /// Id de la sesión o su comienzo.
         session: String,
+        /// Abre en el editor el proyecto de la sesión, en el primer paso pendiente.
+        #[arg(long)]
+        open: bool,
+        /// Editor que abre `--open`.
+        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
+        editor: web::Editor,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -248,65 +254,7 @@ fn run(cli: Cli) -> Result<()> {
             let filter = DecisionFilter { entity, project, include_inactive: all };
             list_decisions(&open_store(cli.db)?, &filter)
         }
-        Command::Review { action: ReviewCommand::List { limit } } => {
-            let mut store = open_store(cli.db)?;
-            huella_engine::index(&mut store, &projects_dir(None)?)?;
-            emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
-            Ok(())
-        }
-        Command::Review { action: ReviewCommand::Start { session, projects } } => {
-            let store = open_store(cli.db)?;
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
-            let steps = huella_review::flow::plan(&review).len();
-            store.set_active_review(Some(&review.session_id))?;
-            println!(
-                "Revisión activa: sesión {} ({steps} pasos). Los editores con Huella la muestran como diagnosis \
-                 en unos segundos; `huella review stop` la quita.",
-                &review.session_id[..8.min(review.session_id.len())]
-            );
-            Ok(())
-        }
-        Command::Review { action: ReviewCommand::Stop } => {
-            open_store(cli.db)?.set_active_review(None)?;
-            println!("Sin revisión activa.");
-            Ok(())
-        }
-        Command::Review { action: ReviewCommand::Narrate { session, model, projects } } => {
-            let model = build_model(model)?;
-            let store = open_store(cli.db)?;
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
-            let plan = huella_review::flow::plan(&review);
-            let points = huella_review::attention::attention(&review, &plan);
-            println!("Narrando la revisión con {}…", model.model_id());
-            let report = huella_engine::narration::narrate(&store, &review, &plan, &points, model.as_ref(), |turn| {
-                println!("  · turno {}", turn + 1);
-            })?;
-            println!("Hecho: {} turnos narrados, {} ya estaban al día", report.narrated, report.cached);
-            for failure in &report.failures {
-                eprintln!("aviso: {failure}");
-            }
-            Ok(())
-        }
-        Command::Review { action: ReviewCommand::Open { session, editor, port, no_browser, projects } } => {
-            let store = open_store(cli.db)?;
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
-            let plan = huella_review::flow::plan(&review);
-            // La misma revisión aparece también en el editor mientras se hace en la web.
-            store.set_active_review(Some(&review.session_id))?;
-            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
-        }
-        Command::Review { action: ReviewCommand::Show { session, file, by_file, projects } } => {
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
-            if by_file {
-                emit(&review::render_review(&review, file.as_deref()));
-            } else {
-                let plan = huella_review::flow::plan(&review);
-                let points = huella_review::attention::attention(&review, &plan);
-                let narrations = huella_engine::narration::narrations(&open_store(cli.db)?, &review, &plan, &points)?;
-                emit(&review::render_flow(&review, &plan, &points, &narrations, file.as_deref()));
-            }
-            Ok(())
-        }
+        Command::Review { action } => review_command(cli.db, action),
         Command::Mcp { projects } => {
             let mut context = mcp::Context { store: open_store(cli.db)?, projects: projects_dir(projects)? };
             mcp::serve(&mut context)
@@ -321,6 +269,105 @@ fn run(cli: Cli) -> Result<()> {
             huella_lsp::serve_stdio(&config)?;
             Ok(())
         }
+    }
+}
+
+/// Subcomandos de `huella review`.
+fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
+    match action {
+        ReviewCommand::List { limit } => {
+            let mut store = open_store(db)?;
+            huella_engine::index(&mut store, &projects_dir(None)?)?;
+            emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
+            Ok(())
+        }
+        ReviewCommand::Start { session, open, editor, projects } => {
+            let mut store = open_store(db)?;
+            let projects = projects_dir(projects)?;
+            huella_engine::index(&mut store, &projects)?;
+            let review = huella_engine::session_review(&projects, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            store.set_active_review(Some(&review.session_id))?;
+            println!(
+                "Revisión activa: sesión {} ({} pasos). Los editores con Huella la muestran como diagnosis \
+                 en unos segundos; `huella review stop` la quita.",
+                &review.session_id[..8.min(review.session_id.len())],
+                plan.len()
+            );
+            let project = huella_engine::session_project(&store, &review.session_id)?;
+            match &project {
+                Some(project) => println!("Proyecto: {project} (ábrelo en el editor para ver la revisión)"),
+                None => println!("La sesión no tiene un proyecto claro: abre la carpeta de sus ficheros."),
+            }
+            if open {
+                let marks = store.review_marks(&review.session_id)?;
+                let first_pending =
+                    plan.iter().find(|step| marks.get(&step.key(&review)) != Some(&step.content_hash())).map(|step| {
+                        (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))
+                    });
+                open_in_editor(editor, project.as_deref(), first_pending);
+            }
+            Ok(())
+        }
+        ReviewCommand::Stop => {
+            open_store(db)?.set_active_review(None)?;
+            println!("Sin revisión activa.");
+            Ok(())
+        }
+        ReviewCommand::Narrate { session, model, projects } => {
+            let model = build_model(model)?;
+            let store = open_store(db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let points = huella_review::attention::attention(&review, &plan);
+            println!("Narrando la revisión con {}…", model.model_id());
+            let report = huella_engine::narration::narrate(&store, &review, &plan, &points, model.as_ref(), |turn| {
+                println!("  · turno {}", turn + 1);
+            })?;
+            println!("Hecho: {} turnos narrados, {} ya estaban al día", report.narrated, report.cached);
+            for failure in &report.failures {
+                eprintln!("aviso: {failure}");
+            }
+            Ok(())
+        }
+        ReviewCommand::Open { session, editor, port, no_browser, projects } => {
+            let store = open_store(db)?;
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            // La misma revisión aparece también en el editor mientras se hace en la web.
+            store.set_active_review(Some(&review.session_id))?;
+            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
+        }
+        ReviewCommand::Show { session, file, by_file, projects } => {
+            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            if by_file {
+                emit(&review::render_review(&review, file.as_deref()));
+            } else {
+                let plan = huella_review::flow::plan(&review);
+                let points = huella_review::attention::attention(&review, &plan);
+                let narrations = huella_engine::narration::narrations(&open_store(db)?, &review, &plan, &points)?;
+                emit(&review::render_flow(&review, &plan, &points, &narrations, file.as_deref()));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Abre el proyecto y, si hay, el fichero del primer paso pendiente en su línea.
+fn open_in_editor(editor: web::Editor, project: Option<&str>, file: Option<(String, usize)>) {
+    let mut command = std::process::Command::new(match editor {
+        web::Editor::Zed => "zed",
+        web::Editor::Vscode => "code",
+    });
+    command.args(project);
+    if let Some((path, line)) = file {
+        if matches!(editor, web::Editor::Vscode) {
+            command.arg("-g");
+        }
+        command.arg(format!("{path}:{line}"));
+    }
+    if let Err(error) = command.spawn() {
+        eprintln!("No se pudo abrir el editor ({error}); ¿está su comando en el PATH?");
     }
 }
 

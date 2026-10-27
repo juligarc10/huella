@@ -34,6 +34,14 @@ pub fn list_sessions(store: &Store, limit: usize) -> Result<Vec<SessionListing>>
         .collect()
 }
 
+/// Proyecto de una sesión: el repositorio (o carpeta) donde editó más ficheros.
+///
+/// # Errors
+/// Si falla la base de datos.
+pub fn session_project(store: &Store, session_id: &str) -> Result<Option<String>> {
+    Ok(project_from_paths(&store.session_paths(session_id)?, None))
+}
+
 /// Revisión de la sesión cuyo id empieza por `prefix`. Se lee de las
 /// transcripciones, que guardan el contenido completo de cada edición.
 ///
