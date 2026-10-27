@@ -507,6 +507,7 @@ dependencies = [
 name = "huella-review"
 version = "0.1.0"
 dependencies = [
+ "huella-anchoring",
  "huella-core",
  "serde",
  "similar",

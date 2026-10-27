@@ -7,6 +7,8 @@
 //! persona), ese cambio aparece como **externo**: sin explicación, y por eso
 //! mismo lo que más conviene revisar.
 
+pub mod flow;
+
 use std::collections::BTreeMap;
 
 use huella_core::{AfterState, FileEdit};
