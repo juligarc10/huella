@@ -21,7 +21,7 @@ const PROVIDER: &str = "openai-compatible";
 /// Margen de salida; sin él algunos servidores aplican un límite corto por defecto.
 const MAX_TOKENS: u32 = 8192;
 /// Silencio máximo entre dos fragmentos (incluye procesar el prompt).
-const MAX_SILENCE: Duration = Duration::from_secs(300);
+const MAX_SILENCE: Duration = Duration::from_secs(600);
 
 pub struct OpenAiCompatible {
     agent: Agent,

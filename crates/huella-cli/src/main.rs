@@ -155,12 +155,11 @@ fn run(cli: Cli) -> Result<()> {
             action: DecisionsCommand::Extract { provider, model, base_url, limit, chunk_chars, projects },
         } => {
             let extractor = build_extractor(provider, model, base_url)?;
-            extract(
-                &mut open_store(cli.db)?,
-                &projects_dir(projects)?,
-                extractor.as_ref(),
-                &ExtractionOptions { limit, chunk_chars },
-            )
+            let mut store = open_store(cli.db)?;
+            let projects = projects_dir(projects)?;
+            // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
+            huella_engine::index(&mut store, &projects)?;
+            extract(&mut store, &projects, extractor.as_ref(), &ExtractionOptions { limit, chunk_chars })
         }
         Command::Decisions { action: DecisionsCommand::List { entity, project, all } } => {
             let project = project

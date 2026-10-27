@@ -333,6 +333,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Ficheros (rutas normalizadas) que editó una sesión.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn session_paths(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare_cached("SELECT DISTINCT path FROM edit WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Reasigna el proyecto de las decisiones de una sesión sin volver a extraerlas.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_decisions_project(&self, session_id: &str, project: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE decision SET project = ?2 WHERE session_id = ?1 AND project IS NOT ?2",
+            params![session_id, project],
+        )?;
+        Ok(())
+    }
+
     /// Mensajes de diálogo que tenía una sesión cuando se extrajeron sus
     /// decisiones; `None` si nunca se extrajeron.
     ///
