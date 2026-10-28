@@ -379,6 +379,12 @@ fn run(cli: Cli) -> Result<()> {
                 println!("  {done} de {total}");
             })?;
             println!("Hecho: {} vectores nuevos", report.embedded);
+            if report.skipped > 0 {
+                println!(
+                    "  {} textos que el modelo no aceptó ni acortados; se reintentan la próxima vez",
+                    report.skipped
+                );
+            }
             if let Some(failure) = report.failure {
                 bail!("el modelo falló: {failure}");
             }

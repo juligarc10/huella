@@ -1115,12 +1115,24 @@ impl Store {
             })?;
             for row in rows {
                 let (session_id, group, prompt, rationale, paths) = row?;
-                let text = [prompt, rationale.map(|r| r.chars().take(EMBED_CHARS).collect()), paths]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                texts.push((format!("request\u{1f}{session_id}\u{1f}{group}"), text));
+                let files: Vec<&str> = paths
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|path| path.rsplit('/').next())
+                    .filter(|name| !name.is_empty())
+                    .take(EMBED_FILES)
+                    .collect();
+                let text = [
+                    prompt.map(|p| clip_chars(&p, EMBED_PROMPT_CHARS)),
+                    rationale.map(|r| clip_chars(&r, EMBED_RATIONALE_CHARS)),
+                    Some(files.join(" ")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+                texts.push((format!("request\u{1f}{session_id}\u{1f}{group}"), clip_chars(&text, EMBED_MAX_CHARS)));
             }
         }
         {
@@ -1135,7 +1147,8 @@ impl Store {
             })?;
             for row in rows {
                 let (uid, title, decision, rationale) = row?;
-                texts.push((format!("decision\u{1f}{uid}"), format!("{title}\n{decision}\n{rationale}")));
+                let text = format!("{title}\n{decision}\n{rationale}");
+                texts.push((format!("decision\u{1f}{uid}"), clip_chars(&text, EMBED_MAX_CHARS)));
             }
         }
         Ok(texts
@@ -1546,8 +1559,22 @@ fn group_requests(rows: impl Iterator<Item = rusqlite::Result<RequestRow>>) -> R
 
 /// Candidatos de la búsqueda por significado antes de mezclar.
 const SEMANTIC_CANDIDATES: usize = 50;
-/// Caracteres de la explicación que entran en el texto de una petición.
-const EMBED_CHARS: usize = 1500;
+// Lo que entra en el texto de un vector. Las peticiones pueden traer
+// documentos pegados enteros: el principio basta para su significado y así
+// cabe en el contexto de los modelos de embeddings (nomic-embed-text en
+// Ollama usa 2048 tokens por defecto; unos 2000 caracteres quedan holgados).
+const EMBED_PROMPT_CHARS: usize = 900;
+const EMBED_RATIONALE_CHARS: usize = 700;
+const EMBED_FILES: usize = 12;
+const EMBED_MAX_CHARS: usize = 2000;
+
+/// Los primeros `max` caracteres (no bytes) de `text`.
+fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => text[..cut].to_owned(),
+        None => text.to_owned(),
+    }
+}
 
 fn normalized(vector: &[f32]) -> Vec<f32> {
     let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
