@@ -2,9 +2,11 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use huella_store::SymbolRole;
 
+use crate::lineage::Link;
 use crate::query::SymbolMemory;
 
 const PROMPT_CHARS: usize = 220;
@@ -23,6 +25,21 @@ pub fn render_markdown(memory: &SymbolMemory, max_entries: usize) -> String {
         sessions.len(),
         plural(sessions.len(), "sesión", "sesiones"),
     );
+    for origin in &memory.origins {
+        let how = match origin.link {
+            Link::Renamed => "renombrado desde",
+            Link::Moved => "movido desde",
+            Link::MovedAndRenamed => "movido y renombrado desde",
+        };
+        let file =
+            Path::new(&origin.path).file_name().map_or(origin.path.as_str(), |name| name.to_str().unwrap_or_default());
+        let _ = writeln!(
+            out,
+            "\n↪ {how} `{}` en `{file}` ({:.0} % parecido)",
+            origin.qualified_name,
+            origin.similarity * 100.0
+        );
+    }
     if memory.changed_since_last_session {
         out.push_str("\n⚠️ El código ha cambiado desde la última sesión que lo tocó.\n");
     }
@@ -91,6 +108,7 @@ mod tests {
             kind: "replace".into(),
             confidence: Some("exact".into()),
             body_hash: "h".into(),
+            shape_hash: None,
             context: EditContext { prompt: Some(prompt.into()), rationale: rationale.map(str::to_owned) },
         }
     }
@@ -103,11 +121,13 @@ mod tests {
                 start_line: 2,
                 end_line: 4,
                 body_hash: "h".into(),
+                fingerprint: huella_core::Fingerprint::default(),
                 byte_range: 0..1,
                 depth: 1,
             },
             entries,
             changed_since_last_session: changed,
+            origins: Vec::new(),
         }
     }
 

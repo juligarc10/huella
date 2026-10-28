@@ -97,7 +97,9 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "entity": {"type": "string", "description": "Tecnología o concepto, en minúsculas (rust, sqlite…)"},
-                    "project": {"type": "string", "description": "Ruta del repositorio"},
+                    "project": {"type": "string", "description": "Ruta del repositorio (incluye las preferencias de la persona)"},
+                    "scope": {"type": "string", "enum": ["user", "project", "path"],
+                              "description": "user: preferencias de la persona en cualquier proyecto"},
                     "include_inactive": {"type": "boolean", "description": "Incluir reemplazadas y descartadas"}
                 }
             }
@@ -110,6 +112,21 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {"session": {"type": "string", "description": "Id de la sesión o su comienzo"}}
+            }
+        },
+        {
+            "name": "huella_search",
+            "description": "Busca en la memoria de las sesiones por palabras: peticiones de la persona, explicaciones \
+                            del agente, ficheros, símbolos y decisiones. Úsala para encontrar dónde y por qué se hizo \
+                            algo («migración de usuarios», «rate limit») antes de tocar código relacionado.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Palabras a buscar"},
+                    "project": {"type": "string", "description": "Ruta del repositorio, para limitar la búsqueda"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
             }
         },
         {
@@ -127,6 +144,25 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
         "huella_symbol_history" => symbol_history(&context.store, arguments),
         "huella_decisions" => decisions(&context.store, arguments),
         "huella_review" => review(context, arguments),
+        "huella_search" => {
+            let query = huella_store::SearchQuery {
+                text: arguments["query"].as_str().ok_or_else(|| anyhow::anyhow!("falta `query`"))?.to_owned(),
+                project: arguments["project"].as_str().map(|p| huella_engine::normalize_path(Path::new(p), None)),
+                limit: arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10),
+                include_inactive: false,
+            };
+            let embedder = crate::embedder(None, None);
+            let (hits, warning) = huella_engine::embeddings::search(
+                &context.store,
+                &query,
+                embedder.as_ref().map(|e| e as &dyn huella_decisions::Embedder),
+            )?;
+            let mut text = crate::search::render_hits(&hits);
+            if let Some(warning) = warning {
+                let _ = write!(text, "\n(aviso: {warning})");
+            }
+            Ok(text)
+        }
         "huella_sessions" => {
             let limit = arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10);
             let sessions = huella_engine::list_sessions(&context.store, limit)?;
@@ -153,6 +189,7 @@ fn decisions(store: &Store, arguments: &Value) -> Result<String> {
     let filter = DecisionFilter {
         entity: arguments["entity"].as_str().map(str::to_owned),
         project: arguments["project"].as_str().map(|p| huella_engine::normalize_path(Path::new(p), None)),
+        scope: arguments["scope"].as_str().map(str::to_owned),
         include_inactive: arguments["include_inactive"].as_bool().unwrap_or(false),
     };
     let found = store.decisions(&filter)?;
@@ -161,7 +198,12 @@ fn decisions(store: &Store, arguments: &Value) -> Result<String> {
     }
     let mut out = String::new();
     for decision in found {
-        let _ = writeln!(out, "## {} ({})", decision.title, decision.status);
+        let scope = match (decision.scope.as_str(), &decision.scope_path) {
+            ("user", _) => " · preferencia de la persona".to_owned(),
+            ("path", Some(path)) => format!(" · solo {path}"),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "## {} ({}{scope})", decision.title, decision.status);
         let _ = writeln!(out, "{}\nPor qué: {}", decision.decision, decision.rationale);
         for alternative in &decision.alternatives {
             let _ = writeln!(out, "- Descartado: {alternative}");
@@ -240,7 +282,10 @@ mod tests {
         let tools = handle(&mut context, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
         let names: Vec<&str> =
             tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["huella_symbol_history", "huella_decisions", "huella_review", "huella_sessions"]);
+        assert_eq!(
+            names,
+            vec!["huella_symbol_history", "huella_decisions", "huella_review", "huella_search", "huella_sessions"]
+        );
     }
 
     #[test]
@@ -269,6 +314,9 @@ mod tests {
             entities: vec!["rust".into()],
             status: "accepted".into(),
             supersedes: String::new(),
+            scope: "project".into(),
+            scope_path: None,
+            replaces: Vec::new(),
         };
         context
             .store

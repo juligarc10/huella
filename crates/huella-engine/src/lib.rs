@@ -1,11 +1,15 @@
 //! Casos de uso de Huella: indexar transcripciones y consultar la memoria de
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
+pub mod adr;
 mod decisions;
+pub mod embeddings;
 mod index;
+pub mod lineage;
 pub mod narration;
 mod paths;
 mod query;
+pub mod refactor_bench;
 mod render;
 mod review;
 pub mod workspace;
@@ -15,7 +19,7 @@ use std::path::PathBuf;
 pub use decisions::{ExtractionOptions, ExtractionReport, extract_decisions};
 pub use index::{IndexReport, index};
 pub use paths::normalize_path;
-pub use query::{SymbolLens, SymbolMemory, lenses, memory_at};
+pub use query::{SymbolLens, SymbolMemory, lenses, lenses_with, memory_at, memory_at_with, memory_of};
 pub use render::render_markdown;
 pub use review::{SessionListing, list_sessions, session_project, session_review};
 
@@ -29,6 +33,8 @@ pub enum EngineError {
     Extraction(#[from] huella_anchoring::ExtractionError),
     #[error("{0}")]
     Git(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]

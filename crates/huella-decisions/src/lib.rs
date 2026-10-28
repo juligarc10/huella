@@ -44,6 +44,29 @@ impl DecisionStatus {
     }
 }
 
+/// A qué se aplica una decisión.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionScope {
+    /// Preferencia o convención de la persona, válida en cualquier proyecto.
+    User,
+    /// El proyecto entero.
+    #[default]
+    Project,
+    /// Una carpeta o un fichero del proyecto.
+    Path,
+}
+
+impl DecisionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Path => "path",
+        }
+    }
+}
+
 /// Decisión tal como la devuelve el modelo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedDecision {
@@ -57,6 +80,15 @@ pub struct ExtractedDecision {
     pub status: DecisionStatus,
     /// Título de una decisión anterior que esta reemplaza; vacío si ninguna.
     pub supersedes: String,
+    // Con valor por defecto: los modelos sin salida estricta pueden omitirlos.
+    #[serde(default)]
+    pub scope: DecisionScope,
+    /// Carpeta o fichero cuando `scope` es `path`; vacío si no.
+    #[serde(default)]
+    pub scope_path: String,
+    /// Claves (`D3`) de decisiones de sesiones anteriores que esta reemplaza.
+    #[serde(default)]
+    pub replaces_previous: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +136,20 @@ impl<M: JsonModel + ?Sized> DecisionExtractor for M {
     }
 }
 
+/// Un modelo de embeddings: convierte textos en vectores cuya cercanía
+/// indica parecido de significado.
+pub trait Embedder {
+    /// Identificador estable (`openai-compatible:nomic-embed-text`): los
+    /// vectores de modelos distintos no se comparan.
+    fn model_id(&self) -> String;
+
+    /// Un vector por texto, en el mismo orden.
+    ///
+    /// # Errors
+    /// Si falla la llamada o la respuesta no trae un vector por texto.
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError>;
+}
+
 /// Un modelo capaz de extraer decisiones de un trozo de diálogo.
 pub trait DecisionExtractor {
     /// Identificador estable (`anthropic:claude-haiku-5-5`) para saber con qué
@@ -115,12 +161,22 @@ pub trait DecisionExtractor {
     fn extract(&self, request: &ExtractionRequest) -> Result<Vec<ExtractedDecision>, ExtractError>;
 }
 
-/// Lo que se envía al modelo: un trozo de diálogo y las decisiones ya
-/// extraídas de trozos anteriores de la misma sesión, para poder reemplazarlas.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Lo que se envía al modelo: un trozo de diálogo, las decisiones ya
+/// extraídas de trozos anteriores de la misma sesión y las vigentes de
+/// sesiones anteriores, para poder reemplazarlas.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtractionRequest {
     pub dialogue: String,
     pub known_titles: Vec<String>,
+    pub previous: Vec<PreviousDecision>,
+}
+
+/// Decisión vigente de una sesión anterior, con la clave que usará el modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousDecision {
+    pub key: String,
+    pub title: String,
+    pub decision: String,
 }
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -141,6 +197,13 @@ Para cada decisión:
 rejected si se descartó; superseded si otra decisión posterior de la conversación la reemplaza.
 - supersedes: título exacto de la decisión anterior que esta reemplaza (de esta conversación o de la \
 lista de decisiones ya extraídas), o cadena vacía.
+- scope: user si es una preferencia o convención de la persona que vale para cualquier proyecto (idioma de los \
+commits, estilo, herramientas que prefiere); path si solo afecta a una carpeta o fichero concreto; project en \
+el resto de casos.
+- scope_path: la carpeta o fichero cuando scope es path (tal como aparece en la conversación); si no, cadena vacía.
+- replaces_previous: claves (D1, D2…) de las decisiones vigentes de sesiones anteriores que esta conversación \
+cambia o revoca de forma explícita. Lista vacía si no cambia ninguna; no la uses para decisiones que solo \
+se mencionan o se confirman.
 
 Escribe en el idioma de la conversación. Usa solo lo que dice la conversación; no inventes motivos. \
 Si no hay decisiones, devuelve una lista vacía.";
@@ -148,6 +211,13 @@ Si no hay decisiones, devuelve una lista vacía.";
 /// Mensaje de usuario con el diálogo y las decisiones ya conocidas.
 pub fn user_message(request: &ExtractionRequest) -> String {
     let mut message = String::new();
+    if !request.previous.is_empty() {
+        message.push_str("Decisiones vigentes de sesiones anteriores (clave: título — decisión):\n");
+        for previous in &request.previous {
+            let _ = writeln!(message, "- {}: {} — {}", previous.key, previous.title, previous.decision);
+        }
+        message.push('\n');
+    }
     if !request.known_titles.is_empty() {
         message.push_str("Decisiones ya extraídas de partes anteriores de esta sesión:\n");
         for title in &request.known_titles {
@@ -178,9 +248,15 @@ pub fn output_schema() -> Value {
                         "alternatives": strings,
                         "entities": strings,
                         "status": {"type": "string", "enum": ["accepted", "proposed", "rejected", "superseded"]},
-                        "supersedes": {"type": "string"}
+                        "supersedes": {"type": "string"},
+                        "scope": {"type": "string", "enum": ["user", "project", "path"]},
+                        "scope_path": {"type": "string"},
+                        "replaces_previous": strings
                     },
-                    "required": ["title", "decision", "rationale", "alternatives", "entities", "status", "supersedes"],
+                    "required": [
+                        "title", "decision", "rationale", "alternatives", "entities", "status", "supersedes",
+                        "scope", "scope_path", "replaces_previous"
+                    ],
                     "additionalProperties": false
                 }
             }
@@ -206,6 +282,20 @@ pub fn parse_output(text: &str) -> Result<Vec<ExtractedDecision>, ExtractError> 
             decision.entities.sort();
             decision.entities.dedup();
             decision.supersedes = decision.supersedes.trim().to_owned();
+            decision.scope_path = decision.scope_path.trim().to_owned();
+            if decision.scope != DecisionScope::Path || decision.scope_path.is_empty() {
+                // Un alcance de ruta sin ruta no sirve: se queda en el proyecto.
+                if decision.scope == DecisionScope::Path {
+                    decision.scope = DecisionScope::Project;
+                }
+                decision.scope_path.clear();
+            }
+            decision.replaces_previous = decision
+                .replaces_previous
+                .iter()
+                .map(|key| key.trim().to_uppercase())
+                .filter(|k| !k.is_empty())
+                .collect();
             decision
         })
         .collect())
@@ -301,11 +391,46 @@ mod tests {
         assert_eq!(decisions[0].supersedes, "TypeScript");
         assert_eq!(decisions[0].status, DecisionStatus::Accepted);
         assert!(matches!(parse_output("{\"decisions\": [{\"title\": 1}]}"), Err(ExtractError::BadResponse(_))));
+        assert_eq!(decisions[0].scope, DecisionScope::Project, "sin alcance, el proyecto");
+    }
+
+    #[test]
+    fn scopes_and_previous_replacements_are_normalized() {
+        let text = r#"{"decisions": [
+            {"title": "Commits en español", "decision": "d", "rationale": "r", "alternatives": [], "entities": [],
+             "status": "accepted", "supersedes": "", "scope": "user", "scope_path": "x", "replaces_previous": [" d2 "]},
+            {"title": "Kysely en la API", "decision": "d", "rationale": "r", "alternatives": [], "entities": [],
+             "status": "accepted", "supersedes": "", "scope": "path", "scope_path": " apps/api ", "replaces_previous": []},
+            {"title": "Sin ruta", "decision": "d", "rationale": "r", "alternatives": [], "entities": [],
+             "status": "accepted", "supersedes": "", "scope": "path", "scope_path": "", "replaces_previous": []}
+        ]}"#;
+        let decisions = parse_output(text).unwrap();
+        let scopes: Vec<_> = decisions.iter().map(|d| (d.scope, d.scope_path.as_str())).collect();
+        assert_eq!(
+            scopes,
+            vec![(DecisionScope::User, ""), (DecisionScope::Path, "apps/api"), (DecisionScope::Project, "")]
+        );
+        assert_eq!(decisions[0].replaces_previous, vec!["D2"]);
+    }
+
+    #[test]
+    fn user_message_lists_previous_decisions_with_their_keys() {
+        let request = ExtractionRequest {
+            dialogue: "hola".into(),
+            previous: vec![PreviousDecision { key: "D1".into(), title: "SQLite".into(), decision: "En local".into() }],
+            ..ExtractionRequest::default()
+        };
+        assert!(user_message(&request).starts_with("Decisiones vigentes de sesiones anteriores"));
+        assert!(user_message(&request).contains("- D1: SQLite — En local\n"));
     }
 
     #[test]
     fn user_message_lists_known_decisions_first() {
-        let request = ExtractionRequest { dialogue: "### Persona\nhola\n\n".into(), known_titles: vec!["Rust".into()] };
+        let request = ExtractionRequest {
+            dialogue: "### Persona\nhola\n\n".into(),
+            known_titles: vec!["Rust".into()],
+            ..ExtractionRequest::default()
+        };
         assert_eq!(
             user_message(&request),
             "Decisiones ya extraídas de partes anteriores de esta sesión:\n- Rust\n\nConversación:\n\n### Persona\nhola\n\n"

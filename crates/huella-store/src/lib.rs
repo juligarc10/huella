@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use huella_core::{AnchorOutcome, Confidence, EditContext, EditKind, FileEdit, SymbolKind, TranscriptCursor};
+use huella_core::{
+    AnchorOutcome, Confidence, EditContext, EditKind, FileEdit, Fingerprint, SymbolKind, TranscriptCursor,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +133,86 @@ const MIGRATIONS: &[&str] = &[
         created_at      TEXT NOT NULL
     );
 ",
+    // Huella del cuerpo independiente del nombre (renombrados y movimientos).
+    // Se vuelven a leer las transcripciones desde el principio para rellenarla
+    // en las ediciones ya indexadas que aún tienen transcripción.
+    r"
+    ALTER TABLE edit_symbol ADD COLUMN shape_hash TEXT;
+    ALTER TABLE edit_symbol ADD COLUMN sketch BLOB;
+    ALTER TABLE edit_symbol ADD COLUMN tokens INTEGER;
+    ALTER TABLE edit_symbol ADD COLUMN own_name TEXT;
+    CREATE INDEX edit_symbol_by_shape ON edit_symbol(shape_hash);
+    CREATE INDEX edit_symbol_by_own_name ON edit_symbol(own_name);
+    UPDATE transcript SET offset = 0, prompt = NULL, rationale = NULL;
+",
+    // Búsqueda de texto. Las decisiones se indexan con disparadores sobre su
+    // tabla; las ediciones, desde Rust al guardarlas (su texto junta varias
+    // tablas y parte los identificadores), y las ya guardadas al abrir.
+    r"
+    CREATE VIRTUAL TABLE edit_fts USING fts5(body, symbols, tokenize = 'unicode61 remove_diacritics 2');
+    CREATE VIRTUAL TABLE decision_fts USING fts5(
+        title, decision, rationale, alternatives,
+        content = 'decision', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2'
+    );
+    INSERT INTO decision_fts(decision_fts) VALUES ('rebuild');
+    CREATE TRIGGER decision_fts_insert AFTER INSERT ON decision BEGIN
+        INSERT INTO decision_fts(rowid, title, decision, rationale, alternatives)
+        VALUES (new.id, new.title, new.decision, new.rationale, new.alternatives);
+    END;
+    CREATE TRIGGER decision_fts_delete AFTER DELETE ON decision BEGIN
+        INSERT INTO decision_fts(decision_fts, rowid, title, decision, rationale, alternatives)
+        VALUES ('delete', old.id, old.title, old.decision, old.rationale, old.alternatives);
+    END;
+    CREATE TRIGGER decision_fts_update AFTER UPDATE ON decision BEGIN
+        INSERT INTO decision_fts(decision_fts, rowid, title, decision, rationale, alternatives)
+        VALUES ('delete', old.id, old.title, old.decision, old.rationale, old.alternatives);
+        INSERT INTO decision_fts(rowid, title, decision, rationale, alternatives)
+        VALUES (new.id, new.title, new.decision, new.rationale, new.alternatives);
+    END;
+",
+    // Ciclo de vida entre sesiones. Cada decisión tiene un id estable (sesión
+    // y título) que sobrevive a volver a extraer; los reemplazos entre
+    // sesiones pertenecen a la sesión nueva y las correcciones a mano se
+    // guardan aparte, así que volver a extraer una sesión no pisa ninguno.
+    r"
+    ALTER TABLE decision ADD COLUMN uid TEXT;
+    ALTER TABLE decision ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';
+    ALTER TABLE decision ADD COLUMN scope_path TEXT;
+    CREATE INDEX decision_by_uid ON decision(uid);
+    CREATE TABLE decision_supersession (
+        old_uid         TEXT NOT NULL,
+        new_session_id  TEXT NOT NULL,
+        new_title       TEXT NOT NULL,
+        PRIMARY KEY (old_uid, new_session_id)
+    );
+    CREATE TABLE decision_override (
+        uid             TEXT PRIMARY KEY,
+        status          TEXT NOT NULL,
+        at              TEXT NOT NULL
+    );
+    CREATE VIEW decision_view AS
+    SELECT d.*,
+           COALESCE(o.status, CASE WHEN x.new_title IS NOT NULL THEN 'superseded' ELSE d.status END)
+               AS effective_status,
+           CASE WHEN COALESCE(o.status, 'superseded') = 'superseded'
+                THEN COALESCE(d.superseded_by, x.new_title) END AS effective_superseded_by,
+           o.status IS NOT NULL AS overridden
+    FROM decision d
+    LEFT JOIN decision_override o ON o.uid = d.uid
+    LEFT JOIN (SELECT old_uid, MIN(new_title) AS new_title FROM decision_supersession GROUP BY old_uid) x
+           ON x.old_uid = d.uid;
+",
+    // Vectores para la búsqueda por significado, por modelo: cambiar de
+    // modelo no mezcla espacios. El hash del texto dice si hay que recalcular.
+    r"
+    CREATE TABLE embedding (
+        key             TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        text_hash       TEXT NOT NULL,
+        vector          BLOB NOT NULL,
+        PRIMARY KEY (key, model)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -160,7 +242,22 @@ pub struct HistoryEntry {
     pub confidence: Option<String>,
     /// Hash del cuerpo del símbolo justo después de esa edición.
     pub body_hash: String,
+    /// Hash de su forma sin el nombre, si se conoce.
+    pub shape_hash: Option<String>,
     pub context: EditContext,
+}
+
+/// Último estado conocido de un símbolo anclado en una ruta: lo que dejó la
+/// última edición que lo tocó o lo borró.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorState {
+    pub path: String,
+    pub qualified_name: String,
+    pub role: SymbolRole,
+    pub edit_id: String,
+    pub at: Option<String>,
+    /// Vacía en ediciones indexadas antes de existir y sin transcripción.
+    pub fingerprint: Fingerprint,
 }
 
 /// Resumen de la historia de un símbolo para mostrarlo sobre él.
@@ -183,6 +280,12 @@ pub struct NewDecision {
     pub status: String,
     /// Título de la decisión de la misma sesión que esta reemplaza, o vacío.
     pub supersedes: String,
+    /// `user`, `project` o `path`.
+    pub scope: String,
+    /// Carpeta o fichero si `scope` es `path`.
+    pub scope_path: Option<String>,
+    /// Ids estables de decisiones de otras sesiones que esta reemplaza.
+    pub replaces: Vec<String>,
 }
 
 /// Lote de decisiones de una sesión con el contexto de dónde salen.
@@ -201,6 +304,12 @@ pub struct SessionDecisions<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredDecision {
     pub id: i64,
+    /// Id estable: sobrevive a volver a extraer la sesión.
+    pub uid: String,
+    pub scope: String,
+    pub scope_path: Option<String>,
+    /// El estado lo fijó la persona a mano.
+    pub overridden: bool,
     pub session_id: String,
     pub project: Option<String>,
     pub title: String,
@@ -245,11 +354,71 @@ pub struct SessionSummary {
     pub files: usize,
 }
 
+/// Qué buscar en la memoria.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    /// Solo lo de este proyecto (ruta absoluta).
+    pub project: Option<String>,
+    pub limit: usize,
+    /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
+    pub include_inactive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchHit {
+    /// Una petición de una sesión, con lo que tocó.
+    Request {
+        session_id: String,
+        at: Option<String>,
+        prompt: Option<String>,
+        /// Fragmento con las palabras buscadas marcadas con `[` `]`.
+        snippet: String,
+        paths: Vec<String>,
+        symbols: Vec<String>,
+        edits: usize,
+        score: f64,
+    },
+    Decision {
+        decision: Box<StoredDecision>,
+        snippet: String,
+        score: f64,
+    },
+}
+
+impl SearchHit {
+    #[must_use]
+    pub fn score(&self) -> f64 {
+        match self {
+            Self::Request { score, .. } | Self::Decision { score, .. } => *score,
+        }
+    }
+}
+
+/// Vector de la consulta para mezclar la búsqueda por significado.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SemanticQuery<'a> {
+    /// Modelo con el que se calculó (solo se compara con vectores suyos).
+    pub model: &'a str,
+    pub vector: &'a [f32],
+}
+
+/// Texto de la memoria que aún no tiene vector con un modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingEmbedding {
+    pub key: String,
+    pub text: String,
+    pub text_hash: String,
+}
+
 /// Qué decisiones listar.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionFilter {
     pub entity: Option<String>,
+    /// Las del proyecto y las de la persona (alcance `user`), que valen en todos.
     pub project: Option<String>,
+    /// Solo las de este alcance.
+    pub scope: Option<String>,
     /// Incluir las reemplazadas, rechazadas y solo propuestas.
     pub include_inactive: bool,
 }
@@ -310,6 +479,73 @@ impl Store {
             tx.pragma_update(None, "user_version", version)?;
         }
         tx.commit()?;
+        self.backfill_own_names()?;
+        self.backfill_edit_search()?;
+        self.backfill_decision_uids()
+    }
+
+    /// Id estable de las decisiones guardadas antes de existir.
+    fn backfill_decision_uids(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare("SELECT id, session_id, title FROM decision WHERE uid IS NULL")?;
+            let pending: Vec<(i64, String, String)> = select
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut update = tx.prepare("UPDATE decision SET uid = ?2 WHERE id = ?1")?;
+            for (id, session_id, title) in &pending {
+                update.execute(params![id, decision_uid(session_id, title)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Indexa para la búsqueda las ediciones guardadas antes de existir.
+    fn backfill_edit_search(&mut self) -> Result<()> {
+        let missing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM edit WHERE rowid NOT IN (SELECT rowid FROM edit_fts)",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing == 0 {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare(
+                "SELECT e.rowid, e.path, e.prompt, e.rationale,
+                        (SELECT group_concat(s.qualified_name, ' ') FROM edit_symbol s WHERE s.edit_id = e.id)
+                 FROM edit e WHERE e.rowid NOT IN (SELECT rowid FROM edit_fts)",
+            )?;
+            let rows: Vec<PendingSearchRow> = select
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut insert = tx.prepare("INSERT INTO edit_fts (rowid, body, symbols) VALUES (?1, ?2, ?3)")?;
+            for (rowid, path, prompt, rationale, symbols) in rows {
+                let symbols: Vec<&str> = symbols.as_deref().unwrap_or_default().split(' ').collect();
+                let (body, symbols) = search_body(&path, prompt.as_deref(), rationale.as_deref(), &symbols);
+                insert.execute(params![rowid, body, symbols])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Nombre propio de los símbolos anclados antes de existir la columna,
+    /// también los de transcripciones que ya no están.
+    fn backfill_own_names(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare("SELECT rowid, qualified_name FROM edit_symbol WHERE own_name IS NULL")?;
+            let pending: Vec<(i64, String)> =
+                select.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            let mut update = tx.prepare("UPDATE edit_symbol SET own_name = ?2 WHERE rowid = ?1")?;
+            for (rowid, qualified_name) in &pending {
+                update.execute(params![rowid, own_name(qualified_name)])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -362,7 +598,8 @@ impl Store {
     /// Si falla la consulta.
     pub fn history(&self, path: &str, qualified_name: &str) -> Result<Vec<HistoryEntry>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT e.id, e.session_id, e.at, s.role, e.kind, e.confidence, s.body_hash, e.prompt, e.rationale
+            "SELECT e.id, e.session_id, e.at, s.role, e.kind, e.confidence, s.body_hash, e.prompt, e.rationale,
+                    s.shape_hash
              FROM edit_symbol s JOIN edit e ON e.id = s.edit_id
              WHERE e.path = ?1 AND s.qualified_name = ?2
              ORDER BY e.at DESC, e.id DESC",
@@ -372,14 +609,69 @@ impl Store {
                 edit_id: row.get(0)?,
                 session_id: row.get(1)?,
                 at: row.get(2)?,
-                role: if row.get::<_, String>(3)? == "removed" { SymbolRole::Removed } else { SymbolRole::Touched },
+                role: role_from(&row.get::<_, String>(3)?),
                 kind: row.get(4)?,
                 confidence: row.get(5)?,
                 body_hash: row.get(6)?,
+                shape_hash: row.get(9)?,
                 context: EditContext { prompt: row.get(7)?, rationale: row.get(8)? },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Último estado de cada símbolo anclado en un fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_in(&self, path: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "e.path = ?1", &[&path])
+    }
+
+    /// Último estado de todos los símbolos anclados.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn all_anchors(&self) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "1 = 1", &[])
+    }
+
+    /// Último estado de los símbolos que alguna vez tuvieron esta forma, en
+    /// cualquier fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_with_shape(&self, shape_hash: &str) -> Result<Vec<AnchorState>> {
+        let mut found = latest_anchors(&self.conn, "s.shape_hash = ?1", &[&shape_hash])?;
+        // Se filtró por la forma de alguna edición, no necesariamente la última.
+        found.retain(|state| state.fingerprint.shape_hash == shape_hash);
+        Ok(found)
+    }
+
+    /// Último estado de los símbolos cuyo nombre propio (el último tramo del
+    /// cualificado) es `name`, en cualquier fichero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_named(&self, name: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "s.own_name = ?1", &[&name])
+    }
+
+    /// Último estado de los símbolos de ficheros con este nombre (`user.ts`)
+    /// en cualquier carpeta.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn anchors_in_files_named(&self, file_name: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "(e.path = ?1 OR e.path LIKE '%/' || ?1)", &[&file_name])
+    }
+
+    /// Símbolos que borró una edición, con su huella de antes de borrarlos.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn removed_by(&self, edit_id: &str) -> Result<Vec<AnchorState>> {
+        latest_anchors(&self.conn, "s.edit_id = ?1 AND s.role = 'removed'", &[&edit_id])
     }
 
     /// Actividad de cada símbolo de un fichero, por nombre cualificado.
@@ -606,11 +898,12 @@ impl Store {
     pub fn replace_decisions(&mut self, batch: &SessionDecisions) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM decision WHERE session_id = ?1", [batch.session_id])?;
+        tx.execute("DELETE FROM decision_supersession WHERE new_session_id = ?1", [batch.session_id])?;
         for decision in batch.decisions {
             tx.execute(
                 "INSERT INTO decision (session_id, project, title, decision, rationale, alternatives, status,
-                                       decided_at, extractor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       decided_at, extractor, uid, scope, scope_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     batch.session_id,
                     batch.project,
@@ -620,9 +913,22 @@ impl Store {
                     serde_json::to_string(&decision.alternatives).unwrap_or_else(|_| "[]".to_owned()),
                     decision.status,
                     batch.decided_at,
-                    batch.extractor
+                    batch.extractor,
+                    decision_uid(batch.session_id, &decision.title),
+                    decision.scope,
+                    decision.scope_path
                 ],
             )?;
+            // Solo una decisión tomada reemplaza a otra; una propuesta, no.
+            if decision.status == "accepted" {
+                for old_uid in &decision.replaces {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO decision_supersession (old_uid, new_session_id, new_title)
+                         VALUES (?1, ?2, ?3)",
+                        params![old_uid, batch.session_id, decision.title],
+                    )?;
+                }
+            }
             let id = tx.last_insert_rowid();
             for entity in &decision.entities {
                 tx.execute(
@@ -647,44 +953,332 @@ impl Store {
         Ok(())
     }
 
+    /// Busca en las peticiones, explicaciones, rutas y símbolos de las
+    /// ediciones y en las decisiones. Las ediciones de una misma petición se
+    /// agrupan; los dos tipos se mezclan por su puesto en su propia lista.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>> {
+        self.search_with(query, None)
+    }
+
+    /// Como [`Store::search`], mezclando además lo más parecido en
+    /// significado al vector de la consulta (encuentra sinónimos y frases
+    /// distintas que dicen lo mismo).
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn search_with(&self, query: &SearchQuery, semantic: Option<SemanticQuery>) -> Result<Vec<SearchHit>> {
+        let project_prefix = query.project.as_ref().map(|project| format!("{}/", project.trim_end_matches('/')));
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        let mut by_key: HashMap<String, SearchHit> = HashMap::new();
+        if let Some(fts) = fts_query(&query.text) {
+            let requests = self.search_requests(&fts, project_prefix.as_deref())?;
+            let decisions = self.search_decisions(&fts, query)?;
+            lists.push(requests.iter().map(|(key, _)| key.clone()).collect());
+            lists.push(decisions.iter().map(|(key, _)| key.clone()).collect());
+            by_key.extend(requests.into_iter().chain(decisions));
+        }
+        if let Some(semantic) = semantic {
+            lists.push(self.nearest(semantic, SEMANTIC_CANDIDATES)?);
+        }
+        let mut hits = Vec::new();
+        for (key, score) in fuse_ranks(&lists) {
+            if hits.len() >= query.limit.max(1) {
+                break;
+            }
+            let hit = match by_key.remove(&key) {
+                Some(hit) => Some(hit),
+                None => self.hit_for_key(&key, query, project_prefix.as_deref())?,
+            };
+            if let Some(mut hit) = hit {
+                match &mut hit {
+                    SearchHit::Request { score: s, .. } | SearchHit::Decision { score: s, .. } => *s = score,
+                }
+                hits.push(hit);
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Claves de los textos más parecidos al vector, del más al menos.
+    fn nearest(&self, semantic: SemanticQuery, limit: usize) -> Result<Vec<String>> {
+        let query = normalized(semantic.vector);
+        let mut statement = self.conn.prepare_cached("SELECT key, vector FROM embedding WHERE model = ?1")?;
+        let rows =
+            statement.query_map([semantic.model], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (key, bytes) = row?;
+            let vector = vector_from_bytes(&bytes);
+            if vector.len() == query.len() {
+                let similarity: f32 = vector.iter().zip(&query).map(|(a, b)| a * b).sum();
+                scored.push((key, similarity));
+            }
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(scored.into_iter().take(limit).map(|(key, _)| key).collect())
+    }
+
+    /// Resultado de una clave que solo encontró la búsqueda por significado,
+    /// si cumple los filtros de la consulta.
+    fn hit_for_key(&self, key: &str, query: &SearchQuery, project_prefix: Option<&str>) -> Result<Option<SearchHit>> {
+        let mut parts = key.split('\u{1f}');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("request"), Some(session_id), Some(group)) => {
+                let mut statement = self.conn.prepare_cached(
+                    "SELECT e.session_id, e.at, e.prompt, e.path, substr(COALESCE(e.rationale, e.prompt, ''), 1, 160),
+                            (SELECT group_concat(s.qualified_name, char(31)) FROM edit_symbol s
+                             WHERE s.edit_id = e.id AND s.role = 'touched')
+                     FROM edit e
+                     WHERE e.session_id = ?1 AND COALESCE(e.prompt, e.path) = ?2
+                       AND (?3 IS NULL OR e.path LIKE ?3 || '%')
+                     ORDER BY e.at",
+                )?;
+                let rows = statement.query_map(params![session_id, group, project_prefix], request_row)?;
+                Ok(group_requests(rows)?.into_iter().next().map(|(_, hit)| hit))
+            }
+            (Some("decision"), Some(uid), None) => {
+                let Some(decision) = self.decisions_by_uid(uid)?.into_iter().find(|d| d.uid == uid) else {
+                    return Ok(None);
+                };
+                let in_project =
+                    query.project.is_none() || decision.project == query.project || decision.scope == "user";
+                let active = query.include_inactive || decision.status == "accepted";
+                Ok((in_project && active).then(|| {
+                    let snippet = decision.decision.chars().take(160).collect();
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 }
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Textos (peticiones y decisiones) sin vector con `model`, o cuyo texto
+    /// cambió desde que se calculó, como mucho `limit`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingEmbedding>> {
+        let mut known: HashMap<String, String> = HashMap::new();
+        {
+            let mut statement = self.conn.prepare_cached("SELECT key, text_hash FROM embedding WHERE model = ?1")?;
+            for row in statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))? {
+                let (key, hash) = row?;
+                known.insert(key, hash);
+            }
+        }
+        let mut texts: Vec<(String, String)> = Vec::new();
+        {
+            let mut statement = self.conn.prepare_cached(
+                "SELECT e.session_id, COALESCE(e.prompt, e.path), MIN(e.prompt), MIN(e.rationale), group_concat(DISTINCT e.path)
+                 FROM edit e GROUP BY e.session_id, COALESCE(e.prompt, e.path) ORDER BY MAX(e.at) DESC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (session_id, group, prompt, rationale, paths) = row?;
+                let text = [prompt, rationale.map(|r| r.chars().take(EMBED_CHARS).collect()), paths]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                texts.push((format!("request\u{1f}{session_id}\u{1f}{group}"), text));
+            }
+        }
+        {
+            let mut statement = self.conn.prepare_cached("SELECT uid, title, decision, rationale FROM decision")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (uid, title, decision, rationale) = row?;
+                texts.push((format!("decision\u{1f}{uid}"), format!("{title}\n{decision}\n{rationale}")));
+            }
+        }
+        Ok(texts
+            .into_iter()
+            .filter_map(|(key, text)| {
+                let text_hash = blake3::hash(text.as_bytes()).to_hex()[..16].to_owned();
+                (known.get(&key) != Some(&text_hash)).then_some(PendingEmbedding { key, text, text_hash })
+            })
+            .take(limit)
+            .collect())
+    }
+
+    /// Guarda vectores calculados con `model` (normalizados, para comparar con
+    /// un producto escalar).
+    ///
+    /// # Errors
+    /// Si falla la escritura; no se guarda ninguno.
+    pub fn save_embeddings(&mut self, model: &str, items: &[(&PendingEmbedding, Vec<f32>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO embedding (key, model, text_hash, vector) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(key, model) DO UPDATE SET text_hash = excluded.text_hash, vector = excluded.vector",
+            )?;
+            for (pending, vector) in items {
+                let bytes: Vec<u8> = normalized(vector).iter().flat_map(|v| v.to_le_bytes()).collect();
+                insert.execute(params![pending.key, model, pending.text_hash, bytes])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Cuántos textos tienen vector con `model`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn embedded(&self, model: &str) -> Result<usize> {
+        let count: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM embedding WHERE model = ?1", [model], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or_default())
+    }
+
+    fn search_requests(&self, fts: &str, project_prefix: Option<&str>) -> Result<Vec<(String, SearchHit)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT e.session_id, e.at, e.prompt, e.path, snippet(edit_fts, 0, '[', ']', '…', 12),
+                    (SELECT group_concat(s.qualified_name, char(31)) FROM edit_symbol s
+                     WHERE s.edit_id = e.id AND s.role = 'touched')
+             FROM edit_fts JOIN edit e ON e.rowid = edit_fts.rowid
+             WHERE edit_fts MATCH ?1 AND (?2 IS NULL OR e.path LIKE ?2 || '%')
+             ORDER BY bm25(edit_fts) LIMIT 400",
+        )?;
+        let rows = statement.query_map(params![fts, project_prefix], request_row)?;
+        group_requests(rows)
+    }
+
+    fn search_decisions(&self, fts: &str, query: &SearchQuery) -> Result<Vec<(String, SearchHit)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT d.id, snippet(decision_fts, -1, '[', ']', '…', 12)
+             FROM decision_fts JOIN decision_view d ON d.id = decision_fts.rowid
+             WHERE decision_fts MATCH ?1 AND (?2 IS NULL OR d.project = ?2 OR d.scope = 'user')
+               AND (?3 OR d.effective_status = 'accepted')
+             ORDER BY bm25(decision_fts) LIMIT 100",
+        )?;
+        let ids: Vec<(i64, String)> = statement
+            .query_map(params![fts, query.project, query.include_inactive], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut hits = Vec::new();
+        for (id, snippet) in ids {
+            if let Some(decision) = self.decision(id)? {
+                hits.push((
+                    format!("decision\u{1f}{}", decision.uid),
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 },
+                ));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Una decisión por su id.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decision(&self, id: i64) -> Result<Option<StoredDecision>> {
+        let filter = DecisionFilter { include_inactive: true, ..DecisionFilter::default() };
+        Ok(self.decisions_where(&filter, Some(id), None)?.into_iter().next())
+    }
+
     /// Decisiones de la más reciente a la más antigua. Por defecto solo las
     /// vigentes (aceptadas), que son las que conviene recordar.
     ///
     /// # Errors
     /// Si falla la consulta.
     pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<StoredDecision>> {
+        self.decisions_where(filter, None, None)
+    }
+
+    /// Decisiones (también inactivas) cuyo id estable empieza por `prefix`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decisions_by_uid(&self, prefix: &str) -> Result<Vec<StoredDecision>> {
+        let filter = DecisionFilter { include_inactive: true, ..DecisionFilter::default() };
+        self.decisions_where(&filter, None, Some(prefix))
+    }
+
+    /// Fija a mano el estado de una decisión (`None` lo devuelve al extraído).
+    /// Sobrevive a volver a extraer su sesión.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_decision_status(&self, uid: &str, status: Option<&str>) -> Result<()> {
+        match status {
+            Some(status) => self.conn.execute(
+                "INSERT INTO decision_override (uid, status, at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(uid) DO UPDATE SET status = excluded.status, at = excluded.at",
+                params![uid, status],
+            )?,
+            None => self.conn.execute("DELETE FROM decision_override WHERE uid = ?1", [uid])?,
+        };
+        Ok(())
+    }
+
+    fn decisions_where(
+        &self,
+        filter: &DecisionFilter,
+        id: Option<i64>,
+        uid: Option<&str>,
+    ) -> Result<Vec<StoredDecision>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives, d.status,
-                    d.superseded_by, d.decided_at, d.extractor,
-                    (SELECT group_concat(entity, char(31)) FROM decision_entity WHERE decision_id = d.id)
-             FROM decision d
+            "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives,
+                    d.effective_status, d.effective_superseded_by, d.decided_at, d.extractor,
+                    (SELECT group_concat(entity, char(31)) FROM decision_entity WHERE decision_id = d.id),
+                    d.uid, d.scope, d.scope_path, d.overridden
+             FROM decision_view d
              WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM decision_entity e WHERE e.decision_id = d.id AND e.entity = ?1))
-               AND (?2 IS NULL OR d.project = ?2)
-               AND (?3 OR d.status = 'accepted')
+               AND (?2 IS NULL OR d.project = ?2 OR d.scope = 'user')
+               AND (?3 OR d.effective_status = 'accepted')
+               AND (?4 IS NULL OR d.id = ?4)
+               AND (?5 IS NULL OR d.scope = ?5)
+               AND (?6 IS NULL OR d.uid LIKE ?6 || '%')
              ORDER BY d.decided_at DESC, d.id",
         )?;
         let entity = filter.entity.as_ref().map(|entity| entity.trim().to_lowercase());
-        let rows = statement.query_map(params![entity, filter.project, filter.include_inactive], |row| {
-            let alternatives: String = row.get(6)?;
-            let entities: Option<String> = row.get(11)?;
-            let mut entities: Vec<String> =
-                entities.map(|list| list.split('\u{1f}').map(str::to_owned).collect()).unwrap_or_default();
-            entities.sort();
-            Ok(StoredDecision {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                project: row.get(2)?,
-                title: row.get(3)?,
-                decision: row.get(4)?,
-                rationale: row.get(5)?,
-                alternatives: serde_json::from_str(&alternatives).unwrap_or_default(),
-                entities,
-                status: row.get(7)?,
-                superseded_by: row.get(8)?,
-                decided_at: row.get(9)?,
-                extractor: row.get(10)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![entity, filter.project, filter.include_inactive, id, filter.scope, uid],
+            |row| {
+                let alternatives: String = row.get(6)?;
+                let entities: Option<String> = row.get(11)?;
+                let mut entities: Vec<String> =
+                    entities.map(|list| list.split('\u{1f}').map(str::to_owned).collect()).unwrap_or_default();
+                entities.sort();
+                Ok(StoredDecision {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    project: row.get(2)?,
+                    title: row.get(3)?,
+                    decision: row.get(4)?,
+                    rationale: row.get(5)?,
+                    alternatives: serde_json::from_str(&alternatives).unwrap_or_default(),
+                    entities,
+                    status: row.get(7)?,
+                    superseded_by: row.get(8)?,
+                    decided_at: row.get(9)?,
+                    extractor: row.get(10)?,
+                    uid: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                    scope: row.get(13)?,
+                    scope_path: row.get(14)?,
+                    overridden: row.get(15)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -745,17 +1339,46 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
             serde_json::to_string(indexed.changed_lines).unwrap_or_else(|_| "[]".to_owned()),
         ],
     )?;
-    // Edición ya indexada antes: sus símbolos también lo están.
-    if inserted == 0 {
-        return Ok(());
+    if inserted == 1 {
+        let symbols: Vec<&str> = anchor
+            .map(|a| a.symbols.iter().chain(&a.removed).map(|s| s.qualified_name.as_str()).collect())
+            .unwrap_or_default();
+        let (body, symbols) =
+            search_body(indexed.path, edit.context.prompt.as_deref(), edit.context.rationale.as_deref(), &symbols);
+        tx.execute(
+            "INSERT INTO edit_fts (rowid, body, symbols) VALUES (last_insert_rowid(), ?1, ?2)",
+            [body, symbols],
+        )?;
     }
     let Some(anchor) = anchor else { return Ok(()) };
-    let mut insert_symbol = tx.prepare_cached(
-        "INSERT OR IGNORE INTO edit_symbol (edit_id, role, qualified_name, kind, start_line, end_line, body_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )?;
     let roles = anchor.symbols.iter().map(|s| ("touched", s)).chain(anchor.removed.iter().map(|s| ("removed", s)));
+    // Edición ya indexada antes: solo se completa la huella si le falta, sin
+    // añadir símbolos que el anclaje actual nombre de otra forma.
+    if inserted == 0 {
+        let mut backfill = tx.prepare_cached(
+            "UPDATE edit_symbol SET shape_hash = ?4, sketch = ?5, tokens = ?6
+             WHERE edit_id = ?1 AND role = ?2 AND qualified_name = ?3 AND shape_hash IS NULL",
+        )?;
+        for (role, symbol) in roles {
+            let fingerprint = &symbol.fingerprint;
+            backfill.execute(params![
+                origin.event_id,
+                role,
+                symbol.qualified_name,
+                fingerprint.shape_hash,
+                fingerprint.sketch_bytes(),
+                i64::try_from(fingerprint.tokens).unwrap_or(i64::MAX)
+            ])?;
+        }
+        return Ok(());
+    }
+    let mut insert_symbol = tx.prepare_cached(
+        "INSERT OR IGNORE INTO edit_symbol (edit_id, role, qualified_name, kind, start_line, end_line, body_hash,
+                                            shape_hash, sketch, tokens, own_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
     for (role, symbol) in roles {
+        let fingerprint = &symbol.fingerprint;
         insert_symbol.execute(params![
             origin.event_id,
             role,
@@ -763,10 +1386,192 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
             symbol_kind_name(symbol.kind),
             i64::try_from(symbol.start_line).unwrap_or(i64::MAX),
             i64::try_from(symbol.end_line).unwrap_or(i64::MAX),
-            symbol.body_hash
+            symbol.body_hash,
+            fingerprint.shape_hash,
+            fingerprint.sketch_bytes(),
+            i64::try_from(fingerprint.tokens).unwrap_or(i64::MAX),
+            own_name(&symbol.qualified_name)
         ])?;
     }
     Ok(())
+}
+
+/// Edición aún sin indexar: rowid, ruta, petición, explicación y símbolos.
+type PendingSearchRow = (i64, String, Option<String>, Option<String>, Option<String>);
+
+/// Texto por el que se encuentra una edición: la prosa (petición,
+/// explicación y ruta), de la que salen los fragmentos, y los símbolos,
+/// también partidos en palabras (`hashPassword` → `hash Password`) para que
+/// «password» los encuentre.
+fn search_body(path: &str, prompt: Option<&str>, rationale: Option<&str>, symbols: &[&str]) -> (String, String) {
+    let body = [prompt, rationale, Some(path)].into_iter().flatten().collect::<Vec<_>>().join("\n");
+    let symbols = symbols
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|symbol| format!("{symbol} {}", split_identifier(symbol)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (body, symbols)
+}
+
+/// `UserService.hashPassword` → `User Service hash Password`.
+fn split_identifier(identifier: &str) -> String {
+    let mut words = String::new();
+    let mut previous: Option<char> = None;
+    for c in identifier.chars() {
+        let boundary = previous.is_some_and(|p| (p.is_lowercase() || p.is_ascii_digit()) && c.is_uppercase());
+        if boundary || (!c.is_alphanumeric() && !words.ends_with(' ')) {
+            words.push(' ');
+        }
+        if c.is_alphanumeric() {
+            words.push(c);
+        }
+        previous = Some(c);
+    }
+    words.trim().to_owned()
+}
+
+/// Consulta FTS5 con las palabras de la persona: todas deben aparecer, la
+/// última también como prefijo (se busca mientras se escribe).
+fn fts_query(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let (last, rest) = words.split_last()?;
+    let mut query: Vec<String> = rest.iter().map(|word| format!("\"{word}\"")).collect();
+    query.push(format!("\"{last}\"*"));
+    Some(query.join(" "))
+}
+
+/// Une listas ordenadas por relevancia sumando 1/(k + puesto) de cada una
+/// (reciprocal rank fusion): no hace falta que sus puntuaciones sean comparables.
+fn fuse_ranks(lists: &[Vec<String>]) -> Vec<(String, f64)> {
+    const K: f64 = 60.0;
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for list in lists {
+        for (rank, key) in (1u32..).zip(list) {
+            *scores.entry(key.clone()).or_default() += 1.0 / (K + f64::from(rank));
+        }
+    }
+    let mut fused: Vec<(String, f64)> = scores.into_iter().collect();
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    fused
+}
+
+/// Una fila de edición para agrupar en peticiones.
+type RequestRow = (String, Option<String>, Option<String>, String, String, Option<String>);
+
+fn request_row(row: &rusqlite::Row) -> rusqlite::Result<RequestRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+}
+
+/// Agrupa las ediciones por petición conservando el orden de la primera de
+/// cada una.
+fn group_requests(rows: impl Iterator<Item = rusqlite::Result<RequestRow>>) -> Result<Vec<(String, SearchHit)>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, SearchHit> = HashMap::new();
+    for row in rows {
+        let (session_id, at, prompt, path, snippet, symbols) = row?;
+        let key = format!("request\u{1f}{session_id}\u{1f}{}", prompt.as_deref().unwrap_or(&path));
+        let hit = grouped.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            SearchHit::Request {
+                session_id,
+                at: at.clone(),
+                prompt,
+                snippet,
+                paths: Vec::new(),
+                symbols: Vec::new(),
+                edits: 0,
+                score: 0.0,
+            }
+        });
+        if let SearchHit::Request { at: latest, paths, symbols: all, edits, .. } = hit {
+            *edits += 1;
+            if at > *latest {
+                latest.clone_from(&at);
+            }
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+            for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
+                if !all.iter().any(|known| known == symbol) {
+                    all.push(symbol.to_owned());
+                }
+            }
+        }
+    }
+    Ok(order.into_iter().filter_map(|key| grouped.remove(&key).map(|hit| (key, hit))).collect())
+}
+
+/// Candidatos de la búsqueda por significado antes de mezclar.
+const SEMANTIC_CANDIDATES: usize = 50;
+/// Caracteres de la explicación que entran en el texto de una petición.
+const EMBED_CHARS: usize = 1500;
+
+fn normalized(vector: &[f32]) -> Vec<f32> {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm == 0.0 { vector.to_vec() } else { vector.iter().map(|v| v / norm).collect() }
+}
+
+fn vector_from_bytes(bytes: &[u8]) -> Vec<f32> {
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+}
+
+/// Id estable de una decisión: su sesión y su título sin mayúsculas.
+#[must_use]
+pub fn decision_uid(session_id: &str, title: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(session_id.as_bytes());
+    hasher.update(&[0x1f]);
+    hasher.update(title.trim().to_lowercase().as_bytes());
+    hasher.finalize().to_hex()[..12].to_owned()
+}
+
+/// Último tramo del nombre cualificado: `UserService.register` → `register`.
+fn own_name(qualified_name: &str) -> &str {
+    qualified_name.rsplit(['.', ':']).next().unwrap_or(qualified_name)
+}
+
+/// Última aparición de cada símbolo entre las filas de `edit_symbol` que
+/// cumplen `filter` (sobre `s` y `e`), con `params`.
+fn latest_anchors(conn: &Connection, filter: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<AnchorState>> {
+    let sql = format!(
+        "SELECT e.path, s.qualified_name, s.role, e.id, e.at, s.shape_hash, s.sketch, s.tokens
+         FROM edit_symbol s JOIN edit e ON e.id = s.edit_id
+         WHERE {filter}
+         ORDER BY e.at DESC, e.id DESC"
+    );
+    let mut statement = conn.prepare_cached(&sql)?;
+    let rows = statement.query_map(params, |row| {
+        Ok(AnchorState {
+            path: row.get(0)?,
+            qualified_name: row.get(1)?,
+            role: role_from(&row.get::<_, String>(2)?),
+            edit_id: row.get(3)?,
+            at: row.get(4)?,
+            fingerprint: fingerprint_from(row.get(5)?, row.get::<_, Option<Vec<u8>>>(6)?.as_deref(), row.get(7)?),
+        })
+    })?;
+    let mut seen = std::collections::HashSet::new();
+    let mut latest = Vec::new();
+    for state in rows {
+        let state = state?;
+        if seen.insert((state.path.clone(), state.qualified_name.clone())) {
+            latest.push(state);
+        }
+    }
+    Ok(latest)
+}
+
+fn role_from(role: &str) -> SymbolRole {
+    if role == "removed" { SymbolRole::Removed } else { SymbolRole::Touched }
+}
+
+fn fingerprint_from(shape_hash: Option<String>, sketch: Option<&[u8]>, tokens: Option<i64>) -> Fingerprint {
+    Fingerprint {
+        shape_hash: shape_hash.unwrap_or_default(),
+        sketch: sketch.map(Fingerprint::sketch_from_bytes).unwrap_or_default(),
+        tokens: tokens.and_then(|n| usize::try_from(n).ok()).unwrap_or_default(),
+    }
 }
 
 fn kind_name(kind: EditKind) -> &'static str {
@@ -816,6 +1621,7 @@ mod tests {
             start_line: 1,
             end_line: 3,
             body_hash: hash.into(),
+            fingerprint: huella_core::Fingerprint::default(),
             byte_range: 0..10,
             depth: 1,
         }
@@ -936,6 +1742,9 @@ mod tests {
             entities: entities.iter().map(|e| (*e).to_owned()).collect(),
             status: status.into(),
             supersedes: supersedes.into(),
+            scope: "project".into(),
+            scope_path: None,
+            replaces: Vec::new(),
         }
     }
 
@@ -948,6 +1757,193 @@ mod tests {
             decided_at: Some("2026-10-25T10:00:00Z"),
             decisions,
         }
+    }
+
+    fn search(store: &Store, text: &str) -> Vec<SearchHit> {
+        store.search(&SearchQuery { text: text.into(), limit: 10, ..SearchQuery::default() }).unwrap()
+    }
+
+    #[test]
+    fn search_finds_requests_by_words_accents_and_split_identifiers() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "añade la migración de usuarios");
+        let second = edit("e2", "s1", "2026-10-01T10:01:00Z", "añade la migración de usuarios");
+        let other = edit("e3", "s2", "2026-10-02T10:00:00Z", "cambia el color del botón");
+        let hashed = anchored(&[("UserService.hashPassword", "h1")], &[]);
+        save(&mut store, 10, &[(&first, &hashed), (&second, &hashed), (&other, &anchored(&[("Button", "h2")], &[]))]);
+
+        let hits = search(&store, "migracion");
+        assert_eq!(hits.len(), 1, "las dos ediciones de la petición se agrupan: {hits:?}");
+        let SearchHit::Request { session_id, edits, symbols, snippet, .. } = &hits[0] else { panic!("{hits:?}") };
+        assert_eq!((session_id.as_str(), *edits), ("s1", 2));
+        assert_eq!(symbols, &vec!["UserService.hashPassword".to_owned()]);
+        assert!(snippet.contains("[migración]"), "{snippet}");
+
+        assert_eq!(search(&store, "password").len(), 1, "por las palabras del identificador");
+        assert_eq!(search(&store, "bot").len(), 1, "la última palabra vale como prefijo");
+        assert_eq!(search(&store, "migración botón"), Vec::new(), "todas las palabras deben aparecer");
+        assert_eq!(search(&store, "  "), Vec::new());
+    }
+
+    #[test]
+    fn search_finds_active_decisions_and_follows_their_changes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [
+            new_decision("SQLite en local", &["sqlite"], "accepted", ""),
+            new_decision("Postgres en local", &["postgres"], "rejected", ""),
+        ];
+        store.replace_decisions(&batch("s1", 10, &decisions)).unwrap();
+        let titles = |hits: Vec<SearchHit>| -> Vec<String> {
+            hits.into_iter()
+                .filter_map(|hit| match hit {
+                    SearchHit::Decision { decision, .. } => Some(decision.title),
+                    SearchHit::Request { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(titles(search(&store, "local")), vec!["SQLite en local"]);
+        let all = store
+            .search(&SearchQuery { text: "local".into(), limit: 10, include_inactive: true, ..SearchQuery::default() })
+            .unwrap();
+        assert_eq!(titles(all).len(), 2);
+
+        // Volver a extraer la sesión sustituye sus decisiones también en el índice.
+        store.replace_decisions(&batch("s1", 12, &[new_decision("DuckDB en local", &[], "accepted", "")])).unwrap();
+        assert_eq!(titles(search(&store, "local")), vec!["DuckDB en local"]);
+        assert_eq!(search(&store, "sqlite"), Vec::new());
+    }
+
+    #[test]
+    fn edits_saved_before_the_search_index_existed_are_indexed_on_open() {
+        let dir = std::env::temp_dir().join(format!("huella-fts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huella.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = Store::open(&path).unwrap();
+            let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "valida el email");
+            save(&mut store, 10, &[(&first, &anchored(&[("validate", "h1")], &[]))]);
+            store.conn.execute("DELETE FROM edit_fts", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(search(&store, "email").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn semantic_search_adds_what_words_miss_and_keeps_filters() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "limita los intentos de inicio de sesión");
+        let second = edit("e2", "s2", "2026-10-02T10:00:00Z", "cambia el color del botón");
+        save(
+            &mut store,
+            10,
+            &[(&first, &anchored(&[("login", "h1")], &[])), (&second, &anchored(&[("Button", "h2")], &[]))],
+        );
+        let mut rejected = new_decision("Postgres en local", &[], "rejected", "");
+        rejected.decision = "Base de datos de servidor".into();
+        store.replace_decisions(&batch("s1", 10, &[rejected])).unwrap();
+
+        let pending = store.pending_embeddings("m", 100).unwrap();
+        assert_eq!(pending.len(), 3, "dos peticiones y una decisión: {pending:?}");
+        // Vectores de pega: el de la petición de intentos apunta a [1, 0, 0].
+        let vector = |p: &PendingEmbedding| match () {
+            () if p.text.contains("intentos") => vec![1.0, 0.0, 0.0],
+            () if p.text.contains("Postgres") => vec![0.9, 0.1, 0.0],
+            () => vec![0.0, 1.0, 0.0],
+        };
+        let items: Vec<_> = pending.iter().map(|p| (p, vector(p))).collect();
+        store.save_embeddings("m", &items).unwrap();
+        assert_eq!(store.pending_embeddings("m", 100).unwrap(), Vec::new());
+        assert_eq!(store.pending_embeddings("otro", 100).unwrap().len(), 3, "cada modelo tiene sus vectores");
+
+        // «rate limit» no aparece en el texto, pero su vector se parece.
+        let query = SearchQuery { text: "rate limit".into(), limit: 5, ..SearchQuery::default() };
+        let semantic = SemanticQuery { model: "m", vector: &[2.0, 0.0, 0.0] };
+        let hits = store.search_with(&query, Some(semantic)).unwrap();
+        let SearchHit::Request { session_id, .. } = &hits[0] else { panic!("{hits:?}") };
+        assert_eq!(session_id, "s1");
+        assert!(
+            !hits.iter().any(|hit| matches!(hit, SearchHit::Decision { .. })),
+            "la decisión descartada no sale aunque se parezca"
+        );
+        assert_eq!(store.search(&query).unwrap(), Vec::new(), "sin vector, solo palabras");
+        let other_model = SemanticQuery { model: "otro", vector: &[1.0, 0.0, 0.0] };
+        assert_eq!(store.search_with(&query, Some(other_model)).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn identifiers_split_into_words() {
+        assert_eq!(split_identifier("UserService.hashPassword"), "User Service hash Password");
+        assert_eq!(split_identifier("parse_v2Config"), "parse v2 Config");
+    }
+
+    fn status_of(store: &Store, title: &str) -> (String, Option<String>) {
+        let all = store.decisions(&DecisionFilter { include_inactive: true, ..DecisionFilter::default() }).unwrap();
+        let found = all.into_iter().find(|d| d.title == title).unwrap();
+        (found.status, found.superseded_by)
+    }
+
+    #[test]
+    fn a_later_session_supersedes_earlier_decisions_and_survives_reextraction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let sqlite = [new_decision("SQLite en local", &["sqlite"], "accepted", "")];
+        store.replace_decisions(&batch("s1", 10, &sqlite)).unwrap();
+        let old_uid = decision_uid("s1", "SQLite en local");
+
+        let mut duckdb = new_decision("DuckDB en local", &["duckdb"], "accepted", "");
+        duckdb.replaces = vec![old_uid.clone()];
+        store.replace_decisions(&batch("s2", 10, std::slice::from_ref(&duckdb))).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local"), ("superseded".into(), Some("DuckDB en local".into())));
+
+        // Volver a extraer la sesión antigua no la resucita: el reemplazo es de la nueva.
+        store.replace_decisions(&batch("s1", 12, &sqlite)).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "superseded");
+
+        // Si la nueva deja de reemplazarla, vuelve a estar vigente.
+        duckdb.replaces.clear();
+        store.replace_decisions(&batch("s2", 12, &[duckdb])).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local"), ("accepted".into(), None));
+    }
+
+    #[test]
+    fn only_a_taken_decision_supersedes_another_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.replace_decisions(&batch("s1", 10, &[new_decision("SQLite en local", &[], "accepted", "")])).unwrap();
+        let mut proposal = new_decision("Quizá DuckDB", &[], "proposed", "");
+        proposal.replaces = vec![decision_uid("s1", "sqlite en local")];
+        store.replace_decisions(&batch("s2", 10, &[proposal])).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "accepted");
+    }
+
+    #[test]
+    fn a_status_set_by_hand_wins_and_survives_reextraction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [new_decision("SQLite en local", &[], "accepted", "")];
+        store.replace_decisions(&batch("s1", 10, &decisions)).unwrap();
+        let uid = &store.decisions_by_uid(&decision_uid("s1", "SQLite en local")[..6]).unwrap()[0].uid;
+        store.set_decision_status(uid, Some("rejected")).unwrap();
+        store.replace_decisions(&batch("s1", 12, &decisions)).unwrap();
+        let found = &store.decisions_by_uid(uid).unwrap()[0];
+        assert_eq!((found.status.as_str(), found.overridden), ("rejected", true));
+        assert_eq!(store.decisions(&DecisionFilter::default()).unwrap(), Vec::new());
+        store.set_decision_status(uid, None).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "accepted");
+    }
+
+    #[test]
+    fn decisions_of_the_person_apply_to_every_project() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut spanish = new_decision("Commits en español", &[], "accepted", "");
+        spanish.scope = "user".into();
+        store
+            .replace_decisions(&batch("s1", 10, &[spanish, new_decision("SQLite en local", &[], "accepted", "")]))
+            .unwrap();
+        let elsewhere = DecisionFilter { project: Some("/otro".into()), ..DecisionFilter::default() };
+        let titles: Vec<String> = store.decisions(&elsewhere).unwrap().into_iter().map(|d| d.title).collect();
+        assert_eq!(titles, vec!["Commits en español"]);
+        let only_user = DecisionFilter { scope: Some("user".into()), ..DecisionFilter::default() };
+        assert_eq!(store.decisions(&only_user).unwrap().len(), 1);
     }
 
     #[test]

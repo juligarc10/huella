@@ -4,10 +4,14 @@
 //! convierte en un [`AnchorOutcome`] que apunta a [`Symbol`]s del código. Este
 //! crate no conoce ningún formato de transcripción ni ningún parser.
 
+mod fingerprint;
+
 use std::ops::Range;
 use std::path::PathBuf;
 
 use serde::Serialize;
+
+pub use fingerprint::{Fingerprint, SELF_TOKEN, SKETCH_SIZE};
 
 /// De dónde viene una edición: agente, sesión y evento concreto.
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +109,9 @@ pub struct Symbol {
     /// Hash del cuerpo normalizado (sin comentarios ni formato): permite saber
     /// si el código cambió desde que se ancló.
     pub body_hash: String,
+    /// Huella independiente del nombre, para reconocerlo si se renombra o se mueve.
+    #[serde(skip)]
+    pub fingerprint: Fingerprint,
     #[serde(skip)]
     pub byte_range: Range<usize>,
     /// Profundidad de anidamiento (0 = nivel de módulo).

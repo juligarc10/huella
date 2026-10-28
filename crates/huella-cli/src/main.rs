@@ -4,6 +4,7 @@ mod mcp;
 mod report;
 mod review;
 mod sample;
+mod search;
 mod web;
 
 use std::fs;
@@ -18,7 +19,7 @@ use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
 use huella_decisions::JsonModel;
 use huella_decisions::anthropic::Anthropic;
-use huella_decisions::openai::OpenAiCompatible;
+use huella_decisions::openai::{OpenAiCompatible, OpenAiEmbeddings};
 use huella_engine::ExtractionOptions;
 use huella_store::{DecisionFilter, Store};
 use serde::Serialize;
@@ -37,6 +38,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Mide cuánta memoria sobrevive a refactors hechos fuera de las sesiones
+    /// (renombrar, mover), aplicados en memoria a los anclajes reales.
+    Refactors {
+        /// Anclajes vivos a probar como mucho, repartidos por todos los ficheros.
+        #[arg(long, default_value_t = 600)]
+        limit: usize,
+    },
     /// Ancla todas las ediciones de las transcripciones de Claude Code y mide la tasa de anclaje.
     Scan {
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
@@ -71,6 +79,55 @@ enum Command {
         /// Número máximo de ediciones a mostrar.
         #[arg(long, default_value_t = 10)]
         limit: usize,
+    },
+    /// Busca en la memoria: peticiones, explicaciones del agente, ficheros,
+    /// símbolos y decisiones. Sin tildes ni mayúsculas que importen.
+    Search {
+        /// Palabras a buscar; la última vale también como prefijo.
+        #[arg(required = true)]
+        words: Vec<String>,
+        /// Solo lo de este proyecto (carpeta).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
+        /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
+        #[arg(long)]
+        all: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Calcula los vectores para buscar por significado con un modelo de
+    /// embeddings con la API de `OpenAI` (Ollama, llama.cpp, `OpenAI`…). Con
+    /// `HUELLA_EMBED_MODEL` definida, `huella search` y el MCP los usan.
+    Embed {
+        /// Modelo (por defecto `$HUELLA_EMBED_MODEL`, p. ej. nomic-embed-text).
+        #[arg(long)]
+        model: Option<String>,
+        /// URL base (por defecto `$HUELLA_EMBED_URL` u Ollama local).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Textos a calcular como mucho.
+        #[arg(long, default_value_t = 5000)]
+        limit: usize,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Exporta las decisiones del proyecto como ADRs en markdown, para
+    /// versionarlas con el código. Volver a exportar conserva los números y no
+    /// pisa los ADRs editados a mano.
+    Adr {
+        /// Proyecto (por defecto, el repositorio de la carpeta actual).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Carpeta de salida (por defecto `docs/adr` dentro del proyecto).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Incluye también las decisiones descartadas y solo propuestas.
+        #[arg(long)]
+        all: bool,
     },
     /// Decisiones de proyecto extraídas de las conversaciones.
     Decisions {
@@ -123,9 +180,21 @@ enum DecisionsCommand {
         /// Solo las de este proyecto (ruta del repositorio).
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Solo las de este alcance: `user` (tus preferencias, valen en todos los
+        /// proyectos), `project` o `path` (una carpeta o fichero).
+        #[arg(long, value_parser = ["user", "project", "path"])]
+        scope: Option<String>,
         /// Incluye las reemplazadas, rechazadas y solo propuestas.
         #[arg(long)]
         all: bool,
+    },
+    /// Corrige a mano el estado de una decisión; sobrevive a volver a extraer.
+    Set {
+        /// Id de la decisión (el que muestra `huella decisions list`) o su comienzo.
+        id: String,
+        /// `accepted`, `rejected`, `superseded`, `proposed`, o `auto` para volver al extraído.
+        #[arg(value_parser = ["accepted", "rejected", "superseded", "proposed", "auto"])]
+        status: String,
     },
 }
 
@@ -253,7 +322,42 @@ fn run(cli: Cli) -> Result<()> {
             scan(&projects, json.as_deref(), sample)
         }
         Command::Symbols { file } => print_symbols(&file),
+        Command::Refactors { limit } => refactors(&open_store(cli.db)?, limit),
         Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
+        Command::Search { words, project, limit, all, projects } => {
+            let mut store = open_store(cli.db)?;
+            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            let project =
+                project.map(|path| huella_engine::normalize_path(&fs::canonicalize(&path).unwrap_or(path), None));
+            let query = huella_store::SearchQuery { text: words.join(" "), project, limit, include_inactive: all };
+            let embedder = embedder(None, None);
+            let (hits, warning) = huella_engine::embeddings::search(
+                &store,
+                &query,
+                embedder.as_ref().map(|e| e as &dyn huella_decisions::Embedder),
+            )?;
+            if let Some(warning) = warning {
+                eprintln!("aviso: {warning}");
+            }
+            emit(&search::render_hits(&hits));
+            Ok(())
+        }
+        Command::Embed { model, base_url, limit, projects } => {
+            let embedder = embedder(model, base_url)
+                .context("indica el modelo con --model o en HUELLA_EMBED_MODEL (p. ej. nomic-embed-text)")?;
+            let mut store = open_store(cli.db)?;
+            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            println!("Calculando vectores con {}…", huella_decisions::Embedder::model_id(&embedder));
+            let report = huella_engine::embeddings::embed_pending(&mut store, &embedder, limit, |done, total| {
+                println!("  {done} de {total}");
+            })?;
+            println!("Hecho: {} vectores nuevos", report.embedded);
+            if let Some(failure) = report.failure {
+                bail!("el modelo falló: {failure}");
+            }
+            Ok(())
+        }
+        Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
             let extractor = build_model(model)?;
@@ -263,12 +367,29 @@ fn run(cli: Cli) -> Result<()> {
             huella_engine::index(&mut store, &projects)?;
             extract(&mut store, &projects, extractor.as_ref(), &ExtractionOptions { limit, chunk_chars })
         }
-        Command::Decisions { action: DecisionsCommand::List { entity, project, all } } => {
+        Command::Decisions { action: DecisionsCommand::List { entity, project, scope, all } } => {
             let project = project
                 .map(|path| fs::canonicalize(&path).unwrap_or(path))
                 .map(|path| huella_engine::normalize_path(&path, None));
-            let filter = DecisionFilter { entity, project, include_inactive: all };
+            let filter = DecisionFilter { entity, project, scope, include_inactive: all };
             list_decisions(&open_store(cli.db)?, &filter)
+        }
+        Command::Decisions { action: DecisionsCommand::Set { id, status } } => {
+            let store = open_store(cli.db)?;
+            let found = store.decisions_by_uid(&id)?;
+            let decision = match found.as_slice() {
+                [one] => one,
+                [] => bail!("ninguna decisión tiene un id que empiece por «{id}»"),
+                many => bail!(
+                    "«{id}» coincide con varias decisiones: {}",
+                    many.iter().map(|d| format!("{} ({})", d.uid, d.title)).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            let status = (status != "auto").then_some(status);
+            store.set_decision_status(&decision.uid, status.as_deref())?;
+            let now = &store.decisions_by_uid(&decision.uid)?[0];
+            println!("«{}»: {}", now.title, search::status_label(&now.status));
+            Ok(())
         }
         Command::Review { action } => review_command(cli.db, action),
         Command::Mcp { projects } => {
@@ -428,6 +549,72 @@ fn first_pending(
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
 }
 
+/// `huella adr`: exporta los ADRs del proyecto.
+fn adr(store: &huella_store::Store, project: Option<PathBuf>, out: Option<PathBuf>, all: bool) -> Result<()> {
+    let project = if let Some(path) = project {
+        fs::canonicalize(&path).unwrap_or(path)
+    } else {
+        let here = std::env::current_dir()?;
+        here.ancestors().find(|dir| dir.join(".git").exists()).map_or(here.clone(), Path::to_path_buf)
+    };
+    let key = huella_engine::normalize_path(&project, None);
+    let out = out.unwrap_or_else(|| Path::new(&key).join("docs").join("adr"));
+    let report = huella_engine::adr::export_adrs(store, &key, &out, all)?;
+    let total = report.written.len() + report.unchanged + report.edited_by_hand.len();
+    if total == 0 {
+        println!("{key} no tiene decisiones que exportar. Extráelas con `huella decisions extract`.");
+        return Ok(());
+    }
+    println!("ADRs de {key} en {}: {} escritos, {} al día", out.display(), report.written.len(), report.unchanged);
+    for path in &report.written {
+        println!("  escrito: {}", path.display());
+    }
+    for path in &report.edited_by_hand {
+        println!("  editado a mano, no se toca: {}", path.display());
+    }
+    for path in &report.orphaned {
+        println!("  su decisión ya no existe (no se borra): {}", path.display());
+    }
+    Ok(())
+}
+
+/// `huella refactors`: el criterio de salida de la F3.
+fn refactors(store: &huella_store::Store, limit: usize) -> Result<()> {
+    use huella_engine::refactor_bench::{Refactor, ratio};
+    let started = std::time::Instant::now();
+    let report = huella_engine::refactor_bench::refactor_benchmark(store, limit)?;
+    println!("Anclajes vivos probados: {} ({:.1} s)\n", report.samples, started.elapsed().as_secs_f64());
+    for refactor in Refactor::ALL {
+        let Some(tally) = report.by_refactor.get(&refactor) else { continue };
+        println!(
+            "  {:<34} {:>5} de {:>5}  {:>5.1} %",
+            refactor.label(),
+            tally.survived,
+            tally.applicable,
+            100.0 * ratio(tally.survived, tally.applicable)
+        );
+        for lost in &tally.lost_examples {
+            println!("      perdido: {lost}");
+        }
+    }
+    let survival = report.survival();
+    println!(
+        "\nSobreviven: {:.1} % (criterio: más del 80 %) {}",
+        100.0 * survival,
+        if survival > 0.8 { "✓" } else { "✗" }
+    );
+    println!(
+        "Falsos positivos: {} de {} sondas ({:.1} %): código ajeno en el lugar de una función borrada",
+        report.false_positives,
+        report.probes,
+        100.0 * ratio(report.false_positives, report.probes)
+    );
+    for example in &report.false_positive_examples {
+        println!("      falso positivo: {example}");
+    }
+    Ok(())
+}
+
 /// Abre el proyecto y, si hay, el fichero del primer paso pendiente en su línea.
 fn open_in_editor(editor: web::Editor, project: Option<&str>, file: Option<(String, usize)>) {
     let mut command = std::process::Command::new(match editor {
@@ -503,6 +690,14 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
+/// Modelo de embeddings de los argumentos o de `HUELLA_EMBED_MODEL` y
+/// `HUELLA_EMBED_URL`; `None` si no hay ninguno configurado.
+pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenAiEmbeddings> {
+    let model = model.or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok()).filter(|m| !m.trim().is_empty())?;
+    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok());
+    Some(OpenAiEmbeddings::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+}
+
 fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
     let ModelArgs { provider, model, base_url } = args;
     Ok(match provider {
@@ -555,9 +750,15 @@ fn list_decisions(store: &Store, filter: &DecisionFilter) -> Result<()> {
         let status = match (decision.status.as_str(), &decision.superseded_by) {
             ("superseded", Some(by)) => format!(" · reemplazada por «{by}»"),
             ("accepted", _) => String::new(),
-            (other, _) => format!(" · {other}"),
+            (other, _) => format!(" · {}", search::status_label(other)),
         };
-        println!("● {} — {date}{status}", decision.title);
+        let scope = match (decision.scope.as_str(), &decision.scope_path) {
+            ("user", _) => " · tuya, en todos los proyectos".to_owned(),
+            ("path", Some(path)) => format!(" · solo {path}"),
+            _ => String::new(),
+        };
+        let by_hand = if decision.overridden { " (a mano)" } else { "" };
+        println!("● {} — {date}{status}{by_hand}{scope}  [{}]", decision.title, decision.uid);
         if !decision.entities.is_empty() {
             println!("  [{}]", decision.entities.join(", "));
         }

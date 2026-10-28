@@ -59,9 +59,36 @@ huella why src/app.ts:42             # qué se habló del símbolo en esa línea
 huella symbols src/app.ts            # símbolos que Huella reconoce en un fichero
 huella scan                          # mide la tasa de anclaje (validación de la F0)
 
+huella search rate limit             # busca en peticiones, explicaciones, símbolos y decisiones
 huella decisions list                # decisiones vigentes
 huella decisions list --entity rust --project ~/dev/huella --all
+huella decisions list --scope user   # tus preferencias, válidas en todos los proyectos
+huella decisions set 6fdb6c rejected # corrige el estado a mano (`auto` lo devuelve al extraído)
+huella adr                           # exporta las decisiones del proyecto a docs/adr/
+huella refactors                     # mide cuánta memoria sobrevive a renombrar y mover
 ```
+
+### Buscar en la memoria
+
+`huella search` (y la herramienta MCP `huella_search`) busca con FTS5 en las
+peticiones, las explicaciones del agente, las rutas, los símbolos (también por
+sus palabras: «password» encuentra `hashPassword`) y las decisiones, sin que
+importen tildes ni mayúsculas. Las ediciones de una misma petición salen
+juntas.
+
+Para buscar también por significado («almacenamiento» encuentra «base de
+datos»), calcula vectores con cualquier servidor de embeddings con la API de
+OpenAI y define el modelo:
+
+```sh
+ollama pull nomic-embed-text
+export HUELLA_EMBED_MODEL=nomic-embed-text     # HUELLA_EMBED_URL si no es Ollama local
+huella embed                                   # solo calcula lo nuevo o cambiado
+huella search almacenamiento local
+```
+
+Con el modelo definido, la búsqueda mezcla ambos resultados (reciprocal rank
+fusion); si el modelo no responde, se queda en la de texto y lo avisa.
 
 ### Revisar una sesión
 
@@ -132,6 +159,17 @@ huella decisions extract --provider openai-compatible \
 ```
 
 Solo procesa las sesiones nuevas o que han crecido; `--limit N` acota cuántas.
+
+Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale
+en todos los proyectos, como el idioma de los commits), del proyecto o de una
+carpeta concreta. Al extraer una sesión, el modelo ve las decisiones vigentes
+de las anteriores del mismo proyecto y marca las que la conversación cambia:
+quedan como reemplazadas y dejan de recuperarse. Volver a extraer cualquier
+sesión no rompe esos reemplazos ni las correcciones hechas con `decisions set`.
+
+`huella adr` escribe cada decisión como ADR (`docs/adr/0001-titulo.md`), con
+las reemplazadas enlazadas a la que las reemplaza. Volver a exportar conserva
+los números, añade las nuevas al final y no pisa los ADRs que hayas editado.
 El diálogo de cada sesión (sin herramientas ni sus resultados) se envía al
 proveedor elegido: con uno local no sale de tu red.
 
@@ -154,14 +192,20 @@ código solo donde indiques.
 2. **Anclaje** (`huella-anchoring`): compara el fichero antes y después y asigna
    cada línea cambiada al símbolo más interno donde empieza su contenido
    (tree-sitter). Registra también los símbolos que la edición borró o
-   renombró. Cada símbolo lleva un hash de su cuerpo normalizado.
+   renombró. Cada símbolo lleva un hash de su cuerpo normalizado y una huella
+   que no depende de su nombre (forma exacta y resumen *bottom-k* de sus
+   trigramas de tokens).
 3. **Memoria** (`huella-store`): SQLite en modo WAL. Cada lote de una
    transcripción y su cursor se guardan en una transacción; reindexar no
    duplica.
 4. **Motor** (`huella-engine`): indexado incremental y consultas. Las rutas de
    los worktrees (`.claude/worktrees/<nombre>/…`) se llevan al repositorio
    principal. Si el código actual de un símbolo no coincide con el que dejó la
-   última sesión, lo avisa.
+   última sesión, lo avisa. Si un símbolo no tiene memoria con su nombre, se
+   busca de qué anclaje desaparecido viene por su huella: renombrado en el
+   mismo fichero, movido a otro, o en un fichero movido; también se encadenan
+   los renombrados del propio agente. El hover lo indica («renombrado desde
+   `register` en `user.ts`»).
 5. **Servidor LSP** (`huella-lsp`) y extensiones de VS Code y Zed: hover con
    las últimas ediciones del símbolo, `CodeLens` con su actividad y los pasos
    pendientes de la revisión activa como diagnosis. Un hilo indexa en segundo
@@ -189,9 +233,18 @@ Lenguajes con símbolos: TypeScript, TSX, JavaScript, Python y Rust.
 
 ## Rendimiento
 
-Hover en un fichero de 1.205 líneas: p95 de 7,6 ms (mediana 5,3 ms) en
-compilación release. Indexar 17 transcripciones (≈140 MB, 1.021 ediciones)
+Hover en un fichero de 1.205 líneas: p95 de 9,2 ms (mediana 6,4 ms) en
+compilación release, con la búsqueda de renombrados. Indexar 17 transcripciones (≈140 MB, 1.021 ediciones)
 desde cero: 1 s; incremental: instantáneo.
+
+Refactors fuera de las sesiones (`huella refactors`, sobre 499 anclajes reales
+de 12 sesiones): sobrevive el 98,2 % de la memoria (criterio de la F3: más del
+80 %). Renombrar, renombrar la clase, mover el fichero o ambas cosas: 100 %;
+mover la función a otro fichero: 98,6 %; renombrar y añadir una línea: 98,9 %;
+renombrar y quitar una de cada cuatro líneas: 74 %. Código ajeno puesto en el
+lugar de una función borrada nunca hereda su memoria (0 de 142 sondas).
+
+Búsqueda de texto en la memoria real: unos 10 ms.
 
 Extracción de decisiones con Qwen3.6-35B-A3B en llama.cpp propio: 13 sesiones
 (≈258.000 tokens de diálogo) en 67 minutos, 87 decisiones. Con Claude Haiku
@@ -202,13 +255,17 @@ Extracción de decisiones con Qwen3.6-35B-A3B en llama.cpp propio: 13 sesiones
 - La historia de un símbolo solo incluye las ediciones hechas con las
   herramientas del agente; en la revisión, los cambios por shell sí aparecen,
   como cambios sin explicación.
-- Un símbolo renombrado no hereda la historia de su nombre anterior (el nombre
-  antiguo queda registrado como borrado).
-- Una decisión solo puede reemplazar a otra de la misma sesión, y la calidad
-  de la extracción depende del modelo: conviene repasarlas.
+- Un símbolo reescrito en gran parte a la vez que se renombra o se mueve puede
+  perder su memoria (se exige un parecido mínimo para no heredar la de otro).
+- Las ediciones indexadas antes de la F3 cuya transcripción ya no existe no
+  tienen huella: solo se encuentran por su nombre.
+- La calidad de la extracción de decisiones, de su alcance y de los reemplazos
+  depende del modelo: conviene repasarlas (`decisions set` corrige).
+- Los vectores se comparan sin índice: suficiente para decenas de miles de
+  textos; más allá haría falta uno (sqlite-vec, LanceDB).
 - El orden por flujo se basa en nombres: dos funciones con el mismo nombre en
   ficheros distintos pueden enlazarse por error.
-- Solo Claude Code; el resto de agentes llegan en la F3.
+- Solo Claude Code; el resto de agentes llegan en la F4.
 
 ## Desarrollo
 
