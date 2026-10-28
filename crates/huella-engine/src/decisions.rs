@@ -5,13 +5,19 @@ use std::path::{Path, PathBuf};
 
 use huella_claude_code::{discover_transcripts, read_conversations};
 use huella_core::Conversation;
-use huella_decisions::{DEFAULT_CHUNK_CHARS, DecisionExtractor, ExtractionRequest, chunk_dialogue};
-use huella_store::{NewDecision, SessionDecisions, Store};
+use huella_decisions::{
+    DEFAULT_CHUNK_CHARS, DecisionExtractor, DecisionScope, ExtractedDecision, ExtractionRequest, PreviousDecision,
+    chunk_dialogue,
+};
+use huella_store::{DecisionFilter, NewDecision, SessionDecisions, Store};
 
 use crate::paths::normalize_path;
 
 /// Sesiones con menos mensajes no suelen contener decisiones.
 const MIN_TURNS: usize = 4;
+/// Decisiones vigentes de otras sesiones que ve el modelo: las más recientes.
+/// Más alargan la petición sin que suelan cambiar en una sesión.
+const MAX_PREVIOUS: usize = 40;
 
 /// Cómo extraer: cuántas sesiones como mucho y de qué tamaño los trozos.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,21 +77,17 @@ pub fn extract_decisions(
             continue;
         }
         progress(&conversation);
+        let (previous, uids) = previous_decisions(store, &conversation.session_id, project.as_deref())?;
         let mut decisions: Vec<NewDecision> = Vec::new();
         let mut failure = None;
         for dialogue in chunk_dialogue(&conversation, options.chunk_chars) {
             report.calls += 1;
             let known_titles = decisions.iter().map(|d| d.title.clone()).collect();
-            match extractor.extract(&ExtractionRequest { dialogue, known_titles }) {
-                Ok(found) => decisions.extend(found.into_iter().map(|d| NewDecision {
-                    title: d.title,
-                    decision: d.decision,
-                    rationale: d.rationale,
-                    alternatives: d.alternatives,
-                    entities: d.entities,
-                    status: d.status.as_str().to_owned(),
-                    supersedes: d.supersedes,
-                })),
+            let request = ExtractionRequest { dialogue, known_titles, previous: previous.clone() };
+            match extractor.extract(&request) {
+                Ok(found) => {
+                    decisions.extend(found.into_iter().map(|d| new_decision(d, &uids, project.as_deref())));
+                }
                 Err(error) => {
                     failure = Some(format!("{}: {error}", conversation.session_id));
                     break;
@@ -108,6 +110,49 @@ pub fn extract_decisions(
         report.decisions += decisions.len();
     }
     Ok(report)
+}
+
+/// Decisiones vigentes de otras sesiones del proyecto (y las de la persona)
+/// con la clave que verá el modelo, y qué id estable tiene cada clave.
+fn previous_decisions(
+    store: &Store,
+    session_id: &str,
+    project: Option<&str>,
+) -> crate::Result<(Vec<PreviousDecision>, BTreeMap<String, String>)> {
+    let filter = DecisionFilter { project: project.map(str::to_owned), ..DecisionFilter::default() };
+    let active = store.decisions(&filter)?;
+    let mut previous = Vec::new();
+    let mut uids = BTreeMap::new();
+    for (number, decision) in (1..).zip(active.into_iter().filter(|d| d.session_id != session_id).take(MAX_PREVIOUS)) {
+        let key = format!("D{number}");
+        uids.insert(key.clone(), decision.uid);
+        previous.push(PreviousDecision { key, title: decision.title, decision: decision.decision });
+    }
+    Ok((previous, uids))
+}
+
+/// Decisión del modelo lista para guardar: sus claves de reemplazo pasan a
+/// ids estables (las que no existen se ignoran) y su ruta, a absoluta.
+fn new_decision(extracted: ExtractedDecision, uids: &BTreeMap<String, String>, project: Option<&str>) -> NewDecision {
+    let scope_path = (extracted.scope == DecisionScope::Path).then(|| {
+        let path = Path::new(&extracted.scope_path);
+        match project {
+            Some(project) if path.is_relative() => Path::new(project).join(path).display().to_string(),
+            _ => extracted.scope_path.clone(),
+        }
+    });
+    NewDecision {
+        title: extracted.title,
+        decision: extracted.decision,
+        rationale: extracted.rationale,
+        alternatives: extracted.alternatives,
+        entities: extracted.entities,
+        status: extracted.status.as_str().to_owned(),
+        supersedes: extracted.supersedes,
+        scope: extracted.scope.as_str().to_owned(),
+        scope_path,
+        replaces: extracted.replaces_previous.iter().filter_map(|key| uids.get(key).cloned()).collect(),
+    }
 }
 
 /// Proyecto de una sesión: donde editó más ficheros. El directorio de arranque
@@ -170,7 +215,8 @@ mod tests {
 
     use super::*;
 
-    /// Extractor de pega: una decisión por cada línea `DECIDE:` del diálogo.
+    /// Extractor de pega: una decisión por cada línea `DECIDE: título` del
+    /// diálogo, o `REPLACE D1: título` si reemplaza una de sesiones anteriores.
     struct Fake {
         requests: RefCell<Vec<ExtractionRequest>>,
         fail: bool,
@@ -189,8 +235,14 @@ mod tests {
             Ok(request
                 .dialogue
                 .lines()
-                .filter_map(|line| line.strip_prefix("DECIDE: "))
-                .map(|title| ExtractedDecision {
+                .filter_map(|line| {
+                    if let Some(title) = line.strip_prefix("DECIDE: ") {
+                        return Some((title, Vec::new()));
+                    }
+                    let (key, title) = line.strip_prefix("REPLACE ")?.split_once(": ")?;
+                    Some((title, vec![key.to_owned()]))
+                })
+                .map(|(title, replaces_previous)| ExtractedDecision {
                     title: title.into(),
                     decision: title.into(),
                     rationale: "motivo".into(),
@@ -198,6 +250,9 @@ mod tests {
                     entities: vec!["rust".into()],
                     status: DecisionStatus::Accepted,
                     supersedes: String::new(),
+                    scope: DecisionScope::Project,
+                    scope_path: String::new(),
+                    replaces_previous,
                 })
                 .collect())
         }
@@ -244,6 +299,47 @@ mod tests {
         assert_eq!(grown.extracted, 1);
         assert_eq!(store.decisions(&DecisionFilter::default()).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_later_session_sees_and_replaces_decisions_of_earlier_ones() {
+        let dir = std::env::temp_dir().join(format!("huella-decisions-later-{}", std::process::id()));
+        write_session(&dir, "s1", &["¿base de datos?", "DECIDE: SQLite en local", "vale", "hecho"]);
+        let mut store = Store::open_in_memory().unwrap();
+        let fake = Fake { requests: RefCell::new(vec![]), fail: false };
+        extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+
+        write_session(&dir, "s2", &["mejor DuckDB", "REPLACE D1: DuckDB en local", "vale", "hecho"]);
+        extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        let seen = fake.requests.borrow().last().unwrap().previous.clone();
+        assert_eq!(
+            seen.iter().map(|p| (p.key.as_str(), p.title.as_str())).collect::<Vec<_>>(),
+            [("D1", "SQLite en local")]
+        );
+
+        let active: Vec<String> =
+            store.decisions(&DecisionFilter::default()).unwrap().into_iter().map(|d| d.title).collect();
+        assert_eq!(active, vec!["DuckDB en local"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn relative_path_scopes_are_resolved_against_the_project() {
+        let extracted = ExtractedDecision {
+            title: "Kysely en la API".into(),
+            decision: "d".into(),
+            rationale: "r".into(),
+            alternatives: vec![],
+            entities: vec![],
+            status: DecisionStatus::Accepted,
+            supersedes: String::new(),
+            scope: DecisionScope::Path,
+            scope_path: "apps/api".into(),
+            replaces_previous: vec!["D9".into()],
+        };
+        let decision = new_decision(extracted, &BTreeMap::new(), Some("/repo"));
+        assert_eq!(decision.scope_path.as_deref(), Some("/repo/apps/api"));
+        assert_eq!(decision.replaces, Vec::<String>::new(), "una clave que no existe se ignora");
     }
 
     #[test]

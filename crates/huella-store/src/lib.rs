@@ -170,6 +170,38 @@ const MIGRATIONS: &[&str] = &[
         VALUES (new.id, new.title, new.decision, new.rationale, new.alternatives);
     END;
 ",
+    // Ciclo de vida entre sesiones. Cada decisión tiene un id estable (sesión
+    // y título) que sobrevive a volver a extraer; los reemplazos entre
+    // sesiones pertenecen a la sesión nueva y las correcciones a mano se
+    // guardan aparte, así que volver a extraer una sesión no pisa ninguno.
+    r"
+    ALTER TABLE decision ADD COLUMN uid TEXT;
+    ALTER TABLE decision ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';
+    ALTER TABLE decision ADD COLUMN scope_path TEXT;
+    CREATE INDEX decision_by_uid ON decision(uid);
+    CREATE TABLE decision_supersession (
+        old_uid         TEXT NOT NULL,
+        new_session_id  TEXT NOT NULL,
+        new_title       TEXT NOT NULL,
+        PRIMARY KEY (old_uid, new_session_id)
+    );
+    CREATE TABLE decision_override (
+        uid             TEXT PRIMARY KEY,
+        status          TEXT NOT NULL,
+        at              TEXT NOT NULL
+    );
+    CREATE VIEW decision_view AS
+    SELECT d.*,
+           COALESCE(o.status, CASE WHEN x.new_title IS NOT NULL THEN 'superseded' ELSE d.status END)
+               AS effective_status,
+           CASE WHEN COALESCE(o.status, 'superseded') = 'superseded'
+                THEN COALESCE(d.superseded_by, x.new_title) END AS effective_superseded_by,
+           o.status IS NOT NULL AS overridden
+    FROM decision d
+    LEFT JOIN decision_override o ON o.uid = d.uid
+    LEFT JOIN (SELECT old_uid, MIN(new_title) AS new_title FROM decision_supersession GROUP BY old_uid) x
+           ON x.old_uid = d.uid;
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -237,6 +269,12 @@ pub struct NewDecision {
     pub status: String,
     /// Título de la decisión de la misma sesión que esta reemplaza, o vacío.
     pub supersedes: String,
+    /// `user`, `project` o `path`.
+    pub scope: String,
+    /// Carpeta o fichero si `scope` es `path`.
+    pub scope_path: Option<String>,
+    /// Ids estables de decisiones de otras sesiones que esta reemplaza.
+    pub replaces: Vec<String>,
 }
 
 /// Lote de decisiones de una sesión con el contexto de dónde salen.
@@ -255,6 +293,12 @@ pub struct SessionDecisions<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredDecision {
     pub id: i64,
+    /// Id estable: sobrevive a volver a extraer la sesión.
+    pub uid: String,
+    pub scope: String,
+    pub scope_path: Option<String>,
+    /// El estado lo fijó la persona a mano.
+    pub overridden: bool,
     pub session_id: String,
     pub project: Option<String>,
     pub title: String,
@@ -325,7 +369,7 @@ pub enum SearchHit {
         score: f64,
     },
     Decision {
-        decision: StoredDecision,
+        decision: Box<StoredDecision>,
         snippet: String,
         score: f64,
     },
@@ -344,7 +388,10 @@ impl SearchHit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionFilter {
     pub entity: Option<String>,
+    /// Las del proyecto y las de la persona (alcance `user`), que valen en todos.
     pub project: Option<String>,
+    /// Solo las de este alcance.
+    pub scope: Option<String>,
     /// Incluir las reemplazadas, rechazadas y solo propuestas.
     pub include_inactive: bool,
 }
@@ -406,7 +453,25 @@ impl Store {
         }
         tx.commit()?;
         self.backfill_own_names()?;
-        self.backfill_edit_search()
+        self.backfill_edit_search()?;
+        self.backfill_decision_uids()
+    }
+
+    /// Id estable de las decisiones guardadas antes de existir.
+    fn backfill_decision_uids(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut select = tx.prepare("SELECT id, session_id, title FROM decision WHERE uid IS NULL")?;
+            let pending: Vec<(i64, String, String)> = select
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut update = tx.prepare("UPDATE decision SET uid = ?2 WHERE id = ?1")?;
+            for (id, session_id, title) in &pending {
+                update.execute(params![id, decision_uid(session_id, title)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Indexa para la búsqueda las ediciones guardadas antes de existir.
@@ -806,11 +871,12 @@ impl Store {
     pub fn replace_decisions(&mut self, batch: &SessionDecisions) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM decision WHERE session_id = ?1", [batch.session_id])?;
+        tx.execute("DELETE FROM decision_supersession WHERE new_session_id = ?1", [batch.session_id])?;
         for decision in batch.decisions {
             tx.execute(
                 "INSERT INTO decision (session_id, project, title, decision, rationale, alternatives, status,
-                                       decided_at, extractor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       decided_at, extractor, uid, scope, scope_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     batch.session_id,
                     batch.project,
@@ -820,9 +886,22 @@ impl Store {
                     serde_json::to_string(&decision.alternatives).unwrap_or_else(|_| "[]".to_owned()),
                     decision.status,
                     batch.decided_at,
-                    batch.extractor
+                    batch.extractor,
+                    decision_uid(batch.session_id, &decision.title),
+                    decision.scope,
+                    decision.scope_path
                 ],
             )?;
+            // Solo una decisión tomada reemplaza a otra; una propuesta, no.
+            if decision.status == "accepted" {
+                for old_uid in &decision.replaces {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO decision_supersession (old_uid, new_session_id, new_title)
+                         VALUES (?1, ?2, ?3)",
+                        params![old_uid, batch.session_id, decision.title],
+                    )?;
+                }
+            }
             let id = tx.last_insert_rowid();
             for entity in &decision.entities {
                 tx.execute(
@@ -934,9 +1013,9 @@ impl Store {
     fn search_decisions(&self, fts: &str, query: &SearchQuery) -> Result<Vec<(String, SearchHit)>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT d.id, snippet(decision_fts, -1, '[', ']', '…', 12)
-             FROM decision_fts JOIN decision d ON d.id = decision_fts.rowid
-             WHERE decision_fts MATCH ?1 AND (?2 IS NULL OR d.project = ?2)
-               AND (?3 OR d.status = 'accepted')
+             FROM decision_fts JOIN decision_view d ON d.id = decision_fts.rowid
+             WHERE decision_fts MATCH ?1 AND (?2 IS NULL OR d.project = ?2 OR d.scope = 'user')
+               AND (?3 OR d.effective_status = 'accepted')
              ORDER BY bm25(decision_fts) LIMIT 100",
         )?;
         let ids: Vec<(i64, String)> = statement
@@ -945,7 +1024,10 @@ impl Store {
         let mut hits = Vec::new();
         for (id, snippet) in ids {
             if let Some(decision) = self.decision(id)? {
-                hits.push((format!("decision\u{1f}{id}"), SearchHit::Decision { decision, snippet, score: 0.0 }));
+                hits.push((
+                    format!("decision\u{1f}{id}"),
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 },
+                ));
             }
         }
         Ok(hits)
@@ -957,7 +1039,7 @@ impl Store {
     /// Si falla la consulta.
     pub fn decision(&self, id: i64) -> Result<Option<StoredDecision>> {
         let filter = DecisionFilter { include_inactive: true, ..DecisionFilter::default() };
-        Ok(self.decisions_where(&filter, Some(id))?.into_iter().next())
+        Ok(self.decisions_where(&filter, Some(id), None)?.into_iter().next())
     }
 
     /// Decisiones de la más reciente a la más antigua. Por defecto solo las
@@ -966,43 +1048,84 @@ impl Store {
     /// # Errors
     /// Si falla la consulta.
     pub fn decisions(&self, filter: &DecisionFilter) -> Result<Vec<StoredDecision>> {
-        self.decisions_where(filter, None)
+        self.decisions_where(filter, None, None)
     }
 
-    fn decisions_where(&self, filter: &DecisionFilter, id: Option<i64>) -> Result<Vec<StoredDecision>> {
+    /// Decisiones (también inactivas) cuyo id estable empieza por `prefix`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decisions_by_uid(&self, prefix: &str) -> Result<Vec<StoredDecision>> {
+        let filter = DecisionFilter { include_inactive: true, ..DecisionFilter::default() };
+        self.decisions_where(&filter, None, Some(prefix))
+    }
+
+    /// Fija a mano el estado de una decisión (`None` lo devuelve al extraído).
+    /// Sobrevive a volver a extraer su sesión.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_decision_status(&self, uid: &str, status: Option<&str>) -> Result<()> {
+        match status {
+            Some(status) => self.conn.execute(
+                "INSERT INTO decision_override (uid, status, at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(uid) DO UPDATE SET status = excluded.status, at = excluded.at",
+                params![uid, status],
+            )?,
+            None => self.conn.execute("DELETE FROM decision_override WHERE uid = ?1", [uid])?,
+        };
+        Ok(())
+    }
+
+    fn decisions_where(
+        &self,
+        filter: &DecisionFilter,
+        id: Option<i64>,
+        uid: Option<&str>,
+    ) -> Result<Vec<StoredDecision>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives, d.status,
-                    d.superseded_by, d.decided_at, d.extractor,
-                    (SELECT group_concat(entity, char(31)) FROM decision_entity WHERE decision_id = d.id)
-             FROM decision d
+            "SELECT d.id, d.session_id, d.project, d.title, d.decision, d.rationale, d.alternatives,
+                    d.effective_status, d.effective_superseded_by, d.decided_at, d.extractor,
+                    (SELECT group_concat(entity, char(31)) FROM decision_entity WHERE decision_id = d.id),
+                    d.uid, d.scope, d.scope_path, d.overridden
+             FROM decision_view d
              WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM decision_entity e WHERE e.decision_id = d.id AND e.entity = ?1))
-               AND (?2 IS NULL OR d.project = ?2)
-               AND (?3 OR d.status = 'accepted')
+               AND (?2 IS NULL OR d.project = ?2 OR d.scope = 'user')
+               AND (?3 OR d.effective_status = 'accepted')
                AND (?4 IS NULL OR d.id = ?4)
+               AND (?5 IS NULL OR d.scope = ?5)
+               AND (?6 IS NULL OR d.uid LIKE ?6 || '%')
              ORDER BY d.decided_at DESC, d.id",
         )?;
         let entity = filter.entity.as_ref().map(|entity| entity.trim().to_lowercase());
-        let rows = statement.query_map(params![entity, filter.project, filter.include_inactive, id], |row| {
-            let alternatives: String = row.get(6)?;
-            let entities: Option<String> = row.get(11)?;
-            let mut entities: Vec<String> =
-                entities.map(|list| list.split('\u{1f}').map(str::to_owned).collect()).unwrap_or_default();
-            entities.sort();
-            Ok(StoredDecision {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                project: row.get(2)?,
-                title: row.get(3)?,
-                decision: row.get(4)?,
-                rationale: row.get(5)?,
-                alternatives: serde_json::from_str(&alternatives).unwrap_or_default(),
-                entities,
-                status: row.get(7)?,
-                superseded_by: row.get(8)?,
-                decided_at: row.get(9)?,
-                extractor: row.get(10)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![entity, filter.project, filter.include_inactive, id, filter.scope, uid],
+            |row| {
+                let alternatives: String = row.get(6)?;
+                let entities: Option<String> = row.get(11)?;
+                let mut entities: Vec<String> =
+                    entities.map(|list| list.split('\u{1f}').map(str::to_owned).collect()).unwrap_or_default();
+                entities.sort();
+                Ok(StoredDecision {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    project: row.get(2)?,
+                    title: row.get(3)?,
+                    decision: row.get(4)?,
+                    rationale: row.get(5)?,
+                    alternatives: serde_json::from_str(&alternatives).unwrap_or_default(),
+                    entities,
+                    status: row.get(7)?,
+                    superseded_by: row.get(8)?,
+                    decided_at: row.get(9)?,
+                    extractor: row.get(10)?,
+                    uid: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                    scope: row.get(13)?,
+                    scope_path: row.get(14)?,
+                    overridden: row.get(15)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1178,6 +1301,16 @@ fn fuse_ranks(lists: &[Vec<String>]) -> Vec<(String, f64)> {
     let mut fused: Vec<(String, f64)> = scores.into_iter().collect();
     fused.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     fused
+}
+
+/// Id estable de una decisión: su sesión y su título sin mayúsculas.
+#[must_use]
+pub fn decision_uid(session_id: &str, title: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(session_id.as_bytes());
+    hasher.update(&[0x1f]);
+    hasher.update(title.trim().to_lowercase().as_bytes());
+    hasher.finalize().to_hex()[..12].to_owned()
 }
 
 /// Último tramo del nombre cualificado: `UserService.register` → `register`.
@@ -1396,6 +1529,9 @@ mod tests {
             entities: entities.iter().map(|e| (*e).to_owned()).collect(),
             status: status.into(),
             supersedes: supersedes.into(),
+            scope: "project".into(),
+            scope_path: None,
+            replaces: Vec::new(),
         }
     }
 
@@ -1485,6 +1621,74 @@ mod tests {
     fn identifiers_split_into_words() {
         assert_eq!(split_identifier("UserService.hashPassword"), "User Service hash Password");
         assert_eq!(split_identifier("parse_v2Config"), "parse v2 Config");
+    }
+
+    fn status_of(store: &Store, title: &str) -> (String, Option<String>) {
+        let all = store.decisions(&DecisionFilter { include_inactive: true, ..DecisionFilter::default() }).unwrap();
+        let found = all.into_iter().find(|d| d.title == title).unwrap();
+        (found.status, found.superseded_by)
+    }
+
+    #[test]
+    fn a_later_session_supersedes_earlier_decisions_and_survives_reextraction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let sqlite = [new_decision("SQLite en local", &["sqlite"], "accepted", "")];
+        store.replace_decisions(&batch("s1", 10, &sqlite)).unwrap();
+        let old_uid = decision_uid("s1", "SQLite en local");
+
+        let mut duckdb = new_decision("DuckDB en local", &["duckdb"], "accepted", "");
+        duckdb.replaces = vec![old_uid.clone()];
+        store.replace_decisions(&batch("s2", 10, std::slice::from_ref(&duckdb))).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local"), ("superseded".into(), Some("DuckDB en local".into())));
+
+        // Volver a extraer la sesión antigua no la resucita: el reemplazo es de la nueva.
+        store.replace_decisions(&batch("s1", 12, &sqlite)).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "superseded");
+
+        // Si la nueva deja de reemplazarla, vuelve a estar vigente.
+        duckdb.replaces.clear();
+        store.replace_decisions(&batch("s2", 12, &[duckdb])).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local"), ("accepted".into(), None));
+    }
+
+    #[test]
+    fn only_a_taken_decision_supersedes_another_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.replace_decisions(&batch("s1", 10, &[new_decision("SQLite en local", &[], "accepted", "")])).unwrap();
+        let mut proposal = new_decision("Quizá DuckDB", &[], "proposed", "");
+        proposal.replaces = vec![decision_uid("s1", "sqlite en local")];
+        store.replace_decisions(&batch("s2", 10, &[proposal])).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "accepted");
+    }
+
+    #[test]
+    fn a_status_set_by_hand_wins_and_survives_reextraction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let decisions = [new_decision("SQLite en local", &[], "accepted", "")];
+        store.replace_decisions(&batch("s1", 10, &decisions)).unwrap();
+        let uid = &store.decisions_by_uid(&decision_uid("s1", "SQLite en local")[..6]).unwrap()[0].uid;
+        store.set_decision_status(uid, Some("rejected")).unwrap();
+        store.replace_decisions(&batch("s1", 12, &decisions)).unwrap();
+        let found = &store.decisions_by_uid(uid).unwrap()[0];
+        assert_eq!((found.status.as_str(), found.overridden), ("rejected", true));
+        assert_eq!(store.decisions(&DecisionFilter::default()).unwrap(), Vec::new());
+        store.set_decision_status(uid, None).unwrap();
+        assert_eq!(status_of(&store, "SQLite en local").0, "accepted");
+    }
+
+    #[test]
+    fn decisions_of_the_person_apply_to_every_project() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut spanish = new_decision("Commits en español", &[], "accepted", "");
+        spanish.scope = "user".into();
+        store
+            .replace_decisions(&batch("s1", 10, &[spanish, new_decision("SQLite en local", &[], "accepted", "")]))
+            .unwrap();
+        let elsewhere = DecisionFilter { project: Some("/otro".into()), ..DecisionFilter::default() };
+        let titles: Vec<String> = store.decisions(&elsewhere).unwrap().into_iter().map(|d| d.title).collect();
+        assert_eq!(titles, vec!["Commits en español"]);
+        let only_user = DecisionFilter { scope: Some("user".into()), ..DecisionFilter::default() };
+        assert_eq!(store.decisions(&only_user).unwrap().len(), 1);
     }
 
     #[test]

@@ -97,7 +97,9 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "entity": {"type": "string", "description": "Tecnología o concepto, en minúsculas (rust, sqlite…)"},
-                    "project": {"type": "string", "description": "Ruta del repositorio"},
+                    "project": {"type": "string", "description": "Ruta del repositorio (incluye las preferencias de la persona)"},
+                    "scope": {"type": "string", "enum": ["user", "project", "path"],
+                              "description": "user: preferencias de la persona en cualquier proyecto"},
                     "include_inactive": {"type": "boolean", "description": "Incluir reemplazadas y descartadas"}
                 }
             }
@@ -177,6 +179,7 @@ fn decisions(store: &Store, arguments: &Value) -> Result<String> {
     let filter = DecisionFilter {
         entity: arguments["entity"].as_str().map(str::to_owned),
         project: arguments["project"].as_str().map(|p| huella_engine::normalize_path(Path::new(p), None)),
+        scope: arguments["scope"].as_str().map(str::to_owned),
         include_inactive: arguments["include_inactive"].as_bool().unwrap_or(false),
     };
     let found = store.decisions(&filter)?;
@@ -185,7 +188,12 @@ fn decisions(store: &Store, arguments: &Value) -> Result<String> {
     }
     let mut out = String::new();
     for decision in found {
-        let _ = writeln!(out, "## {} ({})", decision.title, decision.status);
+        let scope = match (decision.scope.as_str(), &decision.scope_path) {
+            ("user", _) => " · preferencia de la persona".to_owned(),
+            ("path", Some(path)) => format!(" · solo {path}"),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "## {} ({}{scope})", decision.title, decision.status);
         let _ = writeln!(out, "{}\nPor qué: {}", decision.decision, decision.rationale);
         for alternative in &decision.alternatives {
             let _ = writeln!(out, "- Descartado: {alternative}");
@@ -296,6 +304,9 @@ mod tests {
             entities: vec!["rust".into()],
             status: "accepted".into(),
             supersedes: String::new(),
+            scope: "project".into(),
+            scope_path: None,
+            replaces: Vec::new(),
         };
         context
             .store

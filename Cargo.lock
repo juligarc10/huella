@@ -542,6 +542,7 @@ dependencies = [
 name = "huella-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "huella-core",
  "rusqlite",
  "serde_json",

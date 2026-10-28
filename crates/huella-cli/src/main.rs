@@ -149,9 +149,21 @@ enum DecisionsCommand {
         /// Solo las de este proyecto (ruta del repositorio).
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Solo las de este alcance: `user` (tus preferencias, valen en todos los
+        /// proyectos), `project` o `path` (una carpeta o fichero).
+        #[arg(long, value_parser = ["user", "project", "path"])]
+        scope: Option<String>,
         /// Incluye las reemplazadas, rechazadas y solo propuestas.
         #[arg(long)]
         all: bool,
+    },
+    /// Corrige a mano el estado de una decisión; sobrevive a volver a extraer.
+    Set {
+        /// Id de la decisión (el que muestra `huella decisions list`) o su comienzo.
+        id: String,
+        /// `accepted`, `rejected`, `superseded`, `proposed`, o `auto` para volver al extraído.
+        #[arg(value_parser = ["accepted", "rejected", "superseded", "proposed", "auto"])]
+        status: String,
     },
 }
 
@@ -299,12 +311,29 @@ fn run(cli: Cli) -> Result<()> {
             huella_engine::index(&mut store, &projects)?;
             extract(&mut store, &projects, extractor.as_ref(), &ExtractionOptions { limit, chunk_chars })
         }
-        Command::Decisions { action: DecisionsCommand::List { entity, project, all } } => {
+        Command::Decisions { action: DecisionsCommand::List { entity, project, scope, all } } => {
             let project = project
                 .map(|path| fs::canonicalize(&path).unwrap_or(path))
                 .map(|path| huella_engine::normalize_path(&path, None));
-            let filter = DecisionFilter { entity, project, include_inactive: all };
+            let filter = DecisionFilter { entity, project, scope, include_inactive: all };
             list_decisions(&open_store(cli.db)?, &filter)
+        }
+        Command::Decisions { action: DecisionsCommand::Set { id, status } } => {
+            let store = open_store(cli.db)?;
+            let found = store.decisions_by_uid(&id)?;
+            let decision = match found.as_slice() {
+                [one] => one,
+                [] => bail!("ninguna decisión tiene un id que empiece por «{id}»"),
+                many => bail!(
+                    "«{id}» coincide con varias decisiones: {}",
+                    many.iter().map(|d| format!("{} ({})", d.uid, d.title)).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            let status = (status != "auto").then_some(status);
+            store.set_decision_status(&decision.uid, status.as_deref())?;
+            let now = &store.decisions_by_uid(&decision.uid)?[0];
+            println!("«{}»: {}", now.title, search::status_label(&now.status));
+            Ok(())
         }
         Command::Review { action } => review_command(cli.db, action),
         Command::Mcp { projects } => {
@@ -628,9 +657,15 @@ fn list_decisions(store: &Store, filter: &DecisionFilter) -> Result<()> {
         let status = match (decision.status.as_str(), &decision.superseded_by) {
             ("superseded", Some(by)) => format!(" · reemplazada por «{by}»"),
             ("accepted", _) => String::new(),
-            (other, _) => format!(" · {other}"),
+            (other, _) => format!(" · {}", search::status_label(other)),
         };
-        println!("● {} — {date}{status}", decision.title);
+        let scope = match (decision.scope.as_str(), &decision.scope_path) {
+            ("user", _) => " · tuya, en todos los proyectos".to_owned(),
+            ("path", Some(path)) => format!(" · solo {path}"),
+            _ => String::new(),
+        };
+        let by_hand = if decision.overridden { " (a mano)" } else { "" };
+        println!("● {} — {date}{status}{by_hand}{scope}  [{}]", decision.title, decision.uid);
         if !decision.entities.is_empty() {
             println!("  [{}]", decision.entities.join(", "));
         }
