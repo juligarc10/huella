@@ -3,6 +3,7 @@
 
 pub mod adr;
 mod decisions;
+pub mod embeddings;
 mod index;
 pub mod lineage;
 pub mod narration;

@@ -202,6 +202,17 @@ const MIGRATIONS: &[&str] = &[
     LEFT JOIN (SELECT old_uid, MIN(new_title) AS new_title FROM decision_supersession GROUP BY old_uid) x
            ON x.old_uid = d.uid;
 ",
+    // Vectores para la búsqueda por significado, por modelo: cambiar de
+    // modelo no mezcla espacios. El hash del texto dice si hay que recalcular.
+    r"
+    CREATE TABLE embedding (
+        key             TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        text_hash       TEXT NOT NULL,
+        vector          BLOB NOT NULL,
+        PRIMARY KEY (key, model)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -382,6 +393,22 @@ impl SearchHit {
             Self::Request { score, .. } | Self::Decision { score, .. } => *score,
         }
     }
+}
+
+/// Vector de la consulta para mezclar la búsqueda por significado.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SemanticQuery<'a> {
+    /// Modelo con el que se calculó (solo se compara con vectores suyos).
+    pub model: &'a str,
+    pub vector: &'a [f32],
+}
+
+/// Texto de la memoria que aún no tiene vector con un modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingEmbedding {
+    pub key: String,
+    pub text: String,
+    pub text_hash: String,
 }
 
 /// Qué decisiones listar.
@@ -933,18 +960,39 @@ impl Store {
     /// # Errors
     /// Si falla la consulta.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>> {
-        let Some(fts) = fts_query(&query.text) else { return Ok(Vec::new()) };
+        self.search_with(query, None)
+    }
+
+    /// Como [`Store::search`], mezclando además lo más parecido en
+    /// significado al vector de la consulta (encuentra sinónimos y frases
+    /// distintas que dicen lo mismo).
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn search_with(&self, query: &SearchQuery, semantic: Option<SemanticQuery>) -> Result<Vec<SearchHit>> {
         let project_prefix = query.project.as_ref().map(|project| format!("{}/", project.trim_end_matches('/')));
-        let requests = self.search_requests(&fts, project_prefix.as_deref())?;
-        let decisions = self.search_decisions(&fts, query)?;
-        let keys = [
-            requests.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
-            decisions.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
-        ];
-        let mut by_key: HashMap<String, SearchHit> = requests.into_iter().chain(decisions).collect();
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        let mut by_key: HashMap<String, SearchHit> = HashMap::new();
+        if let Some(fts) = fts_query(&query.text) {
+            let requests = self.search_requests(&fts, project_prefix.as_deref())?;
+            let decisions = self.search_decisions(&fts, query)?;
+            lists.push(requests.iter().map(|(key, _)| key.clone()).collect());
+            lists.push(decisions.iter().map(|(key, _)| key.clone()).collect());
+            by_key.extend(requests.into_iter().chain(decisions));
+        }
+        if let Some(semantic) = semantic {
+            lists.push(self.nearest(semantic, SEMANTIC_CANDIDATES)?);
+        }
         let mut hits = Vec::new();
-        for (key, score) in fuse_ranks(&keys).into_iter().take(query.limit.max(1)) {
-            if let Some(mut hit) = by_key.remove(&key) {
+        for (key, score) in fuse_ranks(&lists) {
+            if hits.len() >= query.limit.max(1) {
+                break;
+            }
+            let hit = match by_key.remove(&key) {
+                Some(hit) => Some(hit),
+                None => self.hit_for_key(&key, query, project_prefix.as_deref())?,
+            };
+            if let Some(mut hit) = hit {
                 match &mut hit {
                     SearchHit::Request { score: s, .. } | SearchHit::Decision { score: s, .. } => *s = score,
                 }
@@ -952,6 +1000,154 @@ impl Store {
             }
         }
         Ok(hits)
+    }
+
+    /// Claves de los textos más parecidos al vector, del más al menos.
+    fn nearest(&self, semantic: SemanticQuery, limit: usize) -> Result<Vec<String>> {
+        let query = normalized(semantic.vector);
+        let mut statement = self.conn.prepare_cached("SELECT key, vector FROM embedding WHERE model = ?1")?;
+        let rows =
+            statement.query_map([semantic.model], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (key, bytes) = row?;
+            let vector = vector_from_bytes(&bytes);
+            if vector.len() == query.len() {
+                let similarity: f32 = vector.iter().zip(&query).map(|(a, b)| a * b).sum();
+                scored.push((key, similarity));
+            }
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(scored.into_iter().take(limit).map(|(key, _)| key).collect())
+    }
+
+    /// Resultado de una clave que solo encontró la búsqueda por significado,
+    /// si cumple los filtros de la consulta.
+    fn hit_for_key(&self, key: &str, query: &SearchQuery, project_prefix: Option<&str>) -> Result<Option<SearchHit>> {
+        let mut parts = key.split('\u{1f}');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("request"), Some(session_id), Some(group)) => {
+                let mut statement = self.conn.prepare_cached(
+                    "SELECT e.session_id, e.at, e.prompt, e.path, substr(COALESCE(e.rationale, e.prompt, ''), 1, 160),
+                            (SELECT group_concat(s.qualified_name, char(31)) FROM edit_symbol s
+                             WHERE s.edit_id = e.id AND s.role = 'touched')
+                     FROM edit e
+                     WHERE e.session_id = ?1 AND COALESCE(e.prompt, e.path) = ?2
+                       AND (?3 IS NULL OR e.path LIKE ?3 || '%')
+                     ORDER BY e.at",
+                )?;
+                let rows = statement.query_map(params![session_id, group, project_prefix], request_row)?;
+                Ok(group_requests(rows)?.into_iter().next().map(|(_, hit)| hit))
+            }
+            (Some("decision"), Some(uid), None) => {
+                let Some(decision) = self.decisions_by_uid(uid)?.into_iter().find(|d| d.uid == uid) else {
+                    return Ok(None);
+                };
+                let in_project =
+                    query.project.is_none() || decision.project == query.project || decision.scope == "user";
+                let active = query.include_inactive || decision.status == "accepted";
+                Ok((in_project && active).then(|| {
+                    let snippet = decision.decision.chars().take(160).collect();
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 }
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Textos (peticiones y decisiones) sin vector con `model`, o cuyo texto
+    /// cambió desde que se calculó, como mucho `limit`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingEmbedding>> {
+        let mut known: HashMap<String, String> = HashMap::new();
+        {
+            let mut statement = self.conn.prepare_cached("SELECT key, text_hash FROM embedding WHERE model = ?1")?;
+            for row in statement.query_map([model], |row| Ok((row.get(0)?, row.get(1)?)))? {
+                let (key, hash) = row?;
+                known.insert(key, hash);
+            }
+        }
+        let mut texts: Vec<(String, String)> = Vec::new();
+        {
+            let mut statement = self.conn.prepare_cached(
+                "SELECT e.session_id, COALESCE(e.prompt, e.path), MIN(e.prompt), MIN(e.rationale), group_concat(DISTINCT e.path)
+                 FROM edit e GROUP BY e.session_id, COALESCE(e.prompt, e.path) ORDER BY MAX(e.at) DESC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (session_id, group, prompt, rationale, paths) = row?;
+                let text = [prompt, rationale.map(|r| r.chars().take(EMBED_CHARS).collect()), paths]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                texts.push((format!("request\u{1f}{session_id}\u{1f}{group}"), text));
+            }
+        }
+        {
+            let mut statement = self.conn.prepare_cached("SELECT uid, title, decision, rationale FROM decision")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (uid, title, decision, rationale) = row?;
+                texts.push((format!("decision\u{1f}{uid}"), format!("{title}\n{decision}\n{rationale}")));
+            }
+        }
+        Ok(texts
+            .into_iter()
+            .filter_map(|(key, text)| {
+                let text_hash = blake3::hash(text.as_bytes()).to_hex()[..16].to_owned();
+                (known.get(&key) != Some(&text_hash)).then_some(PendingEmbedding { key, text, text_hash })
+            })
+            .take(limit)
+            .collect())
+    }
+
+    /// Guarda vectores calculados con `model` (normalizados, para comparar con
+    /// un producto escalar).
+    ///
+    /// # Errors
+    /// Si falla la escritura; no se guarda ninguno.
+    pub fn save_embeddings(&mut self, model: &str, items: &[(&PendingEmbedding, Vec<f32>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO embedding (key, model, text_hash, vector) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(key, model) DO UPDATE SET text_hash = excluded.text_hash, vector = excluded.vector",
+            )?;
+            for (pending, vector) in items {
+                let bytes: Vec<u8> = normalized(vector).iter().flat_map(|v| v.to_le_bytes()).collect();
+                insert.execute(params![pending.key, model, pending.text_hash, bytes])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Cuántos textos tienen vector con `model`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn embedded(&self, model: &str) -> Result<usize> {
+        let count: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM embedding WHERE model = ?1", [model], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or_default())
     }
 
     fn search_requests(&self, fts: &str, project_prefix: Option<&str>) -> Result<Vec<(String, SearchHit)>> {
@@ -963,51 +1159,8 @@ impl Store {
              WHERE edit_fts MATCH ?1 AND (?2 IS NULL OR e.path LIKE ?2 || '%')
              ORDER BY bm25(edit_fts) LIMIT 400",
         )?;
-        let rows = statement.query_map(params![fts, project_prefix], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })?;
-        // Agrupa por petición conservando el orden de la mejor edición de cada una.
-        let mut order: Vec<String> = Vec::new();
-        let mut grouped: HashMap<String, SearchHit> = HashMap::new();
-        for row in rows {
-            let (session_id, at, prompt, path, snippet, symbols) = row?;
-            let key = format!("request\u{1f}{session_id}\u{1f}{}", prompt.as_deref().unwrap_or(&path));
-            let hit = grouped.entry(key.clone()).or_insert_with(|| {
-                order.push(key.clone());
-                SearchHit::Request {
-                    session_id,
-                    at: at.clone(),
-                    prompt,
-                    snippet,
-                    paths: Vec::new(),
-                    symbols: Vec::new(),
-                    edits: 0,
-                    score: 0.0,
-                }
-            });
-            if let SearchHit::Request { at: latest, paths, symbols: all, edits, .. } = hit {
-                *edits += 1;
-                if at > *latest {
-                    latest.clone_from(&at);
-                }
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
-                for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
-                    if !all.iter().any(|known| known == symbol) {
-                        all.push(symbol.to_owned());
-                    }
-                }
-            }
-        }
-        Ok(order.into_iter().filter_map(|key| grouped.remove(&key).map(|hit| (key, hit))).collect())
+        let rows = statement.query_map(params![fts, project_prefix], request_row)?;
+        group_requests(rows)
     }
 
     fn search_decisions(&self, fts: &str, query: &SearchQuery) -> Result<Vec<(String, SearchHit)>> {
@@ -1025,7 +1178,7 @@ impl Store {
         for (id, snippet) in ids {
             if let Some(decision) = self.decision(id)? {
                 hits.push((
-                    format!("decision\u{1f}{id}"),
+                    format!("decision\u{1f}{}", decision.uid),
                     SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 },
                 ));
             }
@@ -1301,6 +1454,66 @@ fn fuse_ranks(lists: &[Vec<String>]) -> Vec<(String, f64)> {
     let mut fused: Vec<(String, f64)> = scores.into_iter().collect();
     fused.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     fused
+}
+
+/// Una fila de edición para agrupar en peticiones.
+type RequestRow = (String, Option<String>, Option<String>, String, String, Option<String>);
+
+fn request_row(row: &rusqlite::Row) -> rusqlite::Result<RequestRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+}
+
+/// Agrupa las ediciones por petición conservando el orden de la primera de
+/// cada una.
+fn group_requests(rows: impl Iterator<Item = rusqlite::Result<RequestRow>>) -> Result<Vec<(String, SearchHit)>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, SearchHit> = HashMap::new();
+    for row in rows {
+        let (session_id, at, prompt, path, snippet, symbols) = row?;
+        let key = format!("request\u{1f}{session_id}\u{1f}{}", prompt.as_deref().unwrap_or(&path));
+        let hit = grouped.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            SearchHit::Request {
+                session_id,
+                at: at.clone(),
+                prompt,
+                snippet,
+                paths: Vec::new(),
+                symbols: Vec::new(),
+                edits: 0,
+                score: 0.0,
+            }
+        });
+        if let SearchHit::Request { at: latest, paths, symbols: all, edits, .. } = hit {
+            *edits += 1;
+            if at > *latest {
+                latest.clone_from(&at);
+            }
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+            for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
+                if !all.iter().any(|known| known == symbol) {
+                    all.push(symbol.to_owned());
+                }
+            }
+        }
+    }
+    Ok(order.into_iter().filter_map(|key| grouped.remove(&key).map(|hit| (key, hit))).collect())
+}
+
+/// Candidatos de la búsqueda por significado antes de mezclar.
+const SEMANTIC_CANDIDATES: usize = 50;
+/// Caracteres de la explicación que entran en el texto de una petición.
+const EMBED_CHARS: usize = 1500;
+
+fn normalized(vector: &[f32]) -> Vec<f32> {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm == 0.0 { vector.to_vec() } else { vector.iter().map(|v| v / norm).collect() }
+}
+
+fn vector_from_bytes(bytes: &[u8]) -> Vec<f32> {
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
 }
 
 /// Id estable de una decisión: su sesión y su título sin mayúsculas.
@@ -1615,6 +1828,48 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(search(&store, "email").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn semantic_search_adds_what_words_miss_and_keeps_filters() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "limita los intentos de inicio de sesión");
+        let second = edit("e2", "s2", "2026-10-02T10:00:00Z", "cambia el color del botón");
+        save(
+            &mut store,
+            10,
+            &[(&first, &anchored(&[("login", "h1")], &[])), (&second, &anchored(&[("Button", "h2")], &[]))],
+        );
+        let mut rejected = new_decision("Postgres en local", &[], "rejected", "");
+        rejected.decision = "Base de datos de servidor".into();
+        store.replace_decisions(&batch("s1", 10, &[rejected])).unwrap();
+
+        let pending = store.pending_embeddings("m", 100).unwrap();
+        assert_eq!(pending.len(), 3, "dos peticiones y una decisión: {pending:?}");
+        // Vectores de pega: el de la petición de intentos apunta a [1, 0, 0].
+        let vector = |p: &PendingEmbedding| match () {
+            () if p.text.contains("intentos") => vec![1.0, 0.0, 0.0],
+            () if p.text.contains("Postgres") => vec![0.9, 0.1, 0.0],
+            () => vec![0.0, 1.0, 0.0],
+        };
+        let items: Vec<_> = pending.iter().map(|p| (p, vector(p))).collect();
+        store.save_embeddings("m", &items).unwrap();
+        assert_eq!(store.pending_embeddings("m", 100).unwrap(), Vec::new());
+        assert_eq!(store.pending_embeddings("otro", 100).unwrap().len(), 3, "cada modelo tiene sus vectores");
+
+        // «rate limit» no aparece en el texto, pero su vector se parece.
+        let query = SearchQuery { text: "rate limit".into(), limit: 5, ..SearchQuery::default() };
+        let semantic = SemanticQuery { model: "m", vector: &[2.0, 0.0, 0.0] };
+        let hits = store.search_with(&query, Some(semantic)).unwrap();
+        let SearchHit::Request { session_id, .. } = &hits[0] else { panic!("{hits:?}") };
+        assert_eq!(session_id, "s1");
+        assert!(
+            !hits.iter().any(|hit| matches!(hit, SearchHit::Decision { .. })),
+            "la decisión descartada no sale aunque se parezca"
+        );
+        assert_eq!(store.search(&query).unwrap(), Vec::new(), "sin vector, solo palabras");
+        let other_model = SemanticQuery { model: "otro", vector: &[1.0, 0.0, 0.0] };
+        assert_eq!(store.search_with(&query, Some(other_model)).unwrap(), Vec::new());
     }
 
     #[test]

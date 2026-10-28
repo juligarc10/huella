@@ -151,7 +151,17 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
                 limit: arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10),
                 include_inactive: false,
             };
-            Ok(crate::search::render_hits(&context.store.search(&query)?))
+            let embedder = crate::embedder(None, None);
+            let (hits, warning) = huella_engine::embeddings::search(
+                &context.store,
+                &query,
+                embedder.as_ref().map(|e| e as &dyn huella_decisions::Embedder),
+            )?;
+            let mut text = crate::search::render_hits(&hits);
+            if let Some(warning) = warning {
+                let _ = write!(text, "\n(aviso: {warning})");
+            }
+            Ok(text)
         }
         "huella_sessions" => {
             let limit = arguments["limit"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(10);

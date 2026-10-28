@@ -19,7 +19,7 @@ use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
 use huella_decisions::JsonModel;
 use huella_decisions::anthropic::Anthropic;
-use huella_decisions::openai::OpenAiCompatible;
+use huella_decisions::openai::{OpenAiCompatible, OpenAiEmbeddings};
 use huella_engine::ExtractionOptions;
 use huella_store::{DecisionFilter, Store};
 use serde::Serialize;
@@ -94,6 +94,23 @@ enum Command {
         /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
         #[arg(long)]
         all: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Calcula los vectores para buscar por significado con un modelo de
+    /// embeddings con la API de `OpenAI` (Ollama, llama.cpp, `OpenAI`…). Con
+    /// `HUELLA_EMBED_MODEL` definida, `huella search` y el MCP los usan.
+    Embed {
+        /// Modelo (por defecto `$HUELLA_EMBED_MODEL`, p. ej. nomic-embed-text).
+        #[arg(long)]
+        model: Option<String>,
+        /// URL base (por defecto `$HUELLA_EMBED_URL` u Ollama local).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Textos a calcular como mucho.
+        #[arg(long, default_value_t = 5000)]
+        limit: usize,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -313,7 +330,31 @@ fn run(cli: Cli) -> Result<()> {
             let project =
                 project.map(|path| huella_engine::normalize_path(&fs::canonicalize(&path).unwrap_or(path), None));
             let query = huella_store::SearchQuery { text: words.join(" "), project, limit, include_inactive: all };
-            emit(&search::render_hits(&store.search(&query)?));
+            let embedder = embedder(None, None);
+            let (hits, warning) = huella_engine::embeddings::search(
+                &store,
+                &query,
+                embedder.as_ref().map(|e| e as &dyn huella_decisions::Embedder),
+            )?;
+            if let Some(warning) = warning {
+                eprintln!("aviso: {warning}");
+            }
+            emit(&search::render_hits(&hits));
+            Ok(())
+        }
+        Command::Embed { model, base_url, limit, projects } => {
+            let embedder = embedder(model, base_url)
+                .context("indica el modelo con --model o en HUELLA_EMBED_MODEL (p. ej. nomic-embed-text)")?;
+            let mut store = open_store(cli.db)?;
+            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            println!("Calculando vectores con {}…", huella_decisions::Embedder::model_id(&embedder));
+            let report = huella_engine::embeddings::embed_pending(&mut store, &embedder, limit, |done, total| {
+                println!("  {done} de {total}");
+            })?;
+            println!("Hecho: {} vectores nuevos", report.embedded);
+            if let Some(failure) = report.failure {
+                bail!("el modelo falló: {failure}");
+            }
             Ok(())
         }
         Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
@@ -647,6 +688,14 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
         None => println!("Huella no recuerda ninguna sesión que tocara {file}:{line}."),
     }
     Ok(())
+}
+
+/// Modelo de embeddings de los argumentos o de `HUELLA_EMBED_MODEL` y
+/// `HUELLA_EMBED_URL`; `None` si no hay ninguno configurado.
+pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenAiEmbeddings> {
+    let model = model.or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok()).filter(|m| !m.trim().is_empty())?;
+    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok());
+    Some(OpenAiEmbeddings::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
 }
 
 fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {

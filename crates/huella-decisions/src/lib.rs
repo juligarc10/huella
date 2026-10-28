@@ -136,6 +136,20 @@ impl<M: JsonModel + ?Sized> DecisionExtractor for M {
     }
 }
 
+/// Un modelo de embeddings: convierte textos en vectores cuya cercanía
+/// indica parecido de significado.
+pub trait Embedder {
+    /// Identificador estable (`openai-compatible:nomic-embed-text`): los
+    /// vectores de modelos distintos no se comparan.
+    fn model_id(&self) -> String;
+
+    /// Un vector por texto, en el mismo orden.
+    ///
+    /// # Errors
+    /// Si falla la llamada o la respuesta no trae un vector por texto.
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError>;
+}
+
 /// Un modelo capaz de extraer decisiones de un trozo de diálogo.
 pub trait DecisionExtractor {
     /// Identificador estable (`anthropic:claude-haiku-5-5`) para saber con qué

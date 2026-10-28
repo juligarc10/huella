@@ -81,6 +81,73 @@ fn request_body(model: &str, system: &str, user: &str, schema: &Value) -> Value 
     })
 }
 
+/// Embeddings con la API de `OpenAI` (`POST /embeddings`): Ollama
+/// (`nomic-embed-text`), llama.cpp con `--embedding`, `OpenAI`…
+pub struct OpenAiEmbeddings {
+    agent: Agent,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+impl OpenAiEmbeddings {
+    pub fn new(base_url: Option<String>, model: String, api_key: Option<String>) -> Self {
+        let config = Agent::config_builder().http_status_as_error(false).timeout_global(Some(MAX_SILENCE)).build();
+        Self {
+            agent: config.into(),
+            base_url: base_url.unwrap_or_else(|| OLLAMA_BASE_URL.to_owned()).trim_end_matches('/').to_owned(),
+            model,
+            api_key: api_key.filter(|key| !key.trim().is_empty()),
+        }
+    }
+}
+
+impl crate::Embedder for OpenAiEmbeddings {
+    fn model_id(&self) -> String {
+        format!("{PROVIDER}:{}", self.model)
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError> {
+        let network = |error: ureq::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
+        let mut call = self.agent.post(format!("{}/embeddings", self.base_url));
+        if let Some(key) = &self.api_key {
+            call = call.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut response = call.send_json(json!({"model": self.model, "input": texts})).map_err(network)?;
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string().map_err(network)?;
+        if status != 200 {
+            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+        }
+        parse_embeddings(&body, texts.len())
+    }
+}
+
+/// Vectores de la respuesta, ordenados por su `index`.
+fn parse_embeddings(body: &str, expected: usize) -> Result<Vec<Vec<f32>>, ExtractError> {
+    let bad = |message: String| ExtractError::BadResponse(message);
+    let value: Value = serde_json::from_str(body).map_err(|error| bad(error.to_string()))?;
+    let mut items: Vec<(u64, Vec<f32>)> = value["data"]
+        .as_array()
+        .ok_or_else(|| bad("falta `data`".into()))?
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let index = item["index"].as_u64().unwrap_or(position as u64);
+            #[allow(clippy::cast_possible_truncation)]
+            let vector = item["embedding"]
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_f64).map(|v| v as f32).collect());
+            vector.map(|vector| (index, vector)).ok_or_else(|| bad("un elemento no trae `embedding`".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    if items.len() != expected {
+        return Err(bad(format!("{} vectores para {expected} textos", items.len())));
+    }
+    items.sort_by_key(|(index, _)| *index);
+    Ok(items.into_iter().map(|(_, vector)| vector).collect())
+}
+
 /// Junta el texto de los eventos SSE (`data: {...}`) hasta `data: [DONE]`.
 /// El razonamiento (`reasoning_content`) se descarta: solo mantiene viva la
 /// conexión.
@@ -118,6 +185,14 @@ fn collect_stream(reader: impl BufRead) -> Result<String, ExtractError> {
 mod tests {
     use super::*;
     use crate::output_schema;
+
+    #[test]
+    fn embeddings_are_returned_in_input_order() {
+        let body = r#"{"data": [{"index": 1, "embedding": [0.5, 1]}, {"index": 0, "embedding": [1, 0]}]}"#;
+        assert_eq!(parse_embeddings(body, 2).unwrap(), vec![vec![1.0, 0.0], vec![0.5, 1.0]]);
+        assert!(matches!(parse_embeddings(body, 3), Err(ExtractError::BadResponse(_))));
+        assert!(matches!(parse_embeddings("{}", 1), Err(ExtractError::BadResponse(_))));
+    }
 
     #[test]
     fn request_streams_with_json_schema_response_format() {
