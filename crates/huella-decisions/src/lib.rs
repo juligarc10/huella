@@ -143,11 +143,20 @@ pub trait Embedder {
     /// vectores de modelos distintos no se comparan.
     fn model_id(&self) -> String;
 
-    /// Un vector por texto, en el mismo orden.
+    /// Un vector por texto de la memoria (lo que se busca), en el mismo orden.
     ///
     /// # Errors
     /// Si falla la llamada o la respuesta no trae un vector por texto.
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError>;
+
+    /// Vector de una consulta. Los modelos entrenados con una instrucción por
+    /// tarea codifican distinto la consulta y los documentos.
+    ///
+    /// # Errors
+    /// Si falla la llamada.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, ExtractError> {
+        self.embed(&[text])?.pop().ok_or_else(|| ExtractError::BadResponse("sin vector".into()))
+    }
 }
 
 /// Un modelo capaz de extraer decisiones de un trozo de diálogo.

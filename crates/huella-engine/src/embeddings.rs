@@ -1,16 +1,20 @@
 //! Búsqueda por significado: vectores de las peticiones y decisiones con un
 //! modelo de embeddings, mezclados con la búsqueda de texto.
 
-use huella_decisions::Embedder;
-use huella_store::{SearchHit, SearchQuery, SemanticQuery, Store};
+use huella_decisions::{Embedder, ExtractError};
+use huella_store::{PendingEmbedding, SearchHit, SearchQuery, SemanticQuery, Store};
 
 /// Textos por llamada al modelo.
 const BATCH: usize = 32;
+/// Veces que se acorta a la mitad un texto que el modelo rechaza.
+const SHRINKS: usize = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmbedReport {
     pub embedded: usize,
-    /// Fallo del modelo, si lo hubo: lo ya calculado se conserva.
+    /// Textos que el modelo rechazó aun acortados: se reintentan la próxima vez.
+    pub skipped: usize,
+    /// Fallo del modelo o del servidor que detuvo el cálculo: lo ya calculado se conserva.
     pub failure: Option<String>,
 }
 
@@ -35,15 +39,54 @@ pub fn embed_pending(
                 let items: Vec<_> = batch.iter().zip(vectors).collect();
                 store.save_embeddings(&model, &items)?;
                 report.embedded += batch.len();
-                progress(report.embedded, pending.len());
+            }
+            // El modelo rechazó la petición (p. ej. un texto no cabe en su
+            // contexto): uno a uno, para no perder el lote por un texto.
+            Err(error) if is_rejection(&error) => {
+                for item in batch {
+                    match embed_one(embedder, item) {
+                        Ok(Some(vector)) => {
+                            store.save_embeddings(&model, &[(item, vector)])?;
+                            report.embedded += 1;
+                        }
+                        Ok(None) => report.skipped += 1,
+                        Err(error) => {
+                            report.failure = Some(error.to_string());
+                            return Ok(report);
+                        }
+                    }
+                }
             }
             Err(error) => {
                 report.failure = Some(error.to_string());
                 break;
             }
         }
+        progress(report.embedded + report.skipped, pending.len());
     }
     Ok(report)
+}
+
+/// Vector de un texto, acortándolo a la mitad si el modelo lo rechaza;
+/// `None` si ni así lo acepta. Los errores de red o del servidor se devuelven.
+fn embed_one(embedder: &dyn Embedder, item: &PendingEmbedding) -> Result<Option<Vec<f32>>, ExtractError> {
+    let mut text = item.text.clone();
+    for _ in 0..=SHRINKS {
+        match embedder.embed(&[text.as_str()]) {
+            Ok(mut vectors) => return Ok(vectors.pop()),
+            Err(error) if is_rejection(&error) => {
+                let half = text.chars().count() / 2;
+                text = text.chars().take(half).collect();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+/// El servidor entendió la petición y la rechazó (4xx): reintentar igual no sirve.
+fn is_rejection(error: &ExtractError) -> bool {
+    matches!(error, ExtractError::Api { status: 400..=499, .. })
 }
 
 /// Busca por texto y, con `embedder`, también por significado. Si el modelo
@@ -62,9 +105,8 @@ pub fn search(
         let warning = format!("aún no hay vectores de {model}: calcúlalos con `huella embed`");
         return Ok((store.search(query)?, Some(warning)));
     }
-    match embedder.embed(&[query.text.as_str()]) {
-        Ok(vectors) => {
-            let vector = vectors.into_iter().next().unwrap_or_default();
+    match embedder.embed_query(&query.text) {
+        Ok(vector) => {
             let semantic = SemanticQuery { model: &model, vector: &vector };
             Ok((store.search_with(query, Some(semantic))?, None))
         }
@@ -144,7 +186,7 @@ mod tests {
         let mut store = store_with_decisions();
         let topics = Topics { calls: Cell::new(0), fail: false };
         let report = embed_pending(&mut store, &topics, 100, |_, _| {}).unwrap();
-        assert_eq!(report, EmbedReport { embedded: 2, failure: None });
+        assert_eq!(report, EmbedReport { embedded: 2, skipped: 0, failure: None });
         assert_eq!(embed_pending(&mut store, &topics, 100, |_, _| {}).unwrap().embedded, 0, "ya están al día");
 
         let query = SearchQuery { text: "almacenamiento".into(), limit: 5, ..SearchQuery::default() };
@@ -153,6 +195,40 @@ mod tests {
         let SearchHit::Decision { decision, .. } = &hits[0] else { panic!("{hits:?}") };
         assert_eq!(decision.title, "SQLite");
         assert_eq!(search(&store, &query, None).unwrap().0, Vec::new(), "por palabras no aparece");
+    }
+
+    /// Como un servidor con poco contexto: rechaza los textos largos.
+    struct ShortContext {
+        max_chars: usize,
+    }
+
+    impl Embedder for ShortContext {
+        fn model_id(&self) -> String {
+            "fake:short".into()
+        }
+
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError> {
+            if texts.iter().any(|text| text.chars().count() > self.max_chars) {
+                return Err(ExtractError::Api {
+                    provider: "fake",
+                    status: 400,
+                    body: "exceeds the context length".into(),
+                });
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[test]
+    fn texts_too_long_for_the_model_are_shortened_instead_of_failing_the_batch() {
+        let mut store = store_with_decisions();
+        // Los textos de las decisiones miden unos 40 caracteres: a la mitad caben en 30.
+        let report = embed_pending(&mut store, &ShortContext { max_chars: 30 }, 100, |_, _| {}).unwrap();
+        assert_eq!(report, EmbedReport { embedded: 2, skipped: 0, failure: None });
+
+        let mut store = store_with_decisions();
+        let report = embed_pending(&mut store, &ShortContext { max_chars: 3 }, 100, |_, _| {}).unwrap();
+        assert_eq!((report.embedded, report.skipped, report.failure), (0, 2, None), "se saltan sin parar");
     }
 
     #[test]

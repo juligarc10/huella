@@ -32,7 +32,7 @@ pub fn render_hits(hits: &[SearchHit]) -> String {
                     paths.iter().map(|p| Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p)).collect();
                 let _ = writeln!(out, "   ficheros: {}", listed(&files));
                 if !symbols.is_empty() {
-                    let names: Vec<&str> = symbols.iter().map(String::as_str).collect();
+                    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
                     let _ = writeln!(out, "   símbolos: {}", listed(&names));
                 }
             }

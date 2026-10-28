@@ -170,7 +170,7 @@ fn content_type(value: &str) -> Header {
 }
 
 /// Token difícil de adivinar para esta ejecución del servidor.
-fn token(session: &str) -> String {
+pub(crate) fn token(session: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(session.as_bytes());
     hasher.update(&std::process::id().to_le_bytes());
@@ -181,7 +181,7 @@ fn token(session: &str) -> String {
     hasher.finalize().to_hex()[..32].to_owned()
 }
 
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "windows") {

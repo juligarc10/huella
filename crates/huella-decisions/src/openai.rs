@@ -102,12 +102,21 @@ impl OpenAiEmbeddings {
     }
 }
 
-impl crate::Embedder for OpenAiEmbeddings {
-    fn model_id(&self) -> String {
-        format!("{PROVIDER}:{}", self.model)
+/// Prefijos de tarea que esperan algunas familias de modelos de embeddings:
+/// sin ellos, la calidad de la búsqueda cae bastante. (documento, consulta)
+fn task_prefixes(model: &str) -> (&'static str, &'static str) {
+    let model = model.to_lowercase();
+    if model.contains("nomic-embed") {
+        ("search_document: ", "search_query: ")
+    } else if model.contains("e5") {
+        ("passage: ", "query: ")
+    } else {
+        ("", "")
     }
+}
 
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError> {
+impl OpenAiEmbeddings {
+    fn request(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError> {
         let network = |error: ureq::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
         let mut call = self.agent.post(format!("{}/embeddings", self.base_url));
         if let Some(key) = &self.api_key {
@@ -120,6 +129,25 @@ impl crate::Embedder for OpenAiEmbeddings {
             return Err(ExtractError::Api { provider: PROVIDER, status, body });
         }
         parse_embeddings(&body, texts.len())
+    }
+}
+
+impl crate::Embedder for OpenAiEmbeddings {
+    fn model_id(&self) -> String {
+        format!("{PROVIDER}:{}", self.model)
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ExtractError> {
+        let (document, _) = task_prefixes(&self.model);
+        let prefixed: Vec<String> = texts.iter().map(|text| format!("{document}{text}")).collect();
+        self.request(&prefixed.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, ExtractError> {
+        let (_, query) = task_prefixes(&self.model);
+        self.request(&[format!("{query}{text}").as_str()])?
+            .pop()
+            .ok_or_else(|| ExtractError::BadResponse("sin vector".into()))
     }
 }
 
@@ -185,6 +213,13 @@ fn collect_stream(reader: impl BufRead) -> Result<String, ExtractError> {
 mod tests {
     use super::*;
     use crate::output_schema;
+
+    #[test]
+    fn models_trained_with_task_instructions_get_their_prefixes() {
+        assert_eq!(task_prefixes("nomic-embed-text"), ("search_document: ", "search_query: "));
+        assert_eq!(task_prefixes("intfloat/multilingual-e5-large"), ("passage: ", "query: "));
+        assert_eq!(task_prefixes("text-embedding-3-small"), ("", ""));
+    }
 
     #[test]
     fn embeddings_are_returned_in_input_order() {
