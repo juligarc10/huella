@@ -17,6 +17,7 @@ huella-engine = { version = "0.1.0", path = "../huella-engine" }
 huella-lsp = { version = "0.1.0", path = "../huella-lsp" }
 huella-review = { version = "0.1.0", path = "../huella-review" }
 huella-store = { version = "0.1.0", path = "../huella-store" }
+rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tiny_http = "0.12.0"

@@ -1,0 +1,9 @@
+# `dist` sí se versiona: el binario la incrusta y así `cargo install` no necesita Node.
+node_modules
+*.local
+*.log
+
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
