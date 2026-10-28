@@ -51,6 +51,33 @@ Code:
 claude mcp add huella -- huella mcp
 ```
 
+## La aplicación
+
+```sh
+huella ui                            # abre la aplicación local en el navegador
+```
+
+Todo lo de Huella en un sitio, sin salir de tu máquina:
+
+- **Buscar** en la memoria por palabras y, con un modelo de embeddings, por
+  significado; cada resultado lleva a su sesión, a sus símbolos o al fichero en
+  el editor.
+- **Decisiones y ADRs**: por alcance (proyecto, tuyas, por carpeta) y estado;
+  corrige el estado con un clic y exporta los ADRs del proyecto.
+- **Sesiones y revisión**: el guion de cada sesión paso a paso, con las líneas
+  sin explicación resaltadas; `j`/`k` para moverse y `r` para marcar revisado.
+- **Memoria de un símbolo**: su historia, también si se renombró o se movió.
+- **Estado**: supervivencia a refactors, vectores y extracción de decisiones,
+  que se lanzan desde aquí y corren en segundo plano.
+- `⌘K` para ir a cualquier sitio, cambiar de proyecto o lanzar una tarea.
+  Tema claro, oscuro o el del sistema.
+
+Escucha solo en `127.0.0.1` (puerto 4848 o uno libre), con un token por
+ejecución en la URL. Opciones: `--editor vscode`, `--no-browser` y, para
+extraer decisiones desde la aplicación, las mismas que `decisions extract`
+(`--provider openai-compatible --base-url … --model …`). La interfaz está en
+[`ui/`](ui/README.md).
+
 ## Uso desde la terminal
 
 ```sh
@@ -224,7 +251,8 @@ código solo donde indiques.
 | `huella-engine` | Casos de uso: indexar y consultar |
 | `huella-lsp` | Servidor LSP |
 | `huella-review` | Modelo de revisión, plan por flujo y puntos de atención |
-| `huella-cli` | Binario `huella` |
+| `huella-cli` | Binario `huella` y servidor de `huella ui` |
+| `ui` | Interfaz de `huella ui` (React, shadcn/ui, Magic UI), incrustada en el binario |
 | `huella-decisions` | Extracción de decisiones con modelos intercambiables |
 | `extensions/vscode` | Extensión de VS Code (envoltorio del servidor) |
 | `extensions/zed` | Extensión de Zed (envoltorio del servidor) |
@@ -273,6 +301,7 @@ Extracción de decisiones con Qwen3.6-35B-A3B en llama.cpp propio: 13 sesiones
 cargo test                    # tests de todos los crates, incluido el protocolo LSP
 cargo clippy --all-targets    # lints (pedantic activado en el workspace)
 cargo fmt
+pnpm --dir ui build           # tras cambiar la interfaz: recompila ui/dist (se versiona)
 ```
 
 Decisiones de arquitectura en [docs/adr](docs/adr).

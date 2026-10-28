@@ -5,6 +5,7 @@ mod report;
 mod review;
 mod sample;
 mod search;
+mod ui;
 mod web;
 
 use std::fs;
@@ -94,6 +95,29 @@ enum Command {
         /// Incluir decisiones reemplazadas, rechazadas o solo propuestas.
         #[arg(long)]
         all: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Abre la aplicación local de Huella: buscar en la memoria, decisiones y
+    /// ADRs, revisión de sesiones y estado, con las tareas largas en segundo plano.
+    Ui {
+        /// Puerto local. Uno fijo conserva entre ejecuciones lo que recuerda el
+        /// navegador (tema, proyecto); si está ocupado se usa uno libre.
+        #[arg(long, default_value_t = ui::DEFAULT_PORT)]
+        port: u16,
+        /// No abre el navegador; solo imprime la URL.
+        #[arg(long)]
+        no_browser: bool,
+        /// Editor al que lleva «Abrir en…».
+        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
+        editor: web::Editor,
+        /// Desarrollo de la interfaz: acepta el servidor de Vite (`pnpm --dir ui dev`).
+        #[arg(long)]
+        dev: bool,
+        /// Modelo para extraer decisiones desde la aplicación.
+        #[command(flatten)]
+        model: ModelArgs,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -282,7 +306,7 @@ enum ReviewCommand {
 }
 
 /// Qué modelo usar para las tareas que lo necesitan.
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 struct ModelArgs {
     /// Proveedor del modelo.
     #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
@@ -341,6 +365,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             emit(&search::render_hits(&hits));
             Ok(())
+        }
+        Command::Ui { port, no_browser, editor, dev, model, projects } => {
+            ui_command(cli.db, port, !no_browser, editor, dev, model, projects)
         }
         Command::Embed { model, base_url, limit, projects } => {
             let embedder = embedder(model, base_url)
@@ -547,6 +574,23 @@ fn first_pending(
         .iter()
         .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// `huella ui`: la aplicación local.
+fn ui_command(
+    db: Option<PathBuf>,
+    port: u16,
+    open_browser: bool,
+    editor: web::Editor,
+    dev: bool,
+    model: ModelArgs,
+    projects: Option<PathBuf>,
+) -> Result<()> {
+    let db = db.or_else(huella_engine::default_db_path).context("no se encontró dónde guardar datos; usa --db")?;
+    if let Some(dir) = db.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    ui::serve(ui::Options { port, open_browser, editor, dev, db, projects: projects_dir(projects)?, model })
 }
 
 /// `huella adr`: exporta los ADRs del proyecto.

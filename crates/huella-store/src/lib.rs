@@ -375,15 +375,33 @@ pub enum SearchHit {
         /// Fragmento con las palabras buscadas marcadas con `[` `]`.
         snippet: String,
         paths: Vec<String>,
-        symbols: Vec<String>,
+        symbols: Vec<HitSymbol>,
         edits: usize,
         score: f64,
+        found_by: FoundBy,
     },
     Decision {
         decision: Box<StoredDecision>,
         snippet: String,
         score: f64,
+        found_by: FoundBy,
     },
+}
+
+/// Un símbolo que tocó una petición, con su fichero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HitSymbol {
+    pub path: String,
+    pub name: String,
+}
+
+/// Qué búsqueda encontró un resultado.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FoundBy {
+    #[default]
+    Words,
+    Meaning,
+    Both,
 }
 
 impl SearchHit {
@@ -973,6 +991,7 @@ impl Store {
         let project_prefix = query.project.as_ref().map(|project| format!("{}/", project.trim_end_matches('/')));
         let mut lists: Vec<Vec<String>> = Vec::new();
         let mut by_key: HashMap<String, SearchHit> = HashMap::new();
+        let mut by_meaning: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(fts) = fts_query(&query.text) {
             let requests = self.search_requests(&fts, project_prefix.as_deref())?;
             let decisions = self.search_decisions(&fts, query)?;
@@ -981,20 +1000,30 @@ impl Store {
             by_key.extend(requests.into_iter().chain(decisions));
         }
         if let Some(semantic) = semantic {
-            lists.push(self.nearest(semantic, SEMANTIC_CANDIDATES)?);
+            let nearest = self.nearest(semantic, SEMANTIC_CANDIDATES)?;
+            by_meaning.extend(nearest.iter().cloned());
+            lists.push(nearest);
         }
         let mut hits = Vec::new();
         for (key, score) in fuse_ranks(&lists) {
             if hits.len() >= query.limit.max(1) {
                 break;
             }
-            let hit = match by_key.remove(&key) {
-                Some(hit) => Some(hit),
-                None => self.hit_for_key(&key, query, project_prefix.as_deref())?,
+            let (hit, by_words) = match by_key.remove(&key) {
+                Some(hit) => (Some(hit), true),
+                None => (self.hit_for_key(&key, query, project_prefix.as_deref())?, false),
+            };
+            let found = match (by_words, by_meaning.contains(&key)) {
+                (true, true) => FoundBy::Both,
+                (false, _) => FoundBy::Meaning,
+                (true, false) => FoundBy::Words,
             };
             if let Some(mut hit) = hit {
                 match &mut hit {
-                    SearchHit::Request { score: s, .. } | SearchHit::Decision { score: s, .. } => *s = score,
+                    SearchHit::Request { score: s, found_by, .. } | SearchHit::Decision { score: s, found_by, .. } => {
+                        *s = score;
+                        *found_by = found;
+                    }
                 }
                 hits.push(hit);
             }
@@ -1048,7 +1077,7 @@ impl Store {
                 let active = query.include_inactive || decision.status == "accepted";
                 Ok((in_project && active).then(|| {
                     let snippet = decision.decision.chars().take(160).collect();
-                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 }
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0, found_by: FoundBy::Words }
                 }))
             }
             _ => Ok(None),
@@ -1179,11 +1208,23 @@ impl Store {
             if let Some(decision) = self.decision(id)? {
                 hits.push((
                     format!("decision\u{1f}{}", decision.uid),
-                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0 },
+                    SearchHit::Decision { decision: Box::new(decision), snippet, score: 0.0, found_by: FoundBy::Words },
                 ));
             }
         }
         Ok(hits)
+    }
+
+    /// Proyectos con alguna decisión.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn decision_projects(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT DISTINCT project FROM decision WHERE project IS NOT NULL ORDER BY project")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Una decisión por su id.
@@ -1482,6 +1523,7 @@ fn group_requests(rows: impl Iterator<Item = rusqlite::Result<RequestRow>>) -> R
                 symbols: Vec::new(),
                 edits: 0,
                 score: 0.0,
+                found_by: FoundBy::Words,
             }
         });
         if let SearchHit::Request { at: latest, paths, symbols: all, edits, .. } = hit {
@@ -1489,13 +1531,13 @@ fn group_requests(rows: impl Iterator<Item = rusqlite::Result<RequestRow>>) -> R
             if at > *latest {
                 latest.clone_from(&at);
             }
+            for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
+                if !all.iter().any(|known| known.name == symbol && known.path == path) {
+                    all.push(HitSymbol { path: path.clone(), name: symbol.to_owned() });
+                }
+            }
             if !paths.contains(&path) {
                 paths.push(path);
-            }
-            for symbol in symbols.as_deref().unwrap_or_default().split('\u{1f}').filter(|s| !s.is_empty()) {
-                if !all.iter().any(|known| known == symbol) {
-                    all.push(symbol.to_owned());
-                }
             }
         }
     }
@@ -1776,7 +1818,10 @@ mod tests {
         assert_eq!(hits.len(), 1, "las dos ediciones de la petición se agrupan: {hits:?}");
         let SearchHit::Request { session_id, edits, symbols, snippet, .. } = &hits[0] else { panic!("{hits:?}") };
         assert_eq!((session_id.as_str(), *edits), ("s1", 2));
-        assert_eq!(symbols, &vec!["UserService.hashPassword".to_owned()]);
+        assert_eq!(
+            symbols,
+            &vec![HitSymbol { path: "/repo/src/user.ts".into(), name: "UserService.hashPassword".into() }]
+        );
         assert!(snippet.contains("[migración]"), "{snippet}");
 
         assert_eq!(search(&store, "password").len(), 1, "por las palabras del identificador");
