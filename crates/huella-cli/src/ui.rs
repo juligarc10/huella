@@ -474,7 +474,7 @@ fn run_job(
             if let Some(failure) = report.failure {
                 bail!("el modelo falló tras {} vectores: {failure}", report.embedded);
             }
-            Ok(json!({"embedded": report.embedded}))
+            Ok(json!({"embedded": report.embedded, "skipped": report.skipped}))
         }
         "refactors" => {
             let report = huella_engine::refactor_bench::refactor_benchmark(&store, 600)?;

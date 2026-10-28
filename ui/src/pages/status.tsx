@@ -231,7 +231,10 @@ function JobState({ job }: { job: Job }) {
 
 function summary(job: Job): string {
   const result = job.result ?? {}
-  if (typeof result.embedded === 'number') return ` · ${result.embedded} vectores`
+  if (typeof result.embedded === 'number') {
+    const skipped = typeof result.skipped === 'number' && result.skipped > 0 ? `, ${result.skipped} demasiado largos` : ''
+    return ` · ${result.embedded} vectores${skipped}`
+  }
   if (typeof result.decisions === 'number') return ` · ${result.decisions} decisiones nuevas`
   if (typeof result.new_edits === 'number') return ` · ${result.new_edits} ediciones nuevas`
   return ''
