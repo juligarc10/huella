@@ -98,6 +98,20 @@ enum Command {
         #[arg(long)]
         projects: Option<PathBuf>,
     },
+    /// Exporta las decisiones del proyecto como ADRs en markdown, para
+    /// versionarlas con el código. Volver a exportar conserva los números y no
+    /// pisa los ADRs editados a mano.
+    Adr {
+        /// Proyecto (por defecto, el repositorio de la carpeta actual).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Carpeta de salida (por defecto `docs/adr` dentro del proyecto).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Incluye también las decisiones descartadas y solo propuestas.
+        #[arg(long)]
+        all: bool,
+    },
     /// Decisiones de proyecto extraídas de las conversaciones.
     Decisions {
         #[command(subcommand)]
@@ -302,6 +316,7 @@ fn run(cli: Cli) -> Result<()> {
             emit(&search::render_hits(&store.search(&query)?));
             Ok(())
         }
+        Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
             let extractor = build_model(model)?;
@@ -491,6 +506,35 @@ fn first_pending(
         .iter()
         .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// `huella adr`: exporta los ADRs del proyecto.
+fn adr(store: &huella_store::Store, project: Option<PathBuf>, out: Option<PathBuf>, all: bool) -> Result<()> {
+    let project = if let Some(path) = project {
+        fs::canonicalize(&path).unwrap_or(path)
+    } else {
+        let here = std::env::current_dir()?;
+        here.ancestors().find(|dir| dir.join(".git").exists()).map_or(here.clone(), Path::to_path_buf)
+    };
+    let key = huella_engine::normalize_path(&project, None);
+    let out = out.unwrap_or_else(|| Path::new(&key).join("docs").join("adr"));
+    let report = huella_engine::adr::export_adrs(store, &key, &out, all)?;
+    let total = report.written.len() + report.unchanged + report.edited_by_hand.len();
+    if total == 0 {
+        println!("{key} no tiene decisiones que exportar. Extráelas con `huella decisions extract`.");
+        return Ok(());
+    }
+    println!("ADRs de {key} en {}: {} escritos, {} al día", out.display(), report.written.len(), report.unchanged);
+    for path in &report.written {
+        println!("  escrito: {}", path.display());
+    }
+    for path in &report.edited_by_hand {
+        println!("  editado a mano, no se toca: {}", path.display());
+    }
+    for path in &report.orphaned {
+        println!("  su decisión ya no existe (no se borra): {}", path.display());
+    }
+    Ok(())
 }
 
 /// `huella refactors`: el criterio de salida de la F3.

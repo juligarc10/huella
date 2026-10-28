@@ -1,6 +1,7 @@
 //! Casos de uso de Huella: indexar transcripciones y consultar la memoria de
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
+pub mod adr;
 mod decisions;
 mod index;
 pub mod lineage;
@@ -31,6 +32,8 @@ pub enum EngineError {
     Extraction(#[from] huella_anchoring::ExtractionError),
     #[error("{0}")]
     Git(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]
