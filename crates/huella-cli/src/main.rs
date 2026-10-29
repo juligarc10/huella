@@ -262,6 +262,45 @@ enum ReviewCommand {
     },
     /// Quita la revisión activa del editor.
     Stop,
+    /// Comenta un paso de la revisión para que el agente lo corrija.
+    Comment {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Número del paso, como lo muestra `review show`.
+        step: usize,
+        /// Qué hay que cambiar.
+        text: String,
+        /// La línea del cambio a la que se refiere (su texto).
+        #[arg(long)]
+        line: Option<String>,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Instrucciones para el agente con lo que hay que corregir (comentarios
+    /// abiertos y pasos marcados para cambiar o deshacer).
+    Feedback {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Pregunta a la sesión por un paso o por todo lo que hizo.
+    Ask {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// La pregunta.
+        question: String,
+        /// Número del paso, como lo muestra `review show`; sin él, la sesión entera.
+        #[arg(long)]
+        step: Option<usize>,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Genera con un modelo el resumen de cada turno, notas por paso y riesgos.
     Narrate {
         /// Id de la sesión o su comienzo.
@@ -471,6 +510,9 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             println!("Sin revisión activa.");
             Ok(())
         }
+        action @ (ReviewCommand::Comment { .. } | ReviewCommand::Feedback { .. } | ReviewCommand::Ask { .. }) => {
+            review_loop_command(db, action)
+        }
         ReviewCommand::Narrate { session, model, projects } => {
             let model = build_model(model)?;
             let store = open_store(db)?;
@@ -571,6 +613,52 @@ fn first_pending(
         .iter()
         .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// `huella review comment|feedback|ask`: el bucle de corrección.
+fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
+    let store = open_store(db)?;
+    let pick = |plan: &[huella_review::flow::FlowStep], step: usize| -> Result<usize> {
+        let index = step.checked_sub(1).filter(|&i| i < plan.len());
+        index.with_context(|| format!("la revisión tiene {} pasos; elige uno de 1 a {}", plan.len(), plan.len()))
+    };
+    match action {
+        ReviewCommand::Comment { session, step, text, line, projects } => {
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let chosen = &plan[pick(&plan, step)?];
+            let key = chosen.key(&review);
+            let id = store.add_comment(&huella_store::NewComment {
+                session_id: &review.session_id,
+                step_key: &key,
+                path: &review.files[chosen.file].path,
+                symbol: chosen.symbol.as_ref().map(|s| s.qualified_name.as_str()),
+                quote: line.as_deref(),
+                body: &text,
+            })?;
+            store.set_review_status(&review.session_id, Some("changes_requested"), Some(plan.len()))?;
+            println!(
+                "Comentario {id} en el paso {step}. `huella review feedback {session}` da las instrucciones para el agente."
+            );
+            Ok(())
+        }
+        ReviewCommand::Feedback { session, projects } => {
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            emit(&huella_engine::review_loop::feedback(&store, &review, &plan)?.markdown);
+            Ok(())
+        }
+        ReviewCommand::Ask { session, question, step, model, projects } => {
+            let model = build_model(model)?;
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let step = step.map(|step| pick(&plan, step)).transpose()?;
+            let answer = huella_engine::review_loop::ask(&store, model.as_ref(), &review, &plan, step, &question)?;
+            emit(&format!("{}\n\n({})\n", answer.answer, answer.model));
+            Ok(())
+        }
+        _ => unreachable!("solo comandos del bucle de corrección"),
+    }
 }
 
 /// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.

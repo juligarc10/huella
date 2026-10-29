@@ -977,6 +977,17 @@ impl Store {
         Ok(())
     }
 
+    /// Estado guardado de una sesión en la bandeja; `None` si nunca se cambió.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_status(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT status FROM review_state WHERE session_id = ?1", [session_id], |row| row.get(0))
+            .optional()?)
+    }
+
     /// Guarda cuántos pasos tiene la revisión de una sesión sin cambiar su estado.
     ///
     /// # Errors

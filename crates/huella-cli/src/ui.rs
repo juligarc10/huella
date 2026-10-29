@@ -59,7 +59,20 @@ struct App {
     model: ModelArgs,
     /// La última revisión cargada: reconstruirla relee las transcripciones.
     review: Option<(SessionReview, Vec<FlowStep>)>,
+    /// Preguntas que el modelo aún está respondiendo, por sesión.
+    asking: Asking,
 }
+
+/// Una pregunta a la sesión en curso o que falló.
+#[derive(Debug, Clone, Serialize)]
+struct PendingAsk {
+    question: String,
+    step: Option<usize>,
+    /// Si el modelo falló, por qué.
+    error: Option<String>,
+}
+
+type Asking = Arc<Mutex<HashMap<String, Vec<PendingAsk>>>>;
 
 /// Estado de una tarea en segundo plano.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -104,6 +117,7 @@ pub fn serve(options: Options) -> Result<()> {
         jobs,
         model: options.model,
         review: None,
+        asking: Arc::new(Mutex::new(HashMap::new())),
     };
     if options.dev && Assets::get("index.html").is_none() {
         println!("(sin ui/dist: la interfaz la sirve Vite)");
@@ -162,8 +176,14 @@ fn api(
         (Method::Post, ["adr"]) => export_adr(app, body)?,
         (Method::Get, ["symbol"]) => symbol(app, params)?,
         (Method::Get, ["sessions"]) => sessions(app, params)?,
+        (Method::Get, ["inbox"]) => inbox(app)?,
         (Method::Get, ["review", session]) => review(app, session)?,
         (Method::Post, ["review", session, "mark"]) => mark(app, session, body)?,
+        (Method::Post, ["review", session, "status"]) => set_status_of_review(app, session, body)?,
+        (Method::Post, ["review", session, "comments"]) => add_comment(app, session, body)?,
+        (Method::Get, ["review", session, "feedback"]) => feedback(app, session)?,
+        (Method::Post, ["review", session, "ask"]) => return ask(app, session, body),
+        (Method::Post, ["comments", id]) => update_comment(app, id, body)?,
         (Method::Get, ["status"]) => status(app)?,
         (Method::Get, ["jobs"]) => json!({"jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner)}),
         (Method::Post, ["jobs", kind]) => return Ok(start_job(app, kind)),
@@ -345,15 +365,198 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     let mut value = crate::web::payload(review, plan, &app.store.review_marks(&review.session_id)?, app.editor);
     value["narrations"] = serde_json::to_value(&narrations)?;
     value["project"] = json!(huella_engine::session_project(&app.store, &review.session_id)?);
+    // Veredicto de cada paso, si se dio con su contenido actual.
+    let verdicts = app.store.review_verdicts(&review.session_id)?;
+    if let Some(steps) = value["steps"].as_array_mut() {
+        for (step, flow) in steps.iter_mut().zip(plan) {
+            let verdict = verdicts
+                .get(&flow.key(review))
+                .filter(|v| v.content_hash == flow.content_hash())
+                .map(|v| v.verdict.as_str());
+            step["verdict"] = json!(verdict);
+        }
+    }
+    app.store.record_review_steps(&review.session_id, plan.len())?;
+    let states = app.store.review_states()?;
+    value["status"] = json!(states.get(&review.session_id).map_or("pending", |s| s.status.as_str()));
+    value["comments"] = json!(app.store.comments(&review.session_id)?.iter().map(comment_json).collect::<Vec<_>>());
+    value["questions"] = json!(app.store.questions(&review.session_id)?.iter().map(|q| json!({
+        "id": q.id, "step_key": q.step_key, "question": q.question, "answer": q.answer, "model": q.model, "created_at": q.created_at,
+    })).collect::<Vec<_>>());
+    value["asking"] = json!(
+        app.asking.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id).cloned().unwrap_or_default()
+    );
+    let (follow_ups, hints) = huella_engine::review_loop::follow_up(&app.store, review)?;
+    value["follow_ups"] = json!(follow_ups.iter().map(|f| json!({
+        "session_id": f.session_id, "paths": f.paths, "last_at": f.last_at, "same_session": f.session_id == review.session_id,
+    })).collect::<Vec<_>>());
+    value["hints"] = json!(
+        hints
+            .iter()
+            .map(|h| json!({"id": h.id, "quote_gone": h.quote_gone, "edited_after": h.edited_after}))
+            .collect::<Vec<_>>()
+    );
+    value["ask_model"] = json!(extractor_label(&app.model));
     Ok(value)
+}
+
+/// La bandeja: sesiones recientes con su estado de revisión.
+fn inbox(app: &App) -> Result<Value> {
+    let states = app.store.review_states()?;
+    let sessions = huella_engine::list_sessions(&app.store, 100)?;
+    let items: Vec<Value> = sessions
+        .iter()
+        .map(|listing| {
+            let state = states.get(&listing.summary.id);
+            let mut item = session_json(listing);
+            item["status"] = json!(state.map_or("pending", |s| s.status.as_str()));
+            item["steps"] = json!(state.and_then(|s| s.steps));
+            item["reviewed"] = json!(state.map_or(0, |s| s.reviewed));
+            item["open_comments"] = json!(state.map_or(0, |s| s.open_comments));
+            item["status_at"] = json!(state.map(|s| s.updated_at.clone()));
+            item
+        })
+        .collect();
+    Ok(json!({"sessions": items}))
+}
+
+fn comment_json(comment: &huella_store::ReviewComment) -> Value {
+    json!({
+        "id": comment.id,
+        "step_key": comment.step_key,
+        "path": comment.path,
+        "symbol": comment.symbol,
+        "quote": comment.quote,
+        "body": comment.body,
+        "status": comment.status,
+        "created_at": comment.created_at,
+        "resolved_at": comment.resolved_at,
+        "resolution": comment.resolution,
+    })
+}
+
+/// Pasa la sesión a «en revisión» la primera vez que se marca o comenta algo.
+fn start_reviewing(app: &App, session_id: &str, steps: usize) -> Result<()> {
+    if app.store.review_status(session_id)?.is_none() {
+        app.store.set_review_status(session_id, Some("in_review"), Some(steps))?;
+    }
+    Ok(())
+}
+
+fn set_status_of_review(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let status = request["status"].as_str().unwrap_or_default();
+    if !matches!(status, "pending" | "in_review" | "changes_requested" | "approved") {
+        bail!("estado desconocido: {status}");
+    }
+    load_review(app, session)?;
+    let (session_id, steps) = app
+        .review
+        .as_ref()
+        .map(|(review, plan)| (review.session_id.clone(), plan.len()))
+        .context("revisión no cargada")?;
+    app.store.set_review_status(&session_id, (status != "pending").then_some(status), Some(steps))?;
+    Ok(json!({"status": status}))
+}
+
+fn add_comment(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let key = request["key"].as_str().context("falta key")?;
+    let text = request["body"].as_str().map(str::trim).filter(|t| !t.is_empty()).context("el comentario está vacío")?;
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let step = plan.iter().find(|step| step.key(review) == key).context("ese paso ya no existe")?;
+    let comment = huella_store::NewComment {
+        session_id: &review.session_id,
+        step_key: key,
+        path: &review.files[step.file].path,
+        symbol: step.symbol.as_ref().map(|s| s.qualified_name.as_str()),
+        quote: request["quote"].as_str().filter(|q| !q.trim().is_empty()),
+        body: text,
+    };
+    let id = app.store.add_comment(&comment)?;
+    start_reviewing(app, &review.session_id, plan.len())?;
+    Ok(json!({"id": id}))
+}
+
+fn update_comment(app: &App, id: &str, body: &str) -> Result<Value> {
+    let id: i64 = id.parse().context("id de comentario no válido")?;
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let found = match request["status"].as_str() {
+        Some("deleted") => app.store.delete_comment(id)?,
+        Some(status @ ("open" | "resolved" | "dismissed")) => {
+            app.store.set_comment_status(id, status, request["resolution"].as_str())?
+        }
+        other => bail!("estado desconocido: {other:?}"),
+    };
+    if !found {
+        bail!("no hay ningún comentario {id}");
+    }
+    Ok(json!({}))
+}
+
+fn feedback(app: &mut App, session: &str) -> Result<Value> {
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let feedback = huella_engine::review_loop::feedback(&app.store, review, plan)?;
+    Ok(json!({"markdown": feedback.markdown, "items": feedback.items}))
+}
+
+/// Pregunta a la sesión: la responde un hilo con el modelo configurado y la
+/// revisión la muestra como pendiente mientras tanto.
+fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let question = request["question"]
+        .as_str()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .context("la pregunta está vacía")?
+        .to_owned();
+    let step = request["step"].as_u64().and_then(|s| usize::try_from(s).ok());
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let session_id = review.session_id.clone();
+    let pending = PendingAsk { question: question.clone(), step, error: None };
+    app.asking.lock().unwrap_or_else(PoisonError::into_inner).entry(session_id.clone()).or_default().push(pending);
+    let (asking, db, model) = (Arc::clone(&app.asking), app.db.clone(), app.model.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let extractor = crate::build_model(model)?;
+            huella_engine::review_loop::ask(&store, extractor.as_ref(), &review, &plan, step, &question)?;
+            Ok(())
+        })();
+        let mut all = asking.lock().unwrap_or_else(PoisonError::into_inner);
+        let list = all.entry(session_id).or_default();
+        if let Some(index) = list.iter().position(|p| p.question == question && p.error.is_none()) {
+            match outcome {
+                Ok(()) => {
+                    list.remove(index);
+                }
+                Err(error) => list[index].error = Some(format!("{error:#}")),
+            }
+        }
+    });
+    Ok((202, json!({"asking": true})))
 }
 
 fn mark(app: &mut App, session: &str, body: &str) -> Result<Value> {
     let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
     let (key, hash) = (request["key"].as_str().context("falta key")?, request["hash"].as_str().context("falta hash")?);
     load_review(app, session)?;
-    let session_id = app.review.as_ref().map(|(review, _)| review.session_id.clone()).context("revisión no cargada")?;
-    app.store.set_review_mark(&session_id, key, hash, request["reviewed"].as_bool().unwrap_or(true))?;
+    let (session_id, steps) = app
+        .review
+        .as_ref()
+        .map(|(review, plan)| (review.session_id.clone(), plan.len()))
+        .context("revisión no cargada")?;
+    // `verdict` (ok, change, discard o null) o, como antes, `reviewed`.
+    let verdict = match request.get("verdict") {
+        Some(Value::String(text)) => Some(huella_store::Verdict::parse(text).context("veredicto desconocido")?),
+        Some(Value::Null) => None,
+        _ => request["reviewed"].as_bool().unwrap_or(true).then_some(huella_store::Verdict::Ok),
+    };
+    app.store.set_step_verdict(&session_id, key, hash, verdict)?;
+    start_reviewing(app, &session_id, steps)?;
     Ok(json!({}))
 }
 

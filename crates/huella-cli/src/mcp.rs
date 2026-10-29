@@ -130,6 +130,16 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "huella_review_feedback",
+            "description": "Lo que la persona pidió corregir al revisar una sesión: cada comentario con su fichero, su \
+                            función, la línea y el código del cambio, y los cambios que pidió deshacer. Úsala cuando te \
+                            pidan aplicar las correcciones de la revisión. Sin sesión, la más reciente con cambios pedidos.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session": {"type": "string", "description": "Id de la sesión revisada o su comienzo"}}
+            }
+        },
+        {
             "name": "huella_sessions",
             "description": "Sesiones recientes con ediciones, con su proyecto.",
             "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}
@@ -144,6 +154,7 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
         "huella_symbol_history" => symbol_history(&context.store, arguments),
         "huella_decisions" => decisions(&context.store, arguments),
         "huella_review" => review(context, arguments),
+        "huella_review_feedback" => review_feedback(context, arguments),
         "huella_search" => {
             let query = huella_store::SearchQuery {
                 text: arguments["query"].as_str().ok_or_else(|| anyhow::anyhow!("falta `query`"))?.to_owned(),
@@ -170,6 +181,21 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
         }
         other => anyhow::bail!("herramienta desconocida: {other}"),
     }
+}
+
+fn review_feedback(context: &Context, arguments: &Value) -> Result<String> {
+    let session = if let Some(session) = arguments["session"].as_str() {
+        session.to_owned()
+    } else {
+        let states = context.store.review_states()?;
+        let pending =
+            states.values().filter(|s| s.status == "changes_requested").max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        let Some(state) = pending else { return Ok("No hay ninguna revisión con cambios pedidos.".to_owned()) };
+        state.session_id.clone()
+    };
+    let review = huella_engine::session_review(&context.sources, &session)?;
+    let plan = huella_review::flow::plan(&review);
+    Ok(huella_engine::review_loop::feedback(&context.store, &review, &plan)?.markdown)
 }
 
 fn symbol_history(store: &Store, arguments: &Value) -> Result<String> {
@@ -284,7 +310,14 @@ mod tests {
             tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            vec!["huella_symbol_history", "huella_decisions", "huella_review", "huella_search", "huella_sessions"]
+            vec![
+                "huella_symbol_history",
+                "huella_decisions",
+                "huella_review",
+                "huella_search",
+                "huella_review_feedback",
+                "huella_sessions"
+            ]
         );
     }
 

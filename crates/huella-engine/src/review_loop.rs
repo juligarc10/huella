@@ -52,6 +52,14 @@ pub fn feedback(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> cra
         .collect();
 
     let short = &review.session_id[..8.min(review.session_id.len())];
+    // El agente trabaja desde la carpeta del proyecto: rutas relativas a ella.
+    let project = crate::session_project(store, &review.session_id)?;
+    let shown = |path: &str| -> String {
+        project
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root))
+            .map_or_else(|| path.to_owned(), |rest| rest.trim_start_matches('/').to_owned())
+    };
     let mut out = String::new();
     let _ = writeln!(out, "# Correcciones de la revisión de la sesión {short}\n");
     if comments.is_empty() && flagged.is_empty() {
@@ -67,10 +75,8 @@ pub fn feedback(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> cra
         number += 1;
         let step = plan.iter().enumerate().find(|(_, step)| step.key(review) == comment.step_key);
         let verdict = verdicts.get(&comment.step_key).map(|v| v.verdict);
-        let place = comment
-            .symbol
-            .as_deref()
-            .map_or_else(|| format!("`{}`", comment.path), |s| format!("`{s}` en `{}`", comment.path));
+        let path = shown(&comment.path);
+        let place = comment.symbol.as_deref().map_or_else(|| format!("`{path}`"), |s| format!("`{s}` en `{path}`"));
         let _ = writeln!(out, "\n## {number}. {place}\n");
         if let Some(prompt) = step.and_then(|(_, s)| turn_prompt(review, s)) {
             let _ = writeln!(out, "Parte de la petición: «{}»\n", clip(&one_line(&prompt), 200));
@@ -89,8 +95,11 @@ pub fn feedback(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> cra
     for (_, step, verdict) in &flagged {
         number += 1;
         let path = &review.files[step.file].path;
-        let place =
-            step.symbol.as_ref().map_or_else(|| format!("`{path}`"), |s| format!("`{}` en `{path}`", s.qualified_name));
+        let relative = shown(path);
+        let place = step
+            .symbol
+            .as_ref()
+            .map_or_else(|| format!("`{relative}`"), |s| format!("`{}` en `{relative}`", s.qualified_name));
         let _ = writeln!(out, "\n## {number}. {place}\n");
         out.push_str(match verdict {
             Verdict::Discard => "Deshaz este cambio.\n",
