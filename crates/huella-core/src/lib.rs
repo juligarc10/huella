@@ -4,6 +4,7 @@
 //! convierte en un [`AnchorOutcome`] que apunta a [`Symbol`]s del código. Este
 //! crate no conoce ningún formato de transcripción ni ningún parser.
 
+pub mod agent;
 mod fingerprint;
 
 use std::ops::Range;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+pub use agent::{Agent, AgentBatch, AgentError};
 pub use fingerprint::{Fingerprint, SELF_TOKEN, SKETCH_SIZE};
 
 /// De dónde viene una edición: agente, sesión y evento concreto.

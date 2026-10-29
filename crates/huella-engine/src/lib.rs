@@ -12,6 +12,7 @@ mod query;
 pub mod refactor_bench;
 mod render;
 mod review;
+mod sources;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -22,13 +23,14 @@ pub use paths::normalize_path;
 pub use query::{SymbolLens, SymbolMemory, lenses, lenses_with, memory_at, memory_at_with, memory_of};
 pub use render::render_markdown;
 pub use review::{SessionListing, list_sessions, session_project, session_review};
+pub use sources::Sources;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(transparent)]
     Store(#[from] huella_store::StoreError),
     #[error(transparent)]
-    Transcript(#[from] huella_claude_code::TranscriptError),
+    Agent(#[from] huella_core::AgentError),
     #[error(transparent)]
     Extraction(#[from] huella_anchoring::ExtractionError),
     #[error("{0}")]

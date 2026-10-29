@@ -45,7 +45,7 @@ impl Fixture {
 
     fn index(&self) {
         let mut store = Store::open(&self.db).unwrap();
-        huella_engine::index(&mut store, &self.projects).unwrap();
+        huella_engine::index(&mut store, &huella_engine::Sources::claude_code(&self.projects)).unwrap();
     }
 
     fn uri(&self) -> Value {
@@ -133,7 +133,11 @@ impl Client {
 }
 
 fn config(fixture: &Fixture, projects: Option<&Path>) -> Config {
-    Config { db: fixture.db.clone(), projects: projects.map(Path::to_path_buf), index_every: Duration::from_secs(3600) }
+    Config {
+        db: fixture.db.clone(),
+        sources: projects.map(huella_engine::Sources::claude_code),
+        index_every: Duration::from_secs(3600),
+    }
 }
 
 #[test]

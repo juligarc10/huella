@@ -51,8 +51,8 @@ pub type Result<T> = std::result::Result<T, ServerError>;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub db: PathBuf,
-    /// Transcripciones a indexar en segundo plano; `None` desactiva el indexado.
-    pub projects: Option<PathBuf>,
+    /// Agentes cuyas sesiones se indexan en segundo plano; `None` desactiva el indexado.
+    pub sources: Option<huella_engine::Sources>,
     pub index_every: Duration,
 }
 
@@ -102,7 +102,7 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         store: Store::open(&config.db)?,
         documents: HashMap::new(),
         next_request: 0,
-        projects: config.projects.clone(),
+        sources: config.sources.clone(),
         review: None,
         published: HashSet::new(),
     };
@@ -143,7 +143,7 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
 /// tumbar el servidor: la memoria ya indexada sigue sirviéndose.
 fn spawn_indexer(config: &Config) -> Receiver<usize> {
     let (sender, receiver) = crossbeam_channel::unbounded();
-    let Some(projects) = config.projects.clone() else { return receiver };
+    let Some(sources) = config.sources.clone() else { return receiver };
     let (db, every) = (config.db.clone(), config.index_every);
     thread::spawn(move || {
         let mut store = match Store::open(&db) {
@@ -151,7 +151,7 @@ fn spawn_indexer(config: &Config) -> Receiver<usize> {
             Err(error) => return eprintln!("huella: no se pudo abrir {} para indexar: {error}", db.display()),
         };
         loop {
-            match huella_engine::index(&mut store, &projects) {
+            match huella_engine::index(&mut store, &sources) {
                 Ok(report) => {
                     if sender.send(report.new_edits).is_err() {
                         return;
@@ -170,7 +170,7 @@ struct Server {
     /// Contenido actual de los ficheros abiertos, que puede no estar guardado.
     documents: HashMap<Uri, String>,
     next_request: i32,
-    projects: Option<PathBuf>,
+    sources: Option<huella_engine::Sources>,
     /// Revisión activa (`huella review start`), si la hay.
     review: Option<review::ActiveReview>,
     /// Documentos con diagnosis publicadas, para poder vaciarlas.
@@ -200,7 +200,7 @@ impl Server {
     }
 
     fn reload_review(&mut self) {
-        self.review = self.projects.as_deref().and_then(|projects| review::ActiveReview::load(&self.store, projects));
+        self.review = self.sources.as_ref().and_then(|sources| review::ActiveReview::load(&self.store, sources));
     }
 
     /// Lleva a marcas lo preparado en el worktree de revisión. Devuelve si cambió algo.
