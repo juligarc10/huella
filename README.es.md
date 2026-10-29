@@ -84,8 +84,11 @@ Todo lo de Huella en un sitio, sin salir de tu máquina:
   el editor.
 - **Decisiones y ADRs**: por alcance (proyecto, tuyas, por carpeta) y estado;
   corrige el estado con un clic y exporta los ADRs del proyecto.
-- **Sesiones y revisión**: el guion de cada sesión paso a paso, con las líneas
-  sin explicación resaltadas; `j`/`k` para moverse y `r` para marcar revisado.
+- **Por revisar** (la portada): las sesiones según su estado de revisión (sin
+  revisar, en revisión, cambios pedidos, aprobada). Cada una se revisa paso a
+  paso: veredicto por paso (`r` bien, `c` cambiar, `d` deshacer; `j`/`k` para
+  moverse), comentarios sobre cualquier línea del diff, preguntas a la sesión y
+  «Pedir cambios», que da las instrucciones para el agente.
 - **Memoria de un símbolo**: su historia, también si se renombró o se movió.
 - **Estado**: supervivencia a refactors, vectores y extracción de decisiones,
   que se lanzan desde aquí y corren en segundo plano.
@@ -169,6 +172,34 @@ Cómo se arma el guion:
 Los pasos revisados se guardan con un hash de su contenido: si el código del
 paso cambia, vuelve a quedar pendiente. Web, editor y terminal comparten las
 marcas.
+
+#### Corregir lo que hizo el agente
+
+La revisión no acaba en marcar pasos: lo que no te convence se convierte en
+instrucciones para el agente, y después se revisa solo lo que cambió.
+
+```sh
+huella review comment 84e33d8e 3 "Valida el email antes de guardarlo" --line "await repo.save(user)"
+huella review feedback 84e33d8e      # las instrucciones en Markdown, listas para pegar
+huella review ask 84e33d8e "¿Por qué no reutiliza el validador?" --step 3 --provider openai-compatible …
+```
+
+- **Veredicto por paso**: *bien*, *cambiar* o *deshacer*. Como las marcas, va
+  ligado al hash del paso.
+- **Comentarios** sobre una línea (en la aplicación, clic en ella) o sobre el
+  paso entero. Comentar pasa la sesión a «cambios pedidos».
+- **Instrucciones para el agente**: cada comentario abierto y cada paso a
+  cambiar o deshacer, con el símbolo, el fichero relativo al proyecto, la parte
+  de la petición a la que respondía, la línea citada y el diff del paso. Se
+  copian desde la aplicación o el agente las pide por MCP
+  (`huella_review_feedback`, por defecto la última sesión con cambios pedidos).
+- **Seguimiento**: cuando otra sesión (o la misma) edita después esos ficheros,
+  la revisión lo avisa y enlaza con ella; cada comentario indica si su línea ya
+  no está o si el fichero cambió después, para resolverlo o reabrirlo.
+- **Preguntar a la sesión** por un paso o por toda la sesión. El modelo responde
+  con la petición, las explicaciones del agente, el diff y el código actual del
+  paso, y las preguntas anteriores. Se usa el mismo modelo que para extraer
+  decisiones, y las preguntas y respuestas se guardan (redactadas).
 
 #### En Zed, con su vista de cambios
 

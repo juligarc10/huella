@@ -32,8 +32,11 @@ Everything stays on your machine.
 3. **While coding**, hover a function to see why it exists: the request, the
    agent's explanation, the session, and whether the code changed since.
 4. **After a session**, review it in `huella ui` (or in Zed's git diff with
-   `huella review zed`): steps in flow order, unexplained lines in amber,
-   mark each step as reviewed.
+   `huella review zed`): steps in flow order, unexplained lines in amber, a
+   verdict per step (fine, change, undo), comments on any line and questions to
+   the session. **Request changes** turns the comments into instructions for the
+   agent (copy them, or the agent reads them over MCP), and the review then shows
+   what changed afterwards.
 5. **Now and then**, extract decisions, fix the ones the model got wrong and
    export them as ADRs next to your code.
 6. **Your agent reads the same memory over MCP** before touching code: symbol
@@ -69,8 +72,10 @@ claude mcp add huella -- huella mcp
 huella ui
 ```
 
-Search the memory, browse and correct decisions, export ADRs, review sessions
-step by step (`j`/`k` to move, `r` to mark reviewed), see a symbol's history and
+The home page is the review inbox: sessions by review status. Review them step
+by step (`j`/`k` to move; `r` fine, `c` change, `d` undo), comment on any diff
+line, ask the session why it did something, and request changes or approve.
+Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
 benchmark) in the background. `⌘K` jumps anywhere. It listens on `127.0.0.1`
 only, with a per-run token.
@@ -84,6 +89,9 @@ huella search rate limit              # requests, explanations, symbols and deci
 huella review list                    # recent sessions, with their agent
 huella review show 84e33d8e           # guided review in the terminal
 huella review zed 84e33d8e            # review in Zed's git diff (stage = reviewed)
+huella review comment 84e33d8e 3 "Validate the email first" --line "await repo.save(user)"
+huella review feedback 84e33d8e       # instructions for the agent, in Markdown
+huella review ask 84e33d8e "Why not reuse the validator?" --step 3
 huella decisions extract --provider openai-compatible --base-url http://localhost:11434/v1 --model qwen2.5:7b
 huella decisions list --scope user    # your preferences, valid in every project
 huella adr                            # export the project's decisions to docs/adr/
