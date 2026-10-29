@@ -12,6 +12,7 @@ mod query;
 pub mod refactor_bench;
 mod render;
 mod review;
+pub mod review_loop;
 mod sources;
 pub mod workspace;
 
@@ -37,6 +38,8 @@ pub enum EngineError {
     Git(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("el modelo falló: {0}")]
+    Model(String),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]
