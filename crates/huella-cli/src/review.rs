@@ -31,9 +31,10 @@ pub fn render_sessions(sessions: &[SessionListing]) -> String {
         let summary = &listing.summary;
         let _ = writeln!(
             out,
-            "{}  {}  {:>4} ediciones · {:>3} ficheros  {}",
+            "{}  {}  {:<11}  {:>4} ediciones · {:>3} ficheros  {}",
             &summary.id[..8.min(summary.id.len())],
             summary.last_at.as_deref().map_or("sin fecha".to_owned(), short_date),
+            summary.agent,
             summary.edits,
             summary.files,
             listing.project.as_deref().unwrap_or("(sin proyecto)")

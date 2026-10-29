@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use huella_claude_code::ClaudeCode;
+use huella_codex::Codex;
+use huella_copilot::{CopilotChat, CopilotCli};
 use huella_core::Agent;
 
 /// Los agentes cuyas sesiones se indexan. Barato de clonar: se comparte entre
@@ -23,7 +25,15 @@ impl Sources {
     /// Claude Code bajo `claude_projects`.
     #[must_use]
     pub fn detect(claude_projects: impl Into<PathBuf>) -> Self {
-        Self::claude_code(claude_projects)
+        let mut agents: Vec<Box<dyn Agent>> = vec![Box::new(ClaudeCode { projects: claude_projects.into() })];
+        // Los demás viven en carpetas conocidas de la carpeta personal; si no
+        // están instalados, simplemente no aportan sesiones.
+        if let Some(home) = dirs::home_dir() {
+            agents.push(Box::new(CopilotChat::detect(&home)));
+            agents.push(Box::new(CopilotCli::detect(&home)));
+            agents.push(Box::new(Codex::detect(&home)));
+        }
+        Self::new(agents)
     }
 
     /// Solo Claude Code, con sus transcripciones bajo `projects`.

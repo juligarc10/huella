@@ -78,6 +78,7 @@ export interface Decision {
 
 export interface SessionInfo {
   id: string
+  agent: string
   project: string | null
   first_at: string | null
   last_at: string | null

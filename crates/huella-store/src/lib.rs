@@ -348,6 +348,8 @@ pub struct StoredNarration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
+    /// `claude-code`, `copilot`, `copilot-cli`, `codex`…
+    pub agent: String,
     pub first_at: Option<String>,
     pub last_at: Option<String>,
     pub edits: usize,
@@ -856,7 +858,7 @@ impl Store {
     /// Si falla la consulta.
     pub fn sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT s.id, s.first_at, s.last_at, COUNT(e.id), COUNT(DISTINCT e.path)
+            "SELECT s.id, s.first_at, s.last_at, COUNT(e.id), COUNT(DISTINCT e.path), s.agent
              FROM session s JOIN edit e ON e.session_id = s.id
              GROUP BY s.id ORDER BY s.last_at DESC LIMIT ?1",
         )?;
@@ -868,6 +870,7 @@ impl Store {
                 last_at: row.get(2)?,
                 edits: count(3)?,
                 files: count(4)?,
+                agent: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -577,6 +577,7 @@ fn session_json(listing: &huella_engine::SessionListing) -> Value {
     let summary = &listing.summary;
     json!({
         "id": summary.id,
+        "agent": summary.agent,
         "project": listing.project,
         "first_at": summary.first_at,
         "last_at": summary.last_at,

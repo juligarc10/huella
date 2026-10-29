@@ -1,0 +1,13 @@
+[package]
+name = "huella-copilot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+huella-core = { version = "0.1.0", path = "../huella-core" }
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

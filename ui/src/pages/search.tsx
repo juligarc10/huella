@@ -13,7 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { DecisionHit, Hit, RequestHit } from '@/lib/api'
-import { baseName, cleanPrompt, clip, dateTime, oneLine, shortDate, shortId } from '@/lib/format'
+import { agentLabel, baseName, cleanPrompt, clip, dateTime, oneLine, shortDate, shortId } from '@/lib/format'
 import { useProject } from '@/lib/project'
 import { useOpenInEditor, useOverview, useSearch } from '@/lib/queries'
 import { useTheme } from '@/lib/theme'
@@ -306,7 +306,7 @@ function Welcome({ onExample }: { onExample: (example: string) => void }) {
           >
             <span className="text-sm font-semibold">{baseName(session.project) || 'sin proyecto'}</span>
             <span className="font-mono text-xs text-muted-foreground">
-              {shortId(session.id)} · {shortDate(session.last_at)} · {session.edits} ediciones
+              {agentLabel(session.agent)} · {shortId(session.id)} · {shortDate(session.last_at)} · {session.edits} ediciones
             </span>
           </Link>
         ))}

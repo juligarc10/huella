@@ -513,6 +513,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "huella-codex"
+version = "0.1.0"
+dependencies = [
+ "huella-core",
+ "serde_json",
+]
+
+[[package]]
+name = "huella-copilot"
+version = "0.1.0"
+dependencies = [
+ "huella-core",
+ "serde_json",
+]
+
+[[package]]
 name = "huella-core"
 version = "0.1.0"
 dependencies = [
@@ -539,6 +555,8 @@ dependencies = [
  "dirs",
  "huella-anchoring",
  "huella-claude-code",
+ "huella-codex",
+ "huella-copilot",
  "huella-core",
  "huella-decisions",
  "huella-review",

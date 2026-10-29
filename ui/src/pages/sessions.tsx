@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { EmptyState, PageHeader } from '@/components/bits'
 import { BlurFade } from '@/components/ui/blur-fade'
 import { Skeleton } from '@/components/ui/skeleton'
-import { baseName, dateTime, number, shortId } from '@/lib/format'
+import { agentLabel, baseName, dateTime, number, shortId } from '@/lib/format'
 import { useProject } from '@/lib/project'
 import { useSessions } from '@/lib/queries'
 
@@ -40,6 +40,9 @@ export function SessionsPage() {
                 >
                   <span className="flex items-baseline gap-3">
                     <span className="text-base font-semibold">{baseName(session.project) || 'sin proyecto'}</span>
+                    <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                      {agentLabel(session.agent)}
+                    </span>
                     <span className="ml-auto font-mono text-xs text-muted-foreground">{shortId(session.id)}</span>
                   </span>
                   <span className="text-[13px] text-muted-foreground">
