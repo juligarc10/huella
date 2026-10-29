@@ -1,307 +1,175 @@
 # Huella
 
-Memoria de las sesiones con agentes de IA, anclada al código. Huella lee las
-transcripciones de los agentes, averigua qué funciones, clases y métodos tocó
-cada edición y, al pasar el ratón por ellas en el editor, muestra qué se pidió
-y qué explicó el agente. Sin llamar a ningún modelo y en milisegundos.
+**English** · [Español](README.es.md)
 
-Y guía la **revisión** de lo que hizo una sesión: por turnos, siguiendo el
-flujo del código desde el punto de entrada, con el porqué de cada paso, las
-líneas que el agente no explicó resaltadas y puntos de atención. Rápida, pero
-completa: cada línea cambiada aparece en algún paso.
+Memory of your AI coding agent sessions, anchored to the code.
 
-También extrae con un modelo de lenguaje, el que elijas, las decisiones de
-proyecto que no tocan código ("Rust en vez de Python") y las ofrece por MCP a
-cualquier agente.
+Huella reads the transcripts of your coding agents, works out which functions,
+classes and methods each edit touched, and shows you — on hover, in your
+editor — what was asked and what the agent explained when it wrote that code.
+No model call, in milliseconds, and it keeps working after you rename or move
+the code.
 
-**Estado: F2.** Revisión guiada en la terminal, en una página web local y en
-el editor; servidor MCP. Antes: memoria en el editor (F1) y validación del
-anclaje (F0, [docs/f0-resultados.md](docs/f0-resultados.md)).
+It also guides the **review** of what a session did: turn by turn, following
+the flow of the code from its entry point, with the reason for every step and
+the lines the agent never explained highlighted. Fast, but complete: every
+changed line belongs to some step.
 
-## Requisitos
+And it extracts the project decisions that don't live in the code ("Rust
+instead of Python", "SQLite locally") with a model of your choice, tracks
+which ones are still in force, exports them as ADRs, and serves all of this to
+any agent over MCP.
 
-- Rust 1.90 o superior (`rustup` instala la versión estable).
-- Para la extensión de VS Code: Node 18 o superior.
+Everything stays on your machine.
 
-## Instalación
+## How you use it
+
+1. **Install once**: the `huella` binary, the editor extension (VS Code or
+   Zed) and the MCP server for your agent. Optionally, a model to extract
+   decisions and an embeddings model to search by meaning.
+2. **Work as usual with your agent.** Huella indexes its sessions on its own:
+   the editor extension every few seconds, the app when it opens.
+3. **While coding**, hover a function to see why it exists: the request, the
+   agent's explanation, the session, and whether the code changed since.
+4. **After a session**, review it in `huella ui` (or in Zed's git diff with
+   `huella review zed`): steps in flow order, unexplained lines in amber,
+   mark each step as reviewed.
+5. **Now and then**, extract decisions, fix the ones the model got wrong and
+   export them as ADRs next to your code.
+6. **Your agent reads the same memory over MCP** before touching code: symbol
+   history, decisions in force (including your own preferences) and search.
+
+## Install
 
 ```sh
-cargo install --path crates/huella-cli            # binario `huella` en ~/.cargo/bin
+cargo install --git https://github.com/juligarc10/huella huella-cli   # Rust 1.90+
+```
 
-cd extensions/vscode
-npm install && npm run package
+or download a binary from the [releases](https://github.com/juligarc10/huella/releases).
+
+**VS Code**: build and install the extension (Node 18+):
+
+```sh
+cd extensions/vscode && npm install && npm run package
 code --install-extension huella-0.1.0.vsix
 ```
 
-La extensión arranca `huella lsp`, que indexa las transcripciones de Claude
-Code (`~/.claude/projects`) al abrir el editor y cada 30 segundos.
+**Zed**: run `zed: install dev extension` and pick `extensions/zed`. Zed needs
+`~/.cargo/bin` on its `PATH`.
 
-**Zed**: con el binario instalado, en la paleta de comandos ejecuta
-`zed: install dev extension` y elige `extensions/zed` del checkout principal
-(no de un worktree: Zed enlaza esa carpeta y deja de cargar la extensión si
-desaparece). Zed debe ver
-`~/.cargo/bin` en su `PATH` para compilarla (ábrelo desde una terminal si lo
-lanzaste antes de instalar Rust). Zed muestra el hover; los `CodeLens` puede
-no pintarlos.
-
-**Agentes (MCP)**: registra el servidor en tu agente, por ejemplo en Claude
-Code:
+**Agents (MCP)**, for example Claude Code:
 
 ```sh
 claude mcp add huella -- huella mcp
 ```
 
-## La aplicación
+## The app
 
 ```sh
-huella ui                            # abre la aplicación local en el navegador
+huella ui
 ```
 
-Todo lo de Huella en un sitio, sin salir de tu máquina:
+Search the memory, browse and correct decisions, export ADRs, review sessions
+step by step (`j`/`k` to move, `r` to mark reviewed), see a symbol's history and
+run the long tasks (indexing, embeddings, decision extraction, refactor
+benchmark) in the background. `⌘K` jumps anywhere. It listens on `127.0.0.1`
+only, with a per-run token.
 
-- **Buscar** en la memoria por palabras y, con un modelo de embeddings, por
-  significado; cada resultado lleva a su sesión, a sus símbolos o al fichero en
-  el editor.
-- **Decisiones y ADRs**: por alcance (proyecto, tuyas, por carpeta) y estado;
-  corrige el estado con un clic y exporta los ADRs del proyecto.
-- **Sesiones y revisión**: el guion de cada sesión paso a paso, con las líneas
-  sin explicación resaltadas; `j`/`k` para moverse y `r` para marcar revisado.
-- **Memoria de un símbolo**: su historia, también si se renombró o se movió.
-- **Estado**: supervivencia a refactors, vectores y extracción de decisiones,
-  que se lanzan desde aquí y corren en segundo plano.
-- `⌘K` para ir a cualquier sitio, cambiar de proyecto o lanzar una tarea.
-  Tema claro, oscuro o el del sistema.
-
-Escucha solo en `127.0.0.1` (puerto 4848 o uno libre), con un token por
-ejecución en la URL. Opciones: `--editor vscode`, `--no-browser` y, para
-extraer decisiones desde la aplicación, las mismas que `decisions extract`
-(`--provider openai-compatible --base-url … --model …`). La interfaz está en
-[`ui/`](ui/README.md).
-
-## Uso desde la terminal
+## Command line
 
 ```sh
-huella index                         # indexa lo nuevo de las transcripciones
-huella why src/app.ts:42             # qué se habló del símbolo en esa línea
-huella symbols src/app.ts            # símbolos que Huella reconoce en un fichero
-huella scan                          # mide la tasa de anclaje (validación de la F0)
-
-huella search rate limit             # busca en peticiones, explicaciones, símbolos y decisiones
-huella decisions list                # decisiones vigentes
-huella decisions list --entity rust --project ~/dev/huella --all
-huella decisions list --scope user   # tus preferencias, válidas en todos los proyectos
-huella decisions set 6fdb6c rejected # corrige el estado a mano (`auto` lo devuelve al extraído)
-huella adr                           # exporta las decisiones del proyecto a docs/adr/
-huella refactors                     # mide cuánta memoria sobrevive a renombrar y mover
+huella index                          # index what's new in the agents' sessions
+huella why src/app.ts:42              # what was said about the symbol on that line
+huella search rate limit              # requests, explanations, symbols and decisions
+huella review list                    # recent sessions, with their agent
+huella review show 84e33d8e           # guided review in the terminal
+huella review zed 84e33d8e            # review in Zed's git diff (stage = reviewed)
+huella decisions extract --provider openai-compatible --base-url http://localhost:11434/v1 --model qwen2.5:7b
+huella decisions list --scope user    # your preferences, valid in every project
+huella adr                            # export the project's decisions to docs/adr/
+huella embed                          # vectors for search by meaning (HUELLA_EMBED_MODEL)
+huella refactors                      # how much memory survives renames and moves
 ```
 
-### Buscar en la memoria
+Decision extraction works with the Claude API (`ANTHROPIC_API_KEY`, default
+`claude-haiku-5-5`) or any OpenAI-compatible server (Ollama, LM Studio,
+llama.cpp, vLLM; key in `HUELLA_LLM_API_KEY`). Search by meaning works with any
+OpenAI-compatible embeddings endpoint; a multilingual model such as `bge-m3`
+works best if your sessions aren't in English.
 
-`huella search` (y la herramienta MCP `huella_search`) busca con FTS5 en las
-peticiones, las explicaciones del agente, las rutas, los símbolos (también por
-sus palabras: «password» encuentra `hashPassword`) y las decisiones, sin que
-importen tildes ni mayúsculas. Las ediciones de una misma petición salen
-juntas.
+## Agents and languages
 
-Para buscar también por significado («almacenamiento» encuentra «base de
-datos»), calcula vectores con cualquier servidor de embeddings con la API de
-OpenAI y define el modelo:
+| Agent | Reads from | Anchoring |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects` | Exact: it stores the original file of every edit |
+| Copilot in VS Code (chat and agent) | `…/Code/User/workspaceStorage/*/chatSessions` | Exact for files the session created; approximate otherwise |
+| Copilot CLI | `~/.copilot/session-state` | Exact on create; approximate on edit |
+| Codex | `~/.codex/sessions` (or `$CODEX_HOME`) | Exact on create; approximate on edit. Tested with sample transcripts only |
 
-```sh
-ollama pull nomic-embed-text
-export HUELLA_EMBED_MODEL=nomic-embed-text     # HUELLA_EMBED_URL si no es Ollama local
-huella embed                                   # solo calcula lo nuevo o cambiado
-huella search almacenamiento local
-```
+*Approximate* means the agent doesn't store the whole file: the text it wrote
+is located in the current file, and if that code changed afterwards the edit
+stays unanchored.
 
-Con el modelo definido, la búsqueda mezcla ambos resultados (reciprocal rank
-fusion); si el modelo no responde, se queda en la de texto y lo avisa.
+Symbols in TypeScript, TSX, JavaScript, Python, Rust, Go, Java, C#, Ruby, PHP,
+C and C++ (tree-sitter).
 
-### Revisar una sesión
+## Privacy
 
-```sh
-huella review list                   # sesiones recientes con ediciones
-huella review show 84e33d8e          # guion en la terminal (--by-file para verlo por fichero)
-huella review open 84e33d8e          # en el navegador, con enlaces a Zed (--editor vscode)
-huella review start 84e33d8e --open  # en el editor: abre el proyecto y cada paso pendiente es una diagnosis
-huella review zed 84e33d8e           # en Zed, con su vista de cambios de git (ver abajo)
-huella review stop
-huella review narrate 84e33d8e --provider openai-compatible --base-url … --model …
-```
+Nothing leaves your machine unless you configure a remote model. Before
+anything is stored or sent to a model, **secrets are redacted**: provider keys
+(OpenAI, Anthropic, AWS, GitHub, Google, Stripe, Slack), tokens, JWTs, private
+keys, connection-string passwords and random-looking values assigned to names
+such as `API_KEY` or `password`. See [SECURITY.md](SECURITY.md).
 
-Cómo se arma el guion:
+## How it works
 
-1. **Diff neto por fichero**, reconstruido desde las transcripciones. Cada línea
-   añadida sabe qué edición la escribió y con qué explicación.
-2. **Cambios sin explicación**: lo que cambió entre dos ediciones del agente
-   (terminal, formateadores, a mano) y lo que difiere del fichero actual si
-   ninguna sesión posterior lo tocó. Se marcan en ámbar (`!` en la terminal).
-3. **Orden**: por turnos (cada petición suele ser un caso de uso) y, dentro de
-   cada turno, el flujo desde lo que nadie llama (un endpoint, un comando)
-   hacia lo que va llamando; luego los tests y los otros cambios. Cada línea
-   del diff pertenece a un único paso.
-4. **Puntos de atención** sin modelo: símbolos borrados que aún se mencionan,
-   turnos sin tests, pasos largos, `TODO`, `unwrap()`, `@ts-ignore`…
-5. **Narración** opcional con un modelo: resumen del turno como flujo, una nota
-   por paso y riesgos. Se guarda con el modelo que la escribió y se marca como
-   desfasada si el turno cambia.
+Agent adapters turn each session into normalized edits. The anchoring
+compares each file before and after the edit and assigns every changed line to
+the innermost symbol (tree-sitter), storing a hash of its normalized body and a
+name-independent fingerprint. The store is SQLite (WAL, FTS5). The engine
+resolves a symbol's history — also when it was renamed or moved, by matching
+fingerprints of anchors that disappeared — and serves it over LSP (hover,
+CodeLens, review diagnostics), MCP, the CLI and the local app.
 
-Los pasos revisados se guardan con un hash de su contenido: si el código del
-paso cambia, vuelve a quedar pendiente. Web, editor y terminal comparten las
-marcas.
-
-#### En Zed, con su vista de cambios
-
-```sh
-huella review zed 84e33d8e         # prepara el worktree, activa la revisión y abre Zed
-huella review zed 84e33d8e --done  # borra el worktree y su rama al terminar
-```
-
-Zed no admite vistas propias, así que Huella le da un repositorio cuyo diff de
-git es exactamente la sesión: un worktree en `.claude/worktrees/huella-review-<id>`
-(rama `huella/review-<id>`) con un commit del estado de cada fichero al empezar
-la sesión y su estado final sin commitear. En la vista de cambios de git de Zed
-(Project Diff) se ve cada fichero completo con sus cambios; **preparar (stage)
-un fichero entero marca sus pasos como revisados** (quitarlo del stage no los
-desmarca). Los avisos de Huella explican cada paso y el panel de diagnósticos
-lista lo pendiente. Los ficheros de la sesión fuera del repositorio no se
-incluyen. `.claude/worktrees/` se añade a `.git/info/exclude` del repositorio
-para que el worktree no aparezca como cambio.
-
-### Extraer decisiones
-
-Con la API de Claude (por defecto `claude-haiku-5-5`, `ANTHROPIC_API_KEY`):
-
-```sh
-huella decisions extract
-```
-
-Con cualquier servidor compatible con la API de chat de OpenAI (Ollama,
-LM Studio, llama.cpp, vLLM…); la clave, si hace falta, en `HUELLA_LLM_API_KEY`:
-
-```sh
-huella decisions extract --provider openai-compatible \
-  --base-url http://localhost:11434/v1 --model qwen2.5:7b \
-  --chunk-chars 80000      # ajusta el trozo al contexto del modelo (~3,5 caracteres/token)
-```
-
-Solo procesa las sesiones nuevas o que han crecido; `--limit N` acota cuántas.
-
-Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale
-en todos los proyectos, como el idioma de los commits), del proyecto o de una
-carpeta concreta. Al extraer una sesión, el modelo ve las decisiones vigentes
-de las anteriores del mismo proyecto y marca las que la conversación cambia:
-quedan como reemplazadas y dejan de recuperarse. Volver a extraer cualquier
-sesión no rompe esos reemplazos ni las correcciones hechas con `decisions set`.
-
-`huella adr` escribe cada decisión como ADR (`docs/adr/0001-titulo.md`), con
-las reemplazadas enlazadas a la que las reemplaza. Volver a exportar conserva
-los números, añade las nuevas al final y no pisa los ADRs que hayas editado.
-El diálogo de cada sesión (sin herramientas ni sus resultados) se envía al
-proveedor elegido: con uno local no sale de tu red.
-
-Opciones comunes: `--db <fichero>` (por defecto `$HUELLA_DB` o
-`~/Library/Application Support/huella/huella.db` en macOS,
-`~/.local/share/huella/huella.db` en Linux) y `--projects <carpeta>`.
-
-Todo se queda en tu máquina: la base de datos guarda tus peticiones y las
-explicaciones del agente, y `scan --json`/`--sample-out` escriben fragmentos de
-código solo donde indiques.
-
-## Cómo funciona
-
-1. **Adaptador de Claude Code** (`huella-claude-code`): lee cada `.jsonl` línea
-   a línea. Los resultados de `Edit`, `MultiEdit` y `Write` incluyen el fichero
-   original completo, así que el fichero tras la edición se reconstruye
-   exactamente. Con cada edición guarda la petición de la persona y el último
-   texto del agente antes de editar: el porqué, sin LLM. Puede retomar una
-   transcripción desde un byte para leer solo lo nuevo.
-2. **Anclaje** (`huella-anchoring`): compara el fichero antes y después y asigna
-   cada línea cambiada al símbolo más interno donde empieza su contenido
-   (tree-sitter). Registra también los símbolos que la edición borró o
-   renombró. Cada símbolo lleva un hash de su cuerpo normalizado y una huella
-   que no depende de su nombre (forma exacta y resumen *bottom-k* de sus
-   trigramas de tokens).
-3. **Memoria** (`huella-store`): SQLite en modo WAL. Cada lote de una
-   transcripción y su cursor se guardan en una transacción; reindexar no
-   duplica.
-4. **Motor** (`huella-engine`): indexado incremental y consultas. Las rutas de
-   los worktrees (`.claude/worktrees/<nombre>/…`) se llevan al repositorio
-   principal. Si el código actual de un símbolo no coincide con el que dejó la
-   última sesión, lo avisa. Si un símbolo no tiene memoria con su nombre, se
-   busca de qué anclaje desaparecido viene por su huella: renombrado en el
-   mismo fichero, movido a otro, o en un fichero movido; también se encadenan
-   los renombrados del propio agente. El hover lo indica («renombrado desde
-   `register` en `user.ts`»).
-5. **Servidor LSP** (`huella-lsp`) y extensiones de VS Code y Zed: hover con
-   las últimas ediciones del símbolo, `CodeLens` con su actividad y los pasos
-   pendientes de la revisión activa como diagnosis. Un hilo indexa en segundo
-   plano.
-6. **Revisión** (`huella-review`): diff neto con el origen de cada línea, plan
-   por turnos y flujo, y puntos de atención.
-7. **MCP** (`huella mcp`): historia de símbolos, decisiones y guion de
-   revisión para cualquier agente.
-
-| Crate | Responsabilidad |
+| Crate | Role |
 | --- | --- |
-| `huella-core` | Modelo de dominio. Sin dependencias de infraestructura |
-| `huella-claude-code` | Adaptador de transcripciones de Claude Code |
-| `huella-anchoring` | Extracción de símbolos y anclaje de ediciones |
-| `huella-store` | Persistencia en SQLite |
-| `huella-engine` | Casos de uso: indexar y consultar |
-| `huella-lsp` | Servidor LSP |
-| `huella-review` | Modelo de revisión, plan por flujo y puntos de atención |
-| `huella-cli` | Binario `huella` y servidor de `huella ui` |
-| `ui` | Interfaz de `huella ui` (React, shadcn/ui, Magic UI), incrustada en el binario |
-| `huella-decisions` | Extracción de decisiones con modelos intercambiables |
-| `extensions/vscode` | Extensión de VS Code (envoltorio del servidor) |
-| `extensions/zed` | Extensión de Zed (envoltorio del servidor) |
+| `huella-core` | Domain model and the `Agent` trait |
+| `huella-claude-code`, `huella-copilot`, `huella-codex` | Agent adapters |
+| `huella-anchoring` | Symbol extraction and edit anchoring |
+| `huella-store` | SQLite persistence, search, secret redaction of stored data |
+| `huella-engine` | Indexing, queries, renames, decisions, ADRs, embeddings |
+| `huella-review` | Guided review: net diff, flow plan, attention points |
+| `huella-decisions` | Decision extraction with pluggable models |
+| `huella-lsp` | Language server |
+| `huella-cli` | The `huella` binary, MCP server and `huella ui` server |
+| `ui` | The `huella ui` interface (React, shadcn/ui, Magic UI), embedded in the binary |
+| `extensions/vscode`, `extensions/zed` | Thin editor extensions that launch the binary |
 
-Lenguajes con símbolos: TypeScript, TSX, JavaScript, Python y Rust.
+Architecture decisions live in [docs/adr](docs/adr) (in Spanish).
 
-## Rendimiento
+## Performance
 
-Hover en un fichero de 1.205 líneas: p95 de 9,2 ms (mediana 6,4 ms) en
-compilación release, con la búsqueda de renombrados. Indexar 17 transcripciones (≈140 MB, 1.021 ediciones)
-desde cero: 1 s; incremental: instantáneo.
+Hover on a 1,205-line file: p95 9.2 ms. Indexing ~140 MB of transcripts from
+scratch: about 1 s; incremental: instant. 97.5 % of the memory survives
+synthetic refactors applied to 506 real anchors (rename, rename the class,
+move the file, move the function, rename and edit).
 
-Refactors fuera de las sesiones (`huella refactors`, sobre 499 anclajes reales
-de 12 sesiones): sobrevive el 98,2 % de la memoria (criterio de la F3: más del
-80 %). Renombrar, renombrar la clase, mover el fichero o ambas cosas: 100 %;
-mover la función a otro fichero: 98,6 %; renombrar y añadir una línea: 98,9 %;
-renombrar y quitar una de cada cuatro líneas: 74 %. Código ajeno puesto en el
-lugar de una función borrada nunca hereda su memoria (0 de 142 sondas).
+## Known limitations
 
-Búsqueda de texto en la memoria real: unos 10 ms.
+- A symbol's history only includes edits made through the agent's tools;
+  in a review, changes made from a shell show up as unexplained.
+- Copilot and Codex don't store the original file, so their edits to existing
+  files are anchored approximately. Cursor, Aider and Windsurf have no adapter
+  yet.
+- Secret redaction is pattern-based: a secret with no recognisable shape and
+  an ordinary name can slip through.
+- Decision quality depends on the model: review them (`decisions set` fixes
+  them).
 
-Extracción de decisiones con Qwen3.6-35B-A3B en llama.cpp propio: 13 sesiones
-(≈258.000 tokens de diálogo) en 67 minutos, 87 decisiones. Con Claude Haiku
-5.5 el mismo volumen costaría unos 3 céntimos.
+## Development
 
-## Limitaciones conocidas
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- La historia de un símbolo solo incluye las ediciones hechas con las
-  herramientas del agente; en la revisión, los cambios por shell sí aparecen,
-  como cambios sin explicación.
-- Un símbolo reescrito en gran parte a la vez que se renombra o se mueve puede
-  perder su memoria (se exige un parecido mínimo para no heredar la de otro).
-- Las ediciones indexadas antes de la F3 cuya transcripción ya no existe no
-  tienen huella: solo se encuentran por su nombre.
-- La calidad de la extracción de decisiones, de su alcance y de los reemplazos
-  depende del modelo: conviene repasarlas (`decisions set` corrige).
-- Los vectores se comparan sin índice: suficiente para decenas de miles de
-  textos; más allá haría falta uno (sqlite-vec, LanceDB).
-- El orden por flujo se basa en nombres: dos funciones con el mismo nombre en
-  ficheros distintos pueden enlazarse por error.
-- Solo Claude Code; el resto de agentes llegan en la F4.
+## License
 
-## Desarrollo
-
-```sh
-cargo test                    # tests de todos los crates, incluido el protocolo LSP
-cargo clippy --all-targets    # lints (pedantic activado en el workspace)
-cargo fmt
-pnpm --dir ui build           # tras cambiar la interfaz: recompila ui/dist (se versiona)
-```
-
-Decisiones de arquitectura en [docs/adr](docs/adr).
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
