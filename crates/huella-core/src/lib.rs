@@ -6,6 +6,7 @@
 
 pub mod agent;
 mod fingerprint;
+pub mod redact;
 
 use std::ops::Range;
 use std::path::PathBuf;

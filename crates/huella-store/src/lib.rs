@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use huella_core::redact::{REDACTION_VERSION, redact};
 use huella_core::{
     AnchorOutcome, Confidence, EditContext, EditKind, FileEdit, Fingerprint, SymbolKind, TranscriptCursor,
 };
@@ -211,6 +212,13 @@ const MIGRATIONS: &[&str] = &[
         text_hash       TEXT NOT NULL,
         vector          BLOB NOT NULL,
         PRIMARY KEY (key, model)
+    );
+",
+    // Versión de las reglas de redacción con la que se limpió lo guardado.
+    r"
+    CREATE TABLE redaction_state (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        version         INTEGER NOT NULL
     );
 ",
 ];
@@ -500,6 +508,7 @@ impl Store {
         }
         tx.commit()?;
         self.backfill_own_names()?;
+        self.redact_stored()?;
         self.backfill_edit_search()?;
         self.backfill_decision_uids()
     }
@@ -517,6 +526,32 @@ impl Store {
                 update.execute(params![id, decision_uid(session_id, title)])?;
             }
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Quita los secretos de lo ya guardado (peticiones, explicaciones,
+    /// decisiones, narraciones) si se guardó con reglas de redacción
+    /// anteriores. Las ediciones que cambian salen del índice de búsqueda y
+    /// [`Store::backfill_edit_search`] las vuelve a indexar ya limpias.
+    fn redact_stored(&mut self) -> Result<()> {
+        let done: i64 = self
+            .conn
+            .query_row("SELECT version FROM redaction_state WHERE id = 1", [], |row| row.get(0))
+            .optional()?
+            .unwrap_or(0);
+        if done >= REDACTION_VERSION {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        redact_columns(&tx, "edit", "rowid", &["prompt", "rationale"], Some("edit_fts"))?;
+        redact_columns(&tx, "transcript", "rowid", &["prompt", "rationale"], None)?;
+        redact_columns(&tx, "decision", "id", &["title", "decision", "rationale", "alternatives"], None)?;
+        redact_columns(&tx, "review_narration", "rowid", &["narration"], None)?;
+        tx.execute(
+            "INSERT INTO redaction_state (id, version) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            [REDACTION_VERSION],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1453,6 +1488,34 @@ fn insert_edit(tx: &Transaction, indexed: &IndexedEdit) -> Result<()> {
     Ok(())
 }
 
+/// Redacta las columnas de texto de una tabla; las filas que cambian se
+/// borran de `fts` (si se da) para volver a indexarlas limpias.
+fn redact_columns(tx: &Transaction, table: &str, key: &str, columns: &[&str], fts: Option<&str>) -> Result<()> {
+    let select = format!("SELECT {key}, {} FROM {table}", columns.join(", "));
+    let rows: Vec<(i64, Vec<Option<String>>)> = {
+        let mut statement = tx.prepare(&select)?;
+        let mapped = statement.query_map([], |row| {
+            let values = (1..=columns.len())
+                .map(|index| row.get::<_, Option<String>>(index))
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((row.get(0)?, values))
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, values) in rows {
+        for (column, value) in columns.iter().zip(values) {
+            let Some(value) = value else { continue };
+            if let std::borrow::Cow::Owned(clean) = redact(&value) {
+                tx.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE {key} = ?2"), params![clean, id])?;
+                if let Some(fts) = fts {
+                    tx.execute(&format!("DELETE FROM {fts} WHERE rowid = ?1"), [id])?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Edición aún sin indexar: rowid, ruta, petición, explicación y símbolos.
 type PendingSearchRow = (i64, String, Option<String>, Option<String>, Option<String>);
 
@@ -1945,6 +2008,29 @@ mod tests {
         assert_eq!(store.search(&query).unwrap(), Vec::new(), "sin vector, solo palabras");
         let other_model = SemanticQuery { model: "otro", vector: &[1.0, 0.0, 0.0] };
         assert_eq!(store.search_with(&query, Some(other_model)).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn secrets_already_stored_are_redacted_when_the_store_opens() {
+        let dir = std::env::temp_dir().join(format!("huella-redact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huella.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = Store::open(&path).unwrap();
+            let leaked =
+                edit("e1", "s1", "2026-10-01T10:00:00Z", "usa HUELLA_LLM_API_KEY=a8f3k2j9d0s7q1w4e6r5 para probar");
+            save(&mut store, 10, &[(&leaked, &anchored(&[("validate", "h1")], &[]))]);
+            // Simula una base guardada antes de existir la redacción.
+            store.conn.execute("UPDATE edit SET prompt = 'usa HUELLA_LLM_API_KEY=a8f3k2j9d0s7q1w4e6r5'", []).unwrap();
+            store.conn.execute("DELETE FROM redaction_state", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let prompt: String = store.conn.query_row("SELECT prompt FROM edit", [], |row| row.get(0)).unwrap();
+        assert_eq!(prompt, "usa HUELLA_LLM_API_KEY=[secreto]");
+        assert_eq!(search(&store, "a8f3k2j9d0s7q1w4e6r5"), Vec::new(), "tampoco en el índice de búsqueda");
+        assert_eq!(search(&store, "HUELLA_LLM_API_KEY").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

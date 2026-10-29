@@ -82,6 +82,7 @@ pub fn extract_decisions(
         for dialogue in chunk_dialogue(&conversation, options.chunk_chars) {
             report.calls += 1;
             let known_titles = decisions.iter().map(|d| d.title.clone()).collect();
+            let dialogue = huella_core::redact::redact(&dialogue).into_owned();
             let request = ExtractionRequest { dialogue, known_titles, previous: previous.clone() };
             match extractor.extract(&request) {
                 Ok(found) => {

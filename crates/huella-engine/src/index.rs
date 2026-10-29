@@ -61,7 +61,7 @@ fn index_agent(
         if metadata.len() == cursor.offset {
             continue;
         }
-        let parsed = match agent.read_from(transcript, &cursor) {
+        let mut parsed = match agent.read_from(transcript, &cursor) {
             Ok(parsed) => parsed,
             Err(error) => {
                 report.failures.push(error.to_string());
@@ -71,6 +71,12 @@ fn index_agent(
         if parsed.resume.offset == cursor.offset {
             continue;
         }
+        // Nada se guarda con secretos: ni el contexto de cada edición ni el
+        // que queda en el cursor para la próxima lectura.
+        for edit in &mut parsed.edits {
+            redact_context(&mut edit.context);
+        }
+        redact_context(&mut parsed.resume.context);
         let anchored: Vec<_> = parsed
             .edits
             .iter()
@@ -95,6 +101,14 @@ fn index_agent(
         report.new_edits += indexed.len();
     }
     Ok(())
+}
+
+fn redact_context(context: &mut huella_core::EditContext) {
+    for text in [&mut context.prompt, &mut context.rationale].into_iter().flatten() {
+        if let std::borrow::Cow::Owned(clean) = huella_core::redact::redact(text) {
+            *text = clean;
+        }
+    }
 }
 
 #[cfg(test)]
