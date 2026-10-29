@@ -4,6 +4,9 @@ import { toast } from 'sonner'
 import {
   api,
   query,
+  type InboxSession,
+  type ReviewStatus,
+  type Verdict,
   type Decision,
   type DecisionsResult,
   type Job,
@@ -87,19 +90,28 @@ export function useReview(session: string | undefined) {
     queryFn: () => api.get<ReviewResult>(`review/${session}`),
     enabled: Boolean(session),
     staleTime: 60_000,
+    // Mientras el modelo responde una pregunta, se consulta a menudo.
+    refetchInterval: (state) => (state.state.data?.asking.some((ask) => !ask.error) ? 1500 : false),
   })
 }
 
-export function useMarkStep(session: string) {
+export function useInbox() {
+  return useQuery({ queryKey: ['inbox'], queryFn: () => api.get<{ sessions: InboxSession[] }>('inbox') })
+}
+
+/** Veredicto de un paso (`null` lo quita). Se refleja al momento. */
+export function useSetVerdict(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (mark: { key: string; hash: string; reviewed: boolean }) => api.post(`review/${session}/mark`, mark),
-    // Al momento: marcar un paso no debe esperar al servidor.
+    mutationFn: (mark: { key: string; hash: string; verdict: Verdict | null }) => api.post(`review/${session}/mark`, mark),
     onMutate: (mark) => {
       client.setQueryData<ReviewResult>(['review', session], (review) =>
         review && {
           ...review,
-          steps: review.steps.map((step) => (step.key === mark.key ? { ...step, reviewed: mark.reviewed } : step)),
+          status: review.status === 'pending' ? 'in_review' : review.status,
+          steps: review.steps.map((step) =>
+            step.key === mark.key ? { ...step, reviewed: mark.verdict !== null, verdict: mark.verdict } : step,
+          ),
         },
       )
     },
@@ -107,6 +119,63 @@ export function useMarkStep(session: string) {
       toast.error(error.message)
       client.invalidateQueries({ queryKey: ['review', session] })
     },
+    onSettled: () => client.invalidateQueries({ queryKey: ['inbox'] }),
+  })
+}
+
+export function useSetReviewStatus(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (status: ReviewStatus) => api.post(`review/${session}/status`, { status }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['review', session] })
+      client.invalidateQueries({ queryKey: ['inbox'] })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useAddComment(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (comment: { key: string; quote: string | null; body: string }) =>
+      api.post<{ id: number }>(`review/${session}/comments`, comment),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['review', session] })
+      client.invalidateQueries({ queryKey: ['inbox'] })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useUpdateComment(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, status, resolution }: { id: number; status: string; resolution?: string }) =>
+      api.post(`comments/${id}`, { status, resolution }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['review', session] })
+      client.invalidateQueries({ queryKey: ['inbox'] })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useFeedback(session: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['feedback', session],
+    queryFn: () => api.get<{ markdown: string; items: number }>(`review/${session}/feedback`),
+    enabled,
+    staleTime: 0,
+  })
+}
+
+export function useAsk(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { question: string; step: number | null }) => api.post(`review/${session}/ask`, ask),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
   })
 }
 

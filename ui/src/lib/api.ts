@@ -195,11 +195,65 @@ export interface ReviewSource {
   reason?: string
 }
 
+export type Verdict = 'ok' | 'change' | 'discard'
+
+export type ReviewStatus = 'pending' | 'in_review' | 'changes_requested' | 'approved'
+
+export interface ReviewComment {
+  id: number
+  step_key: string
+  path: string
+  symbol: string | null
+  quote: string | null
+  body: string
+  status: 'open' | 'resolved' | 'dismissed'
+  created_at: string
+  resolved_at: string | null
+  resolution: string | null
+}
+
+export interface ReviewQuestion {
+  id: number
+  step_key: string | null
+  question: string
+  answer: string
+  model: string
+  created_at: string
+}
+
+export interface PendingAsk {
+  question: string
+  step: number | null
+  error: string | null
+}
+
+export interface FollowUp {
+  session_id: string
+  paths: string[]
+  last_at: string
+  same_session: boolean
+}
+
+export interface CommentHint {
+  id: number
+  quote_gone: boolean
+  edited_after: boolean
+}
+
+export interface InboxSession extends SessionInfo {
+  status: ReviewStatus
+  steps: number | null
+  reviewed: number
+  open_comments: number
+  status_at: string | null
+}
+
 export interface ReviewStep {
   index: number
   key: string
   hash: string
   reviewed: boolean
+  verdict: Verdict | null
   turn: number | null
   role: string
   depth: number
@@ -233,5 +287,12 @@ export interface ReviewResult {
   steps: ReviewStep[]
   attention: { step: number | null; turn: number | null; kind: string; message: string }[]
   unreconstructable: number
+  status: ReviewStatus
+  comments: ReviewComment[]
+  questions: ReviewQuestion[]
+  asking: PendingAsk[]
+  follow_ups: FollowUp[]
+  hints: CommentHint[]
+  ask_model: string
   narrations: Record<string, Narration>
 }
