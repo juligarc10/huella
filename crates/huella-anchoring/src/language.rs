@@ -14,9 +14,31 @@ pub enum Language {
     JavaScript,
     Python,
     Rust,
+    Go,
+    Java,
+    CSharp,
+    Ruby,
+    Php,
+    C,
+    Cpp,
 }
 
 impl Language {
+    pub const ALL: [Self; 12] = [
+        Self::TypeScript,
+        Self::Tsx,
+        Self::JavaScript,
+        Self::Python,
+        Self::Rust,
+        Self::Go,
+        Self::Java,
+        Self::CSharp,
+        Self::Ruby,
+        Self::Php,
+        Self::C,
+        Self::Cpp,
+    ];
+
     pub fn from_path(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?;
         Some(match extension {
@@ -25,6 +47,13 @@ impl Language {
             "js" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
             "py" | "pyi" => Self::Python,
             "rs" => Self::Rust,
+            "go" => Self::Go,
+            "java" => Self::Java,
+            "cs" => Self::CSharp,
+            "rb" | "rake" => Self::Ruby,
+            "php" => Self::Php,
+            "c" | "h" => Self::C,
+            "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Self::Cpp,
             _ => return None,
         })
     }
@@ -36,6 +65,13 @@ impl Language {
             Self::JavaScript => "javascript",
             Self::Python => "python",
             Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::CSharp => "csharp",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::C => "c",
+            Self::Cpp => "cpp",
         }
     }
 
@@ -46,6 +82,13 @@ impl Language {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Self::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         }
     }
 
@@ -55,6 +98,13 @@ impl Language {
             Self::JavaScript => &JAVASCRIPT,
             Self::Python => &PYTHON,
             Self::Rust => &RUST,
+            Self::Go => &GO,
+            Self::Java => &JAVA,
+            Self::CSharp => &CSHARP,
+            Self::Ruby => &RUBY,
+            Self::Php => &PHP,
+            Self::C => &C,
+            Self::Cpp => &CPP,
         }
     }
 }
@@ -93,6 +143,16 @@ pub(crate) enum Naming {
     JsTestBlock,
     /// `impl Tipo` o `impl Trait for Tipo`.
     RustImpl,
+    /// `func (s *Server) Run()` de Go: `Server.Run`.
+    GoMethod,
+    /// `type X struct {…}` de Go: estructura, interfaz o alias según el tipo.
+    GoType,
+    /// Función de C/C++: el nombre está dentro del declarador
+    /// (`int *f(void)`, `void Foo::bar()`).
+    CFunction,
+    /// `struct`/`class`/`enum` de C/C++ solo si tiene cuerpo: `struct foo x;`
+    /// es un uso, no una definición.
+    Defined,
 }
 
 const fn rule(node: &'static str, kind: SymbolKind, naming: Naming) -> Rule {
@@ -167,6 +227,95 @@ static RUST: Spec = Spec {
     wrappers: &[],
 };
 
+static GO: Spec = Spec {
+    separator: ".",
+    rules: &[
+        rule("function_declaration", SymbolKind::Function, NAME),
+        rule("method_declaration", SymbolKind::Method, Naming::GoMethod),
+        rule("type_spec", SymbolKind::Struct, Naming::GoType),
+    ],
+    wrappers: &["type_declaration"],
+};
+
+static JAVA: Spec = Spec {
+    separator: ".",
+    rules: &[
+        rule("class_declaration", SymbolKind::Class, NAME),
+        rule("interface_declaration", SymbolKind::Interface, NAME),
+        rule("enum_declaration", SymbolKind::Enum, NAME),
+        rule("record_declaration", SymbolKind::Class, NAME),
+        rule("annotation_type_declaration", SymbolKind::Interface, NAME),
+        rule("method_declaration", SymbolKind::Method, NAME),
+        rule("constructor_declaration", SymbolKind::Method, NAME),
+    ],
+    wrappers: &[],
+};
+
+static CSHARP: Spec = Spec {
+    separator: ".",
+    rules: &[
+        rule("namespace_declaration", SymbolKind::Module, NAME),
+        rule("class_declaration", SymbolKind::Class, NAME),
+        rule("interface_declaration", SymbolKind::Interface, NAME),
+        rule("struct_declaration", SymbolKind::Struct, NAME),
+        rule("record_declaration", SymbolKind::Class, NAME),
+        rule("enum_declaration", SymbolKind::Enum, NAME),
+        rule("method_declaration", SymbolKind::Method, NAME),
+        rule("constructor_declaration", SymbolKind::Method, NAME),
+        rule("property_declaration", SymbolKind::Variable, NAME),
+        rule("local_function_statement", SymbolKind::Function, NAME),
+    ],
+    wrappers: &[],
+};
+
+static RUBY: Spec = Spec {
+    separator: ".",
+    rules: &[
+        rule("module", SymbolKind::Module, NAME),
+        rule("class", SymbolKind::Class, NAME),
+        rule("method", SymbolKind::Function, NAME),
+        rule("singleton_method", SymbolKind::Function, NAME),
+    ],
+    wrappers: &[],
+};
+
+static PHP: Spec = Spec {
+    separator: "::",
+    rules: &[
+        rule("function_definition", SymbolKind::Function, NAME),
+        rule("class_declaration", SymbolKind::Class, NAME),
+        rule("interface_declaration", SymbolKind::Interface, NAME),
+        rule("trait_declaration", SymbolKind::Trait, NAME),
+        rule("enum_declaration", SymbolKind::Enum, NAME),
+        rule("method_declaration", SymbolKind::Method, NAME),
+    ],
+    wrappers: &[],
+};
+
+static C: Spec = Spec {
+    separator: ".",
+    rules: &[
+        rule("function_definition", SymbolKind::Function, Naming::CFunction),
+        rule("struct_specifier", SymbolKind::Struct, Naming::Defined),
+        rule("union_specifier", SymbolKind::Struct, Naming::Defined),
+        rule("enum_specifier", SymbolKind::Enum, Naming::Defined),
+    ],
+    wrappers: &[],
+};
+
+static CPP: Spec = Spec {
+    separator: "::",
+    rules: &[
+        rule("function_definition", SymbolKind::Function, Naming::CFunction),
+        rule("class_specifier", SymbolKind::Class, Naming::Defined),
+        rule("struct_specifier", SymbolKind::Struct, Naming::Defined),
+        rule("union_specifier", SymbolKind::Struct, Naming::Defined),
+        rule("enum_specifier", SymbolKind::Enum, Naming::Defined),
+        rule("namespace_definition", SymbolKind::Module, NAME),
+    ],
+    wrappers: &["template_declaration"],
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,13 +325,16 @@ mod tests {
         assert_eq!(Language::from_path(Path::new("a/b.tsx")), Some(Language::Tsx));
         assert_eq!(Language::from_path(Path::new("a/b.mjs")), Some(Language::JavaScript));
         assert_eq!(Language::from_path(Path::new("a/b.rs")), Some(Language::Rust));
+        assert_eq!(Language::from_path(Path::new("cmd/main.go")), Some(Language::Go));
+        assert_eq!(Language::from_path(Path::new("src/App.cs")), Some(Language::CSharp));
+        assert_eq!(Language::from_path(Path::new("lib/x.hpp")), Some(Language::Cpp));
         assert_eq!(Language::from_path(Path::new("README.md")), None);
         assert_eq!(Language::from_path(Path::new("Makefile")), None);
     }
 
     #[test]
     fn every_rule_names_a_real_node_kind() {
-        for language in [Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Python, Language::Rust] {
+        for language in Language::ALL {
             let grammar = language.grammar();
             for rule in language.spec().rules {
                 assert_ne!(

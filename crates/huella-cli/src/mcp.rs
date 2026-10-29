@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use huella_store::{DecisionFilter, Store};
@@ -21,7 +21,7 @@ arquitectura o tecnología, y huella_review para explicar o revisar lo que hizo 
 
 pub struct Context {
     pub store: Store,
-    pub projects: PathBuf,
+    pub sources: huella_engine::Sources,
 }
 
 pub fn serve(context: &mut Context) -> Result<()> {
@@ -139,7 +139,7 @@ fn tools() -> Value {
 
 fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> {
     // Lo nuevo de las transcripciones se indexa antes de responder.
-    huella_engine::index(&mut context.store, &context.projects)?;
+    huella_engine::index(&mut context.store, &context.sources)?;
     match name {
         "huella_symbol_history" => symbol_history(&context.store, arguments),
         "huella_decisions" => decisions(&context.store, arguments),
@@ -234,7 +234,7 @@ fn review(context: &Context, arguments: &Value) -> Result<String> {
                 .ok_or_else(|| anyhow::anyhow!("no hay sesiones con ediciones"))?,
         },
     };
-    let review = huella_engine::session_review(&context.projects, &session)?;
+    let review = huella_engine::session_review(&context.sources, &session)?;
     let plan = huella_review::flow::plan(&review);
     let points = huella_review::attention::attention(&review, &plan);
     let narrations = huella_engine::narration::narrations(&context.store, &review, &plan, &points)?;
@@ -267,7 +267,7 @@ mod tests {
     fn context() -> Context {
         let projects = std::env::temp_dir().join(format!("huella-mcp-{}", std::process::id()));
         std::fs::create_dir_all(&projects).unwrap();
-        Context { store: Store::open_in_memory().unwrap(), projects }
+        Context { store: Store::open_in_memory().unwrap(), sources: huella_engine::Sources::claude_code(projects) }
     }
 
     #[test]

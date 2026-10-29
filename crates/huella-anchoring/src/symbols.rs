@@ -188,6 +188,51 @@ impl Walker<'_> {
             }
             Naming::JsExportDefault => node.child_by_field_name("value").map(|_| ("default".to_owned(), rule.kind)),
             Naming::JsTestBlock => self.test_block_name(node).map(|name| (name, rule.kind)),
+            Naming::GoMethod => {
+                let name = self.text(node.child_by_field_name("name")?);
+                let receiver = node.child_by_field_name("receiver")?;
+                let mut cursor = receiver.walk();
+                let parameter = receiver.named_children(&mut cursor).next()?;
+                let receiver_type = self.text(parameter.child_by_field_name("type")?);
+                // `*Server`, `Server[T]` → `Server`.
+                let receiver_type = receiver_type.trim_start_matches('*');
+                let receiver_type = receiver_type.split('[').next().unwrap_or(receiver_type).trim();
+                Some((format!("{receiver_type}.{name}"), rule.kind))
+            }
+            Naming::GoType => {
+                let name = self.text(node.child_by_field_name("name")?);
+                let kind = match node.child_by_field_name("type").map(|t| t.kind()) {
+                    Some("struct_type") => SymbolKind::Struct,
+                    Some("interface_type") => SymbolKind::Interface,
+                    _ => SymbolKind::TypeAlias,
+                };
+                Some((name, kind))
+            }
+            Naming::CFunction => {
+                const NAMES: &[&str] =
+                    &["identifier", "field_identifier", "qualified_identifier", "destructor_name", "operator_name"];
+                let mut declarator = node.child_by_field_name("declarator")?;
+                // Bajar por punteros, referencias (`T &f()`, sin campo propio)
+                // y el declarador de función hasta el nombre.
+                while !NAMES.contains(&declarator.kind()) {
+                    let mut cursor = declarator.walk();
+                    let inner = declarator.child_by_field_name("declarator").or_else(|| {
+                        declarator
+                            .named_children(&mut cursor)
+                            .find(|child| child.kind().ends_with("declarator") || NAMES.contains(&child.kind()))
+                    });
+                    match inner {
+                        Some(inner) => declarator = inner,
+                        None => break,
+                    }
+                }
+                let kind = if is_container(scope.parent_kind) { SymbolKind::Method } else { rule.kind };
+                Some((self.text(declarator), kind))
+            }
+            Naming::Defined => {
+                node.child_by_field_name("body")?;
+                Some((self.text(node.child_by_field_name("name")?), rule.kind))
+            }
             Naming::RustImpl => {
                 let target = self.text(node.child_by_field_name("type")?);
                 let name = match node.child_by_field_name("trait") {
@@ -241,8 +286,10 @@ impl Walker<'_> {
             if !self.spec.wrappers.contains(&parent.kind()) {
                 break;
             }
-            let is_list =
-                matches!(parent.kind(), "lexical_declaration" | "variable_declaration" | "expression_statement");
+            let is_list = matches!(
+                parent.kind(),
+                "lexical_declaration" | "variable_declaration" | "expression_statement" | "type_declaration"
+            );
             if is_list && parent.named_child_count() != 1 {
                 break;
             }
@@ -333,7 +380,10 @@ fn is_section_separator(comment: &str) -> bool {
 }
 
 fn is_container(kind: Option<SymbolKind>) -> bool {
-    matches!(kind, Some(SymbolKind::Class | SymbolKind::Impl | SymbolKind::Trait | SymbolKind::Interface))
+    matches!(
+        kind,
+        Some(SymbolKind::Class | SymbolKind::Struct | SymbolKind::Impl | SymbolKind::Trait | SymbolKind::Interface)
+    )
 }
 
 const FUNCTION_NODES: &[&str] =
@@ -530,6 +580,83 @@ describe('códigos públicos', () => {
         assert_eq!(original.fingerprint, renamed.fingerprint);
         assert_ne!(original.fingerprint.shape_hash, changed.fingerprint.shape_hash);
         assert!(original.fingerprint.similarity(&changed.fingerprint) > 0.5);
+    }
+
+    #[test]
+    fn go_functions_methods_and_types() {
+        let source = "package api\n\ntype Server struct { port int }\n\ntype Handler interface { Serve() }\n\nfunc (s *Server) Run() error { return nil }\n\nfunc New(port int) *Server { return &Server{port} }\n";
+        assert_eq!(
+            names(Language::Go, source),
+            vec![
+                ("Server".into(), SymbolKind::Struct),
+                ("Handler".into(), SymbolKind::Interface),
+                ("Server.Run".into(), SymbolKind::Method),
+                ("New".into(), SymbolKind::Function),
+            ]
+        );
+    }
+
+    #[test]
+    fn java_classes_and_methods() {
+        let source = "package a;\npublic class UserService {\n  public UserService() {}\n  @Transactional\n  public void register(String email) { save(email); }\n  interface Listener { void on(); }\n}\n";
+        assert_eq!(
+            name_list(Language::Java, source),
+            vec![
+                "UserService",
+                "UserService.UserService",
+                "UserService.register",
+                "UserService.Listener",
+                "UserService.Listener.on"
+            ]
+        );
+    }
+
+    #[test]
+    fn csharp_namespaces_classes_and_members() {
+        let source = "namespace Shop {\n  public class Cart {\n    public decimal Total { get; set; }\n    public void Add(Item item) { }\n  }\n}\n";
+        assert_eq!(name_list(Language::CSharp, source), vec!["Shop", "Shop.Cart", "Shop.Cart.Total", "Shop.Cart.Add"]);
+    }
+
+    #[test]
+    fn ruby_modules_classes_and_methods() {
+        let source =
+            "module Billing\n  class Invoice\n    def total\n      1\n    end\n    def self.build; end\n  end\nend\n";
+        assert_eq!(
+            name_list(Language::Ruby, source),
+            vec!["Billing", "Billing.Invoice", "Billing.Invoice.total", "Billing.Invoice.build"]
+        );
+    }
+
+    #[test]
+    fn php_classes_and_functions() {
+        let source = "<?php\nfunction helper() {}\nclass OrderController {\n  public function store($request) { return 1; }\n}\n";
+        assert_eq!(name_list(Language::Php, source), vec!["helper", "OrderController", "OrderController::store"]);
+    }
+
+    #[test]
+    fn c_functions_and_defined_structs_only() {
+        let source = "struct point { int x; };\nstruct point origin;\nstatic int *make(void) { return 0; }\nint main(int argc, char **argv) { return 0; }\n";
+        assert_eq!(
+            name_list(Language::C, source),
+            vec!["point", "make", "main"],
+            "un uso de `struct point` no es un símbolo"
+        );
+    }
+
+    #[test]
+    fn cpp_namespaces_classes_and_qualified_definitions() {
+        let source = "namespace geo {\nclass Shape {\n public:\n  double area() const { return 0; }\n};\n}\nvoid geo::Shape::draw() {}\nconst std::string &geo::Shape::name() const { return n; }\ntemplate <typename T> T max(T a, T b) { return a > b ? a : b; }\n";
+        assert_eq!(
+            names(Language::Cpp, source),
+            vec![
+                ("geo".into(), SymbolKind::Module),
+                ("geo::Shape".into(), SymbolKind::Class),
+                ("geo::Shape::area".into(), SymbolKind::Method),
+                ("geo::Shape::draw".into(), SymbolKind::Function),
+                ("geo::Shape::name".into(), SymbolKind::Function),
+                ("max".into(), SymbolKind::Function),
+            ]
+        );
     }
 
     #[test]

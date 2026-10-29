@@ -29,9 +29,9 @@ pub(crate) struct ActiveReview {
 
 impl ActiveReview {
     /// Revisión de la sesión activa, o `None` si no la hay o no se puede cargar.
-    pub fn load(store: &Store, projects: &Path) -> Option<Self> {
+    pub fn load(store: &Store, sources: &huella_engine::Sources) -> Option<Self> {
         let session = store.active_review().ok()??;
-        let review = huella_engine::session_review(projects, &session)
+        let review = huella_engine::session_review(sources, &session)
             .inspect_err(|error| eprintln!("huella: no se pudo cargar la revisión {session}: {error}"))
             .ok()?;
         let plan = huella_review::flow::plan(&review);

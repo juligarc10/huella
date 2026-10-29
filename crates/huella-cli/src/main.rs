@@ -341,16 +341,16 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Scan { projects, json, sample, sample_out, sample_offset } => {
-            let projects = projects_dir(projects)?;
+            let projects = claude_projects_dir(projects)?;
             let sample = sample.zip(sample_out).map(|(size, path)| SampleRequest { size, offset: sample_offset, path });
             scan(&projects, json.as_deref(), sample)
         }
         Command::Symbols { file } => print_symbols(&file),
         Command::Refactors { limit } => refactors(&open_store(cli.db)?, limit),
-        Command::Index { projects } => index(&mut open_store(cli.db)?, &projects_dir(projects)?),
+        Command::Index { projects } => index(&mut open_store(cli.db)?, &sources(projects)?),
         Command::Search { words, project, limit, all, projects } => {
             let mut store = open_store(cli.db)?;
-            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            huella_engine::index(&mut store, &sources(projects)?)?;
             let project =
                 project.map(|path| huella_engine::normalize_path(&fs::canonicalize(&path).unwrap_or(path), None));
             let query = huella_store::SearchQuery { text: words.join(" "), project, limit, include_inactive: all };
@@ -373,7 +373,7 @@ fn run(cli: Cli) -> Result<()> {
             let embedder = embedder(model, base_url)
                 .context("indica el modelo con --model o en HUELLA_EMBED_MODEL (p. ej. nomic-embed-text)")?;
             let mut store = open_store(cli.db)?;
-            huella_engine::index(&mut store, &projects_dir(projects)?)?;
+            huella_engine::index(&mut store, &sources(projects)?)?;
             println!("Calculando vectores con {}…", huella_decisions::Embedder::model_id(&embedder));
             let report = huella_engine::embeddings::embed_pending(&mut store, &embedder, limit, |done, total| {
                 println!("  {done} de {total}");
@@ -395,7 +395,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
             let extractor = build_model(model)?;
             let mut store = open_store(cli.db)?;
-            let projects = projects_dir(projects)?;
+            let projects = sources(projects)?;
             // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
             huella_engine::index(&mut store, &projects)?;
             extract(&mut store, &projects, extractor.as_ref(), &ExtractionOptions { limit, chunk_chars })
@@ -426,19 +426,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Review { action } => review_command(cli.db, action),
         Command::Mcp { projects } => {
-            let mut context = mcp::Context { store: open_store(cli.db)?, projects: projects_dir(projects)? };
+            let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
             mcp::serve(&mut context)
         }
-        Command::Lsp { projects, index_every } => {
-            let db = cli
-                .db
-                .or_else(huella_engine::default_db_path)
-                .context("no se encontró dónde guardar datos; usa --db")?;
-            let projects = if index_every == 0 { None } else { Some(projects_dir(projects)?) };
-            let config = huella_lsp::Config { db, projects, index_every: Duration::from_secs(index_every.max(1)) };
-            huella_lsp::serve_stdio(&config)?;
-            Ok(())
-        }
+        Command::Lsp { projects, index_every } => lsp(cli.db, projects, index_every),
     }
 }
 
@@ -447,13 +438,13 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
     match action {
         ReviewCommand::List { limit } => {
             let mut store = open_store(db)?;
-            huella_engine::index(&mut store, &projects_dir(None)?)?;
+            huella_engine::index(&mut store, &sources(None)?)?;
             emit(&review::render_sessions(&huella_engine::list_sessions(&store, limit)?));
             Ok(())
         }
         ReviewCommand::Start { session, open, editor, projects } => {
             let mut store = open_store(db)?;
-            let projects = projects_dir(projects)?;
+            let projects = sources(projects)?;
             huella_engine::index(&mut store, &projects)?;
             let review = huella_engine::session_review(&projects, &session)?;
             let plan = huella_review::flow::plan(&review);
@@ -483,7 +474,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
         ReviewCommand::Narrate { session, model, projects } => {
             let model = build_model(model)?;
             let store = open_store(db)?;
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
             let points = huella_review::attention::attention(&review, &plan);
             println!("Narrando la revisión con {}…", model.model_id());
@@ -498,14 +489,14 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
         }
         ReviewCommand::Open { session, editor, port, no_browser, projects } => {
             let store = open_store(db)?;
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
             // La misma revisión aparece también en el editor mientras se hace en la web.
             store.set_active_review(Some(&review.session_id))?;
             web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
         }
         ReviewCommand::Show { session, file, by_file, projects } => {
-            let review = huella_engine::session_review(&projects_dir(projects)?, &session)?;
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
             if by_file {
                 emit(&review::render_review(&review, file.as_deref()));
             } else {
@@ -523,7 +514,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
 /// borra con `--done`.
 fn review_zed(db: Option<PathBuf>, session: &str, done: bool, open: bool, projects: Option<PathBuf>) -> Result<()> {
     let mut store = open_store(db)?;
-    let projects = projects_dir(projects)?;
+    let projects = sources(projects)?;
     huella_engine::index(&mut store, &projects)?;
     let review = huella_engine::session_review(&projects, session)?;
     let short = &review.session_id[..8.min(review.session_id.len())];
@@ -582,6 +573,15 @@ fn first_pending(
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
 }
 
+/// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.
+fn lsp(db: Option<PathBuf>, projects: Option<PathBuf>, index_every: u64) -> Result<()> {
+    let db = db.or_else(huella_engine::default_db_path).context("no se encontró dónde guardar datos; usa --db")?;
+    let sources = if index_every == 0 { None } else { Some(sources(projects)?) };
+    let config = huella_lsp::Config { db, sources, index_every: Duration::from_secs(index_every.max(1)) };
+    huella_lsp::serve_stdio(&config)?;
+    Ok(())
+}
+
 /// `huella ui`: la aplicación local.
 fn ui_command(
     db: Option<PathBuf>,
@@ -596,7 +596,7 @@ fn ui_command(
     if let Some(dir) = db.parent() {
         fs::create_dir_all(dir)?;
     }
-    ui::serve(ui::Options { port, open_browser, editor, dev, db, projects: projects_dir(projects)?, model })
+    ui::serve(ui::Options { port, open_browser, editor, dev, db, sources: sources(projects)?, model })
 }
 
 /// `huella adr`: exporta los ADRs del proyecto.
@@ -690,7 +690,13 @@ fn emit(text: &str) {
     let _ = std::io::stdout().lock().write_all(text.as_bytes());
 }
 
-fn projects_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+/// Los agentes cuyas sesiones se leen; `explicit` es la carpeta de
+/// transcripciones de Claude Code (`--projects`).
+fn sources(explicit: Option<PathBuf>) -> Result<huella_engine::Sources> {
+    Ok(huella_engine::Sources::detect(claude_projects_dir(explicit)?))
+}
+
+fn claude_projects_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     explicit.or_else(huella_engine::default_projects_dir).context("no se encontró la carpeta personal; usa --projects")
 }
 
@@ -700,7 +706,7 @@ fn open_store(explicit: Option<PathBuf>) -> Result<Store> {
     Store::open(&path).with_context(|| format!("abriendo {}", path.display()))
 }
 
-fn index(store: &mut Store, projects: &Path) -> Result<()> {
+fn index(store: &mut Store, projects: &huella_engine::Sources) -> Result<()> {
     let started = Instant::now();
     let report = huella_engine::index(store, projects)?;
     let stats = store.stats()?;
@@ -759,7 +765,12 @@ fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
     })
 }
 
-fn extract(store: &mut Store, projects: &Path, extractor: &dyn JsonModel, options: &ExtractionOptions) -> Result<()> {
+fn extract(
+    store: &mut Store,
+    projects: &huella_engine::Sources,
+    extractor: &dyn JsonModel,
+    options: &ExtractionOptions,
+) -> Result<()> {
     let started = Instant::now();
     println!("Extrayendo decisiones con {}…", extractor.model_id());
     let report = huella_engine::extract_decisions(store, projects, extractor, options, |conversation| {

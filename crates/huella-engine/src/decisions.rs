@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use huella_claude_code::{discover_transcripts, read_conversations};
 use huella_core::Conversation;
 use huella_decisions::{
     DEFAULT_CHUNK_CHARS, DecisionExtractor, DecisionScope, ExtractedDecision, ExtractionRequest, PreviousDecision,
@@ -55,14 +54,14 @@ pub struct ExtractionReport {
 /// fallos del modelo no son errores: se anotan en el informe.
 pub fn extract_decisions(
     store: &mut Store,
-    projects: &Path,
+    sources: &crate::Sources,
     extractor: &(impl DecisionExtractor + ?Sized),
     options: &ExtractionOptions,
     mut progress: impl FnMut(&Conversation),
 ) -> crate::Result<ExtractionReport> {
     let mut report = ExtractionReport::default();
     let extractor_id = extractor.id();
-    for conversation in conversations(projects)? {
+    for conversation in conversations(sources)? {
         if conversation.turns.len() < MIN_TURNS {
             continue;
         }
@@ -83,6 +82,7 @@ pub fn extract_decisions(
         for dialogue in chunk_dialogue(&conversation, options.chunk_chars) {
             report.calls += 1;
             let known_titles = decisions.iter().map(|d| d.title.clone()).collect();
+            let dialogue = huella_core::redact::redact(&dialogue).into_owned();
             let request = ExtractionRequest { dialogue, known_titles, previous: previous.clone() };
             match extractor.extract(&request) {
                 Ok(found) => {
@@ -186,14 +186,16 @@ pub(crate) fn project_from_paths(paths: &[String], cwd: Option<&Path>) -> Option
 
 /// Diálogo de todas las sesiones. Una sesión continuada puede repartirse
 /// entre varias transcripciones: sus mensajes se juntan en orden.
-fn conversations(projects: &Path) -> crate::Result<Vec<Conversation>> {
+fn conversations(sources: &crate::Sources) -> crate::Result<Vec<Conversation>> {
     let mut by_session: BTreeMap<String, Conversation> = BTreeMap::new();
-    for transcript in discover_transcripts(projects)? {
-        for conversation in read_conversations(&transcript)? {
-            match by_session.get_mut(&conversation.session_id) {
-                Some(existing) => existing.turns.extend(conversation.turns),
-                None => {
-                    by_session.insert(conversation.session_id.clone(), conversation);
+    for agent in sources.agents() {
+        for transcript in agent.sessions()? {
+            for conversation in agent.conversations(&transcript)? {
+                match by_session.get_mut(&conversation.session_id) {
+                    Some(existing) => existing.turns.extend(conversation.turns),
+                    None => {
+                        by_session.insert(conversation.session_id.clone(), conversation);
+                    }
                 }
             }
         }
@@ -214,6 +216,7 @@ mod tests {
     use huella_store::DecisionFilter;
 
     use super::*;
+    use crate::Sources;
 
     /// Extractor de pega: una decisión por cada línea `DECIDE: título` del
     /// diálogo, o `REPLACE D1: título` si reemplaza una de sesiones anteriores.
@@ -285,17 +288,23 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let fake = Fake { requests: RefCell::new(vec![]), fail: false };
 
-        let report = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        let report =
+            extract_decisions(&mut store, &Sources::claude_code(&dir), &fake, &ExtractionOptions::default(), |_| {})
+                .unwrap();
         assert_eq!((report.sessions, report.extracted, report.decisions), (1, 1, 1));
         let stored = store.decisions(&DecisionFilter::default()).unwrap();
         assert_eq!(stored[0].project.as_deref(), Some("/repo"));
         assert_eq!(stored[0].extractor, "fake:1");
 
-        let again = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        let again =
+            extract_decisions(&mut store, &Sources::claude_code(&dir), &fake, &ExtractionOptions::default(), |_| {})
+                .unwrap();
         assert_eq!((again.unchanged, again.calls), (1, 0), "sin mensajes nuevos no se llama al modelo");
 
         write_session(&dir, "s1", &["¿Rust?", "DECIDE: Rust", "vale", "hecho", "¿y SQLite?", "DECIDE: SQLite"]);
-        let grown = extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        let grown =
+            extract_decisions(&mut store, &Sources::claude_code(&dir), &fake, &ExtractionOptions::default(), |_| {})
+                .unwrap();
         assert_eq!(grown.extracted, 1);
         assert_eq!(store.decisions(&DecisionFilter::default()).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -307,10 +316,12 @@ mod tests {
         write_session(&dir, "s1", &["¿base de datos?", "DECIDE: SQLite en local", "vale", "hecho"]);
         let mut store = Store::open_in_memory().unwrap();
         let fake = Fake { requests: RefCell::new(vec![]), fail: false };
-        extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        extract_decisions(&mut store, &Sources::claude_code(&dir), &fake, &ExtractionOptions::default(), |_| {})
+            .unwrap();
 
         write_session(&dir, "s2", &["mejor DuckDB", "REPLACE D1: DuckDB en local", "vale", "hecho"]);
-        extract_decisions(&mut store, &dir, &fake, &ExtractionOptions::default(), |_| {}).unwrap();
+        extract_decisions(&mut store, &Sources::claude_code(&dir), &fake, &ExtractionOptions::default(), |_| {})
+            .unwrap();
         let seen = fake.requests.borrow().last().unwrap().previous.clone();
         assert_eq!(
             seen.iter().map(|p| (p.key.as_str(), p.title.as_str())).collect::<Vec<_>>(),
@@ -381,7 +392,7 @@ mod tests {
         let failing = Fake { requests: RefCell::new(vec![]), fail: true };
         let report = extract_decisions(
             &mut store,
-            &dir,
+            &Sources::claude_code(&dir),
             &failing,
             &ExtractionOptions { limit: Some(1), ..ExtractionOptions::default() },
             |_| {},

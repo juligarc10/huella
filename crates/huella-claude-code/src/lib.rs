@@ -11,7 +11,8 @@ use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use huella_core::{
-    AfterState, Conversation, EditContext, EditKind, EditOrigin, FileEdit, Speaker, TranscriptCursor, Turn,
+    AfterState, Agent, AgentBatch, AgentError, Conversation, EditContext, EditKind, EditOrigin, FileEdit, Speaker,
+    TranscriptCursor, Turn,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -351,6 +352,34 @@ fn apply_replacements(before: Option<&str>, replacements: &[Replacement]) -> Aft
 
 fn str_field<'a>(fields: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     fields.get(key).and_then(Value::as_str)
+}
+
+/// Claude Code como [`Agent`]: sus transcripciones están bajo `projects`
+/// (`~/.claude/projects` por defecto).
+pub struct ClaudeCode {
+    pub projects: PathBuf,
+}
+
+impl Agent for ClaudeCode {
+    fn name(&self) -> &'static str {
+        AGENT
+    }
+
+    fn sessions(&self) -> Result<Vec<PathBuf>, AgentError> {
+        if !self.projects.exists() {
+            return Ok(Vec::new());
+        }
+        discover_transcripts(&self.projects).map_err(|error| AgentError::new(AGENT, &self.projects, &error))
+    }
+
+    fn read_from(&self, path: &Path, from: &TranscriptCursor) -> Result<AgentBatch, AgentError> {
+        let parsed = read_transcript_from(path, from).map_err(|error| AgentError::new(AGENT, path, &error))?;
+        Ok(AgentBatch { edits: parsed.edits, resume: parsed.resume })
+    }
+
+    fn conversations(&self, path: &Path) -> Result<Vec<Conversation>, AgentError> {
+        read_conversations(path).map_err(|error| AgentError::new(AGENT, path, &error))
+    }
 }
 
 #[cfg(test)]

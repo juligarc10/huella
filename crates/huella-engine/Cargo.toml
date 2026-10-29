@@ -3,6 +3,7 @@ name = "huella-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
@@ -10,6 +11,8 @@ blake3 = "1.8.7"
 dirs = "7.0.0"
 huella-anchoring = { version = "0.1.0", path = "../huella-anchoring" }
 huella-claude-code = { version = "0.1.0", path = "../huella-claude-code" }
+huella-codex = { version = "0.1.0", path = "../huella-codex" }
+huella-copilot = { version = "0.1.0", path = "../huella-copilot" }
 huella-core = { version = "0.1.0", path = "../huella-core" }
 huella-decisions = { version = "0.1.0", path = "../huella-decisions" }
 huella-review = { version = "0.1.0", path = "../huella-review" }

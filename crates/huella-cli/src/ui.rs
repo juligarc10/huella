@@ -44,14 +44,14 @@ pub struct Options {
     /// Acepta también el servidor de desarrollo de Vite, que reenvía `/api`.
     pub dev: bool,
     pub db: PathBuf,
-    pub projects: PathBuf,
+    pub sources: huella_engine::Sources,
     pub model: ModelArgs,
 }
 
 struct App {
     store: Store,
     db: PathBuf,
-    projects: PathBuf,
+    sources: huella_engine::Sources,
     editor: Editor,
     token: String,
     allowed_hosts: Vec<String>,
@@ -83,7 +83,7 @@ pub fn serve(options: Options) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("no se pudo abrir el servidor local: {error}"))?;
     let port = server.server_addr().to_ip().context("dirección del servidor desconocida")?.port();
     let mut store = Store::open(&options.db).with_context(|| format!("abriendo {}", options.db.display()))?;
-    huella_engine::index(&mut store, &options.projects)?;
+    huella_engine::index(&mut store, &options.sources)?;
     let token = crate::web::token("huella-ui");
     let mut allowed_hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let page_port = if options.dev {
@@ -97,7 +97,7 @@ pub fn serve(options: Options) -> Result<()> {
     let mut app = App {
         store,
         db: options.db,
-        projects: options.projects,
+        sources: options.sources,
         editor: options.editor,
         token,
         allowed_hosts,
@@ -361,7 +361,7 @@ fn mark(app: &mut App, session: &str, body: &str) -> Result<Value> {
 fn load_review(app: &mut App, session: &str) -> Result<()> {
     let cached = app.review.as_ref().is_some_and(|(review, _)| review.session_id.starts_with(session));
     if !cached {
-        let review = huella_engine::session_review(&app.projects, session)?;
+        let review = huella_engine::session_review(&app.sources, session)?;
         let plan = huella_review::flow::plan(&review);
         app.review = Some((review, plan));
     }
@@ -389,7 +389,7 @@ fn status(app: &App) -> Result<Value> {
             "symbols": stats.anchored_symbols,
         },
         "db": app.db.display().to_string(),
-        "projects_dir": app.projects.display().to_string(),
+        "agents": app.sources.names(),
         "semantic": semantic,
         "extractor": extractor_label(&app.model),
         "jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner),
@@ -420,7 +420,7 @@ fn start_job(app: &App, kind: &str) -> (u16, Value) {
         jobs.insert(kind.to_owned(), Job { state: "running", ..Job::default() });
     }
     let (jobs, kind) = (Arc::clone(&app.jobs), kind.to_owned());
-    let (db, projects, model) = (app.db.clone(), app.projects.clone(), app.model.clone());
+    let (db, sources, model) = (app.db.clone(), app.sources.clone(), app.model.clone());
     std::thread::spawn(move || {
         let progress = |done: usize, total: usize, message: Option<String>| {
             let mut all = jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -431,7 +431,7 @@ fn start_job(app: &App, kind: &str) -> (u16, Value) {
                 }
             }
         };
-        let outcome = run_job(&kind, &db, &projects, model, &progress);
+        let outcome = run_job(&kind, &db, &sources, model, &progress);
         let mut all = jobs.lock().unwrap_or_else(PoisonError::into_inner);
         let job = all.entry(kind).or_default();
         job.finished_at = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
@@ -453,7 +453,7 @@ fn start_job(app: &App, kind: &str) -> (u16, Value) {
 fn run_job(
     kind: &str,
     db: &Path,
-    projects: &Path,
+    projects: &huella_engine::Sources,
     model: ModelArgs,
     progress: &dyn Fn(usize, usize, Option<String>),
 ) -> Result<Value> {
@@ -577,6 +577,7 @@ fn session_json(listing: &huella_engine::SessionListing) -> Value {
     let summary = &listing.summary;
     json!({
         "id": summary.id,
+        "agent": summary.agent,
         "project": listing.project,
         "first_at": summary.first_at,
         "last_at": summary.last_at,

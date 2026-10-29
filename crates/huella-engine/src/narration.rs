@@ -154,7 +154,7 @@ fn turn_request(review: &SessionReview, plan: &[FlowStep], points: &[Attention],
     if !detected.is_empty() {
         let _ = write!(out, "\nPuntos de atención ya detectados:\n{}\n", detected.join("\n"));
     }
-    out
+    huella_core::redact::redact(&out).into_owned()
 }
 
 fn input_hash(model: &str, request: &str) -> String {

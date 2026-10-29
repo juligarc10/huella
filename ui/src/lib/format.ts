@@ -68,6 +68,17 @@ export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text
 }
 
+/** Nombre legible del agente de una sesión. */
+export function agentLabel(agent: string): string {
+  const labels: Record<string, string> = {
+    'claude-code': 'Claude Code',
+    copilot: 'Copilot',
+    'copilot-cli': 'Copilot CLI',
+    codex: 'Codex',
+  }
+  return labels[agent] ?? agent
+}
+
 export const statusLabel: Record<string, string> = {
   accepted: 'Vigente',
   superseded: 'Reemplazada',

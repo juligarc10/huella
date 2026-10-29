@@ -1,9 +1,7 @@
 //! Revisión de lo que cambió en una sesión.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
-use huella_claude_code::{discover_transcripts, read_transcript};
 use huella_core::FileEdit;
 use huella_review::SessionReview;
 use huella_store::{SessionSummary, Store};
@@ -47,23 +45,27 @@ pub fn session_project(store: &Store, session_id: &str) -> Result<Option<String>
 ///
 /// # Errors
 /// Si no hay ninguna sesión con ese prefijo, hay varias, o falla la lectura.
-pub fn session_review(projects: &Path, prefix: &str) -> Result<SessionReview> {
+pub fn session_review(sources: &crate::Sources, prefix: &str) -> Result<SessionReview> {
     let mut edits: Vec<FileEdit> = Vec::new();
     let mut sessions: BTreeSet<String> = BTreeSet::new();
     // Última edición de cada fichero en cualquier sesión, para saber si otra
     // sesión lo tocó después.
     let mut latest: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-    for transcript in discover_transcripts(projects)? {
-        for edit in read_transcript(&transcript)?.edits {
-            let path = normalize_path(&edit.path, edit.origin.cwd.as_deref());
-            let entry = latest.entry(path).or_insert((None, String::new()));
-            if edit.origin.timestamp >= entry.0 {
-                *entry = (edit.origin.timestamp.clone(), edit.origin.session_id.clone());
-            }
-            if edit.origin.session_id.starts_with(prefix) {
-                sessions.insert(edit.origin.session_id.clone());
-                edits.push(edit);
-            }
+    let mut all_edits: Vec<FileEdit> = Vec::new();
+    for agent in sources.agents() {
+        for file in agent.sessions()? {
+            all_edits.extend(agent.read(&file)?.edits);
+        }
+    }
+    for edit in all_edits {
+        let path = normalize_path(&edit.path, edit.origin.cwd.as_deref());
+        let entry = latest.entry(path).or_insert((None, String::new()));
+        if edit.origin.timestamp >= entry.0 {
+            *entry = (edit.origin.timestamp.clone(), edit.origin.session_id.clone());
+        }
+        if edit.origin.session_id.starts_with(prefix) {
+            sessions.insert(edit.origin.session_id.clone());
+            edits.push(edit);
         }
     }
     let session = match sessions.len() {
@@ -91,6 +93,7 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+    use crate::Sources;
 
     fn line(uuid: &str, session: &str, at: &str, result: &serde_json::Value) -> String {
         serde_json::json!({"type": "user", "uuid": uuid, "sessionId": session, "timestamp": at, "cwd": "/repo",
@@ -116,17 +119,20 @@ mod tests {
         )
         .unwrap();
 
-        let review = session_review(&dir, "aaaa").unwrap();
+        let review = session_review(&Sources::claude_code(&dir), "aaaa").unwrap();
         assert_eq!(review.session_id, "aaaa-1");
         assert_eq!(review.files.len(), 1);
         assert_eq!(review.files[0].after, "a\nB\n");
-        assert!(matches!(session_review(&dir, "cccc"), Err(EngineError::SessionNotFound(_))));
+        assert!(matches!(session_review(&Sources::claude_code(&dir), "cccc"), Err(EngineError::SessionNotFound(_))));
         std::fs::write(
             dir.join("-repo/t3.jsonl"),
             format!("{}\n", line("e3", "aaaa-2", "2026-10-27T12:00:00Z", &other)),
         )
         .unwrap();
-        assert!(matches!(session_review(&dir, "aaaa"), Err(EngineError::AmbiguousSession { .. })));
+        assert!(matches!(
+            session_review(&Sources::claude_code(&dir), "aaaa"),
+            Err(EngineError::AmbiguousSession { .. })
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
