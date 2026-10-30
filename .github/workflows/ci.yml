@@ -93,9 +93,14 @@ jobs:
           Stop-Process $server
 
   # La aplicación de escritorio tiene su propio workspace (necesita WebKit en
-  # Linux): se comprueba en macOS, donde el sistema ya trae su WebView.
+  # Linux). Se comprueba en los tres sistemas: tiene código que solo existe en
+  # algunos (el Dock de macOS) y un fallo así no se ve compilando en uno.
   app:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -107,5 +112,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop
-      - run: cargo fmt --check
+      - name: Bibliotecas de WebKit (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - if: runner.os == 'macOS'
+        run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings

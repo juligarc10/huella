@@ -17,7 +17,7 @@ use huella_cli::desktop::Desktop;
 use tauri::http::{Request, Response, StatusCode, header};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 
 const MAIN_WINDOW: &str = "main";
 /// Cada cuánto se recuenta lo pendiente para la barra de menús.
@@ -55,13 +55,23 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("no se pudo iniciar Huella");
 
-    app.run(|app, event| {
-        // macOS: pulsar el icono del Dock con la ventana oculta la vuelve a mostrar.
-        if let RunEvent::Reopen { .. } = event {
-            show_window(app);
-        }
-    });
+    app.run(on_event);
 }
+
+/// macOS: pulsar el icono del Dock con la ventana oculta la vuelve a mostrar.
+/// El evento solo existe allí; en Windows y Linux la ventana se recupera desde
+/// la bandeja.
+#[cfg(target_os = "macos")]
+#[allow(clippy::needless_pass_by_value, reason = "la firma la impone el bucle de eventos de Tauri")]
+fn on_event(app: &AppHandle, event: tauri::RunEvent) {
+    if let tauri::RunEvent::Reopen { .. } = event {
+        show_window(app);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::needless_pass_by_value, reason = "la firma la impone el bucle de eventos de Tauri")]
+fn on_event(_app: &AppHandle, _event: tauri::RunEvent) {}
 
 /// Respuesta del protocolo `huella://` a una petición de la ventana.
 fn respond(desktop: Result<&Desktop, &String>, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
