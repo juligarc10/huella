@@ -39,3 +39,55 @@ jobs:
       # El binario incrusta ui/dist: tiene que corresponder con el código.
       - name: ui/dist is up to date
         run: git diff --exit-code -- ui/dist || (echo "Rebuild the UI with 'pnpm --dir ui build' and commit ui/dist" && exit 1)
+
+  # Los instaladores contra un espejo local de la última release: se prueba su
+  # lógica (versión, descarga, checksum, instalación) en cada PR, en los tres
+  # sistemas, sin depender de lo que tenga publicado la release.
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Espejo de la última release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          mkdir -p "mirror/$version"
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'huella-*' --dir "mirror/$version"
+          cd "mirror/$version"
+          if command -v sha256sum >/dev/null; then sha256sum huella-* > SHA256SUMS; else shasum -a 256 huella-* > SHA256SUMS; fi
+          cat SHA256SUMS
+          echo "MIRROR_VERSION=$version" >> "$GITHUB_ENV"
+      - name: install.sh
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory mirror >/dev/null 2>&1 &
+          sleep 2
+          export HUELLA_DOWNLOAD_URL=http://127.0.0.1:8765 HUELLA_NO_SETUP=1
+          HUELLA_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/huella" --version
+          # Un checksum que no coincide tiene que impedir la instalación.
+          sed -i.orig 's/^[0-9a-f]\{64\}/0000000000000000000000000000000000000000000000000000000000000000/' "mirror/$MIRROR_VERSION/SHA256SUMS"
+          if HUELLA_INSTALL_DIR="$RUNNER_TEMP/bad" sh install.sh; then
+            echo "install.sh aceptó un checksum incorrecto"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bad/huella"
+      - name: install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'mirror' -PassThru
+          Start-Sleep 2
+          $env:HUELLA_DOWNLOAD_URL = 'http://127.0.0.1:8765'
+          $env:HUELLA_NO_SETUP = '1'
+          $env:HUELLA_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'huella'
+          ./install.ps1
+          & (Join-Path $env:HUELLA_INSTALL_DIR 'huella.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Stop-Process $server

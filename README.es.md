@@ -45,8 +45,30 @@ C y C++.
 
 ## Instalación
 
+macOS y Linux:
+
 ```sh
-cargo install --git https://github.com/juligarc10/huella huella-cli   # o un binario de las releases
+curl -fsSL https://raw.githubusercontent.com/juligarc10/huella/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/juligarc10/huella/main/install.ps1 | iex
+```
+
+El instalador descarga el binario de tu sistema de la última
+[release](https://github.com/juligarc10/huella/releases), lo comprueba con su
+`SHA256SUMS` (sin él no instala nada), lo deja en `~/.local/bin`
+(`%LOCALAPPDATA%\Programs\huella` en Windows, que añade a tu `PATH`) y lanza
+`huella setup`. Con `HUELLA_VERSION` eliges otra versión, con
+`HUELLA_INSTALL_DIR` otra carpeta y con `HUELLA_NO_SETUP=1` te saltas la
+configuración.
+
+También puedes compilarlo con Rust 1.90+ y configurarlo después:
+
+```sh
+cargo install --git https://github.com/juligarc10/huella huella-cli
 huella setup        # pregunta; huella setup --yes toma las opciones por defecto
 huella doctor       # comprueba la instalación (--online llama también a los modelos)
 ```
