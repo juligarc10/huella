@@ -3,9 +3,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Para volver a generar una release ya etiquetada (o solo uno de sus
+  # binarios) sin mover la etiqueta.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Etiqueta de la release (p. ej. v0.1.0)"
+        required: true
+      only:
+        description: "Solo este target (vacío: todos, y la extensión)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -17,42 +31,54 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          # GitHub retiró los runners Intel de macOS: se compila de forma
+          # cruzada desde el de ARM.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        if: ${{ !inputs.only || inputs.only == matrix.target }}
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !inputs.only || inputs.only == matrix.target }}
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked -p huella-cli --target ${{ matrix.target }}
+      - if: ${{ !inputs.only || inputs.only == matrix.target }}
+        run: cargo build --release --locked -p huella-cli --target ${{ matrix.target }}
       - name: Package (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && (!inputs.only || inputs.only == matrix.target)
         run: |
-          name=huella-${{ github.ref_name }}-${{ matrix.target }}
+          name=huella-$TAG-${{ matrix.target }}
           mkdir "$name"
           cp target/${{ matrix.target }}/release/huella README.md LICENSE-MIT LICENSE-APACHE "$name"/
           tar czf "$name.tar.gz" "$name"
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (!inputs.only || inputs.only == matrix.target)
         shell: pwsh
         run: |
-          $name = "huella-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "huella-$env:TAG-${{ matrix.target }}"
           New-Item -ItemType Directory $name
           Copy-Item target/${{ matrix.target }}/release/huella.exe, README.md, LICENSE-MIT, LICENSE-APACHE $name
           Compress-Archive $name "$name.zip"
       - uses: softprops/action-gh-release@v2
+        if: ${{ !inputs.only || inputs.only == matrix.target }}
         with:
+          tag_name: ${{ env.TAG }}
           files: huella-*.*
 
   # Extensión de VS Code. Nombre fijo: huella setup la descarga de
   # releases/latest/download/huella.vsix.
   vsix:
+    if: ${{ !inputs.only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -64,4 +90,5 @@ jobs:
           npx vsce package --no-dependencies --out ../../huella.vsix
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: huella.vsix
