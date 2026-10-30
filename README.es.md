@@ -46,12 +46,25 @@ C y C++.
 ## Instalación
 
 ```sh
-cargo install --path crates/huella-cli            # binario `huella` en ~/.cargo/bin
-
-cd extensions/vscode
-npm install && npm run package
-code --install-extension huella-0.1.0.vsix
+cargo install --git https://github.com/juligarc10/huella huella-cli   # o un binario de las releases
+huella setup        # pregunta; huella setup --yes toma las opciones por defecto
+huella doctor       # comprueba la instalación (--online llama también a los modelos)
 ```
+
+`huella setup` solo hace lo que falta, así que repetirlo tras actualizar es
+seguro:
+
+- guarda una copia de la base de datos antes de migrar su esquema;
+- configura el modelo (API de Claude, Ollama local u otro servidor compatible
+  con OpenAI), lo prueba y guarda la clave aparte, en un fichero `chmod 600`;
+- opcionalmente, los embeddings para buscar por significado;
+- registra el servidor MCP en los agentes que encuentra (Claude Code, Codex,
+  Copilot en VS Code, Copilot CLI) sin tocar el resto de su configuración;
+- instala la extensión de VS Code de la última release (`--vsix` para una local);
+- indexa tus sesiones.
+
+`huella doctor` dice qué falta y cómo arreglarlo, y termina con error si algo
+no va a funcionar.
 
 La extensión arranca `huella lsp`, que indexa las sesiones de los agentes al
 abrir el editor y cada 30 segundos.
@@ -64,11 +77,11 @@ desaparece). Zed debe ver
 lanzaste antes de instalar Rust). Zed muestra el hover; los `CodeLens` puede
 no pintarlos.
 
-**Agentes (MCP)**: registra el servidor en tu agente, por ejemplo en Claude
+**Agentes (MCP)**: `huella setup` los registra. A mano, por ejemplo en Claude
 Code:
 
 ```sh
-claude mcp add huella -- huella mcp
+claude mcp add --scope user huella -- huella mcp
 ```
 
 ## La aplicación
