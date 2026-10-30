@@ -16,12 +16,14 @@ export function AskPanel({
   questions,
   asking,
   model,
+  problem,
 }: {
   session: string
   step: ReviewStep
   questions: ReviewQuestion[]
   asking: PendingAsk[]
   model: string
+  problem: string | null
 }) {
   const ask = useAsk(session)
   const [scope, setScope] = useState<'step' | 'session'>('step')
@@ -88,6 +90,12 @@ export function AskPanel({
         </div>
       ))}
 
+      {problem && (
+        <p className="flex gap-2 rounded-lg bg-warn-soft px-3.5 py-2.5 text-sm leading-relaxed text-warn" role="note">
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>{problem}</span>
+        </p>
+      )}
       <label htmlFor="pregunta" className="sr-only">
         Pregunta
       </label>
@@ -96,14 +104,17 @@ export function AskPanel({
         value={question}
         onChange={(event) => setQuestion(event.target.value)}
         onKeyDown={onKey}
+        disabled={Boolean(problem)}
         placeholder={scope === 'step' ? '¿Por qué lo hizo así? ¿Qué pasa si…?' : '¿Qué falta por probar? ¿Hay algo que no pedí?'}
         className="min-h-16 text-sm"
       />
       <div className="flex items-center gap-2">
-        <Button size="sm" onClick={send} disabled={!question.trim() || ask.isPending}>
+        <Button size="sm" onClick={send} disabled={Boolean(problem) || !question.trim() || ask.isPending}>
           <Send aria-hidden="true" /> Preguntar
         </Button>
-        <span className="text-xs text-muted-foreground">Responde con el contexto de la sesión · ⌘⏎</span>
+        <span className="text-xs text-muted-foreground">
+          {problem ? 'Sin modelo configurado' : `Responde ${model.replace(/^[^:]+:/, '')} con el contexto de la sesión · ⌘⏎`}
+        </span>
       </div>
     </Panel>
   )

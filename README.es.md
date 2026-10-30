@@ -238,6 +238,19 @@ huella decisions extract --provider openai-compatible \
 
 Solo procesa las sesiones nuevas o que han crecido; `--limit N` acota cuántas.
 
+El mismo modelo responde a las preguntas a una sesión. Para no repetir
+`--provider`, `--base-url` y `--model`, defínelos una vez en tu perfil del shell
+y `huella ui` (y el resto de órdenes) los toma de ahí:
+
+```sh
+export HUELLA_LLM_PROVIDER=openai-compatible
+export HUELLA_LLM_BASE_URL=http://localhost:11434/v1
+export HUELLA_LLM_MODEL=qwen2.5:7b
+export HUELLA_LLM_API_KEY=…   # solo si el servidor la pide
+```
+
+Si falta algo, el panel «Preguntar a la sesión» lo dice antes de que escribas.
+
 Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale
 en todos los proyectos, como el idioma de los commits), del proyecto o de una
 carpeta concreta. Al extraer una sesión, el modelo ve las decisiones vigentes

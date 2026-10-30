@@ -404,7 +404,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
             )}
           </p>
 
-          <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} />
+          <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} />
           <p className="text-xs text-muted-foreground">Empezó {dateTime(review.turns[0]?.started_at)}</p>
         </article>
       </div>

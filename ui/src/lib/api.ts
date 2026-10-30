@@ -294,5 +294,7 @@ export interface ReviewResult {
   follow_ups: FollowUp[]
   hints: CommentHint[]
   ask_model: string
+  /** Qué falta para poder preguntar (sin credencial, sin modelo), o `null`. */
+  ask_problem: string | null
   narrations: Record<string, Narration>
 }

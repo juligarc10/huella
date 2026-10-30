@@ -101,7 +101,18 @@ huella refactors                      # how much memory survives renames and mov
 
 Decision extraction works with the Claude API (`ANTHROPIC_API_KEY`, default
 `claude-haiku-5-5`) or any OpenAI-compatible server (Ollama, LM Studio,
-llama.cpp, vLLM; key in `HUELLA_LLM_API_KEY`). Search by meaning works with any
+llama.cpp, vLLM; key in `HUELLA_LLM_API_KEY`). The same model answers the
+questions you ask a session. Instead of repeating `--provider`, `--base-url` and
+`--model`, set them once in your shell profile and `huella ui` picks them up:
+
+```sh
+export HUELLA_LLM_PROVIDER=openai-compatible
+export HUELLA_LLM_BASE_URL=http://localhost:11434/v1
+export HUELLA_LLM_MODEL=qwen2.5:7b
+export HUELLA_LLM_API_KEY=…   # only if the server asks for one
+```
+
+Search by meaning works with any
 OpenAI-compatible embeddings endpoint; a multilingual model such as `bge-m3`
 works best if your sessions aren't in English.
 

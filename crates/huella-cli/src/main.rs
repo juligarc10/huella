@@ -348,13 +348,13 @@ enum ReviewCommand {
 #[derive(clap::Args, Clone)]
 struct ModelArgs {
     /// Proveedor del modelo.
-    #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
+    #[arg(long, value_enum, env = "HUELLA_LLM_PROVIDER", default_value_t = Provider::Anthropic)]
     provider: Provider,
     /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
-    #[arg(long)]
+    #[arg(long, env = "HUELLA_LLM_MODEL")]
     model: Option<String>,
     /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
-    #[arg(long)]
+    #[arg(long, env = "HUELLA_LLM_BASE_URL")]
     base_url: Option<String>,
 }
 
@@ -840,6 +840,23 @@ pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenA
     let model = model.or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok()).filter(|m| !m.trim().is_empty())?;
     let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok());
     Some(OpenAiEmbeddings::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+}
+
+/// Qué le falta a la configuración del modelo para poder llamarlo, si algo.
+/// Con openai-compatible la clave es opcional: un servidor local no la pide.
+fn model_problem(args: &ModelArgs) -> Option<String> {
+    match args.provider {
+        Provider::Anthropic if std::env::var_os("ANTHROPIC_API_KEY").is_none_or(|key| key.is_empty()) => Some(
+            "No hay modelo configurado: define ANTHROPIC_API_KEY, o usa un servidor compatible con OpenAI con \
+             HUELLA_LLM_PROVIDER=openai-compatible, HUELLA_LLM_BASE_URL, HUELLA_LLM_MODEL y, si la pide, \
+             HUELLA_LLM_API_KEY. Después vuelve a abrir huella ui."
+                .to_owned(),
+        ),
+        Provider::OpenaiCompatible if args.model.is_none() => {
+            Some("Falta el modelo: define HUELLA_LLM_MODEL (o --model) y vuelve a abrir huella ui.".to_owned())
+        }
+        _ => None,
+    }
 }
 
 fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {

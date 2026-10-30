@@ -397,6 +397,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
             .collect::<Vec<_>>()
     );
     value["ask_model"] = json!(extractor_label(&app.model));
+    value["ask_problem"] = json!(crate::model_problem(&app.model));
     Ok(value)
 }
 
@@ -513,6 +514,9 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
         .context("la pregunta está vacía")?
         .to_owned();
     let step = request["step"].as_u64().and_then(|s| usize::try_from(s).ok());
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let session_id = review.session_id.clone();
@@ -915,5 +919,17 @@ mod tests {
         assert_eq!(mime("assets/index-1a2b.js"), "text/javascript; charset=utf-8");
         assert_eq!(mime("fonts/geist.woff2"), "font/woff2");
         assert_eq!(mime("raro"), "application/octet-stream");
+    }
+
+    #[test]
+    fn asking_without_a_model_says_what_is_missing() {
+        let model = |name: Option<&str>| ModelArgs {
+            provider: crate::Provider::OpenaiCompatible,
+            model: name.map(str::to_owned),
+            base_url: None,
+        };
+        assert!(crate::model_problem(&model(None)).is_some_and(|problem| problem.contains("HUELLA_LLM_MODEL")));
+        // Sin clave también vale: un servidor local no la pide.
+        assert_eq!(crate::model_problem(&model(Some("qwen2.5:7b"))), None);
     }
 }
