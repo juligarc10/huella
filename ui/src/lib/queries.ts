@@ -92,7 +92,10 @@ export function useReview(session: string | undefined) {
     enabled: Boolean(session),
     staleTime: 60_000,
     // Mientras el modelo responde una pregunta, se consulta a menudo.
-    refetchInterval: (state) => (state.state.data?.asking.some((ask) => !ask.error) ? 1500 : false),
+    refetchInterval: (state) => {
+      const data = state.state.data
+      return data?.asking.some((ask) => !ask.error) || data?.covering?.running ? 1500 : false
+    },
   })
 }
 
@@ -177,6 +180,15 @@ export function useFeedback(session: string, enabled: boolean) {
     queryFn: () => api.get<{ markdown: string; items: number }>(`review/${session}/feedback`),
     enabled,
     staleTime: 0,
+  })
+}
+
+export function useCoverage(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post(`review/${session}/coverage`, {}),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
   })
 }
 

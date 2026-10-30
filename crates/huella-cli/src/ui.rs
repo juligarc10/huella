@@ -63,6 +63,8 @@ struct App {
     activity: Vec<huella_core::Activity>,
     /// Impacto de la sesión cargada, que recorre el proyecto: se calcula una vez.
     impact: Option<Value>,
+    /// Cobertura en curso por sesión: `None` mientras se calcula, o el error.
+    covering: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
 }
@@ -123,6 +125,7 @@ pub fn serve(options: Options) -> Result<()> {
         review: None,
         activity: Vec::new(),
         impact: None,
+        covering: Arc::new(Mutex::new(HashMap::new())),
         asking: Arc::new(Mutex::new(HashMap::new())),
     };
     if options.dev && Assets::get("index.html").is_none() {
@@ -189,6 +192,7 @@ fn api(
         (Method::Post, ["review", session, "comments"]) => add_comment(app, session, body)?,
         (Method::Get, ["review", session, "feedback"]) => feedback(app, session)?,
         (Method::Get, ["review", session, "impact"]) => impact(app, session)?,
+        (Method::Post, ["review", session, "coverage"]) => return start_coverage(app, session),
         (Method::Post, ["review", session, "ask"]) => return ask(app, session, body),
         (Method::Post, ["comments", id]) => update_comment(app, id, body)?,
         (Method::Get, ["status"]) => status(app)?,
@@ -407,6 +411,12 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     );
     value["ask_model"] = json!(extractor_label(&app.model));
     value["ask_problem"] = json!(crate::model_problem(&app.model));
+    value["coverage"] = serde_json::to_value(huella_engine::coverage::coverages(&app.store, review, plan, &points)?)?;
+    value["covering"] = match app.covering.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id) {
+        Some(None) => json!({"running": true}),
+        Some(Some(error)) => json!({"running": false, "error": error}),
+        None => Value::Null,
+    };
     Ok(value)
 }
 
@@ -503,6 +513,46 @@ fn update_comment(app: &App, id: &str, body: &str) -> Result<Value> {
         bail!("no hay ningún comentario {id}");
     }
     Ok(json!({}))
+}
+
+/// Cobertura de la petición de cada turno: la calcula un hilo con el modelo
+/// configurado; la revisión la muestra en curso mientras tanto.
+fn start_coverage(app: &mut App, session: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let session_id = review.session_id.clone();
+    {
+        let mut running = app.covering.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(running.get(&session_id), Some(None)) {
+            return Ok((202, json!({"running": true})));
+        }
+        running.insert(session_id.clone(), None);
+    }
+    let (covering, db, model) = (Arc::clone(&app.covering), app.db.clone(), app.model.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<Vec<String>> {
+            let store = Store::open(&db)?;
+            let model = crate::build_model(&model)?;
+            let points = huella_review::attention::attention(&review, &plan);
+            Ok(huella_engine::coverage::cover(&store, &review, &plan, &points, model.as_ref(), |_| {})?.failures)
+        })();
+        let mut all = covering.lock().unwrap_or_else(PoisonError::into_inner);
+        match outcome {
+            Ok(failures) if failures.is_empty() => {
+                all.remove(&session_id);
+            }
+            Ok(failures) => {
+                all.insert(session_id, Some(failures.join("; ")));
+            }
+            Err(error) => {
+                all.insert(session_id, Some(format!("{error:#}")));
+            }
+        }
+    });
+    Ok((202, json!({"running": true})))
 }
 
 /// Qué código del proyecto, fuera de la sesión, usa lo que cambió cada paso.

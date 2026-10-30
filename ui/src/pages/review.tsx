@@ -19,6 +19,7 @@ import { Link, useParams } from 'react-router'
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
 import { AskPanel } from '@/components/review/ask-panel'
 import { EvidencePanel } from '@/components/review/evidence'
+import { CoveragePanel } from '@/components/review/coverage'
 import { ImpactPanel } from '@/components/review/impact'
 import { StepDiff } from '@/components/review/diff'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
@@ -284,6 +285,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
         </nav>
 
         <article aria-label="Paso seleccionado" className="flex min-w-0 flex-[999_1_520px] flex-col gap-4">
+          {step.turn !== null && <CoveragePanel review={review} session={session} turn={step.turn} onStep={go} />}
           {narration?.summary && (
             <Panel className="flex flex-col gap-2 border-brand/30 bg-brand-soft/50">
               <h2 className="flex items-center gap-2 text-[13px] font-semibold text-accent-foreground">

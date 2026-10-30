@@ -312,6 +312,17 @@ enum ReviewCommand {
         #[arg(long)]
         projects: Option<PathBuf>,
     },
+    /// Comprueba con un modelo si cada turno hace lo que se pidió: requisitos
+    /// cumplidos, a medias o sin hacer, y lo que hizo sin pedírselo.
+    Coverage {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Abre la revisión guiada de una sesión en el navegador.
     Open {
         /// Id de la sesión o su comienzo.
@@ -547,6 +558,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             }
             Ok(())
         }
+        ReviewCommand::Coverage { session, model, projects } => coverage_command(db, &session, &model, projects),
         ReviewCommand::Open { session, editor, port, no_browser, projects } => {
             let store = open_store(db)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
@@ -577,6 +589,57 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
 
 /// `huella review zed`: prepara el worktree de revisión y lo abre en Zed, o lo
 /// borra con `--done`.
+fn coverage_command(db: Option<PathBuf>, session: &str, model: &ModelArgs, projects: Option<PathBuf>) -> Result<()> {
+    use huella_engine::coverage::RequirementStatus;
+    let model = build_model(model)?;
+    let store = open_store(db)?;
+    let review = huella_engine::session_review(&sources(projects)?, session)?;
+    let plan = huella_review::flow::plan(&review);
+    let points = huella_review::attention::attention(&review, &plan);
+    println!("Comprobando la cobertura con {}…", model.model_id());
+    let report = huella_engine::coverage::cover(&store, &review, &plan, &points, model.as_ref(), |turn| {
+        println!("  · turno {}", turn + 1);
+    })?;
+    for failure in &report.failures {
+        eprintln!("aviso: {failure}");
+    }
+    let step_name = |index: usize| {
+        plan[index]
+            .symbol
+            .as_ref()
+            .map_or_else(|| review.files[plan[index].file].path.clone(), |s| s.qualified_name.clone())
+    };
+    for (turn, coverage) in huella_engine::coverage::coverages(&store, &review, &plan, &points)? {
+        let prompt = review.turns.get(turn).and_then(|t| t.prompt.as_deref()).unwrap_or("(sin petición)");
+        println!(
+            "\nTurno {} · «{}»{}",
+            turn + 1,
+            prompt.lines().next().unwrap_or_default(),
+            if coverage.stale { " (desfasada)" } else { "" }
+        );
+        for requirement in &coverage.requirements {
+            let mark = match requirement.status {
+                RequirementStatus::Done => "✓",
+                RequirementStatus::Partial => "~",
+                RequirementStatus::Missing => "✗",
+            };
+            let steps: Vec<String> = requirement.steps.iter().map(|&s| step_name(s)).collect();
+            println!(
+                "  {mark} {}{}",
+                requirement.text,
+                if steps.is_empty() { String::new() } else { format!(" → {}", steps.join(", ")) }
+            );
+            if let Some(note) = &requirement.note {
+                println!("      {note}");
+            }
+        }
+        for (step, note) in &coverage.unrequested {
+            println!("  + sin pedir: {} — {note}", step_name(*step));
+        }
+    }
+    Ok(())
+}
+
 fn review_zed(db: Option<PathBuf>, session: &str, done: bool, open: bool, projects: Option<PathBuf>) -> Result<()> {
     let mut store = open_store(db)?;
     let projects = sources(projects)?;

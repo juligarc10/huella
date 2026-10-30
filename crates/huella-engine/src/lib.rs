@@ -2,6 +2,7 @@
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
 pub mod adr;
+pub mod coverage;
 mod decisions;
 pub mod embeddings;
 pub mod evidence;

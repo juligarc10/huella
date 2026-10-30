@@ -86,12 +86,12 @@ fn output_schema() -> Value {
 }
 
 /// Pasos del plan que pertenecen a un turno, en orden.
-fn turn_steps(plan: &[FlowStep], turn: usize) -> Vec<usize> {
+pub(crate) fn turn_steps(plan: &[FlowStep], turn: usize) -> Vec<usize> {
     (0..plan.len()).filter(|&i| plan[i].turn == Some(turn)).collect()
 }
 
 /// Lo que se envía al modelo para un turno.
-fn turn_request(review: &SessionReview, plan: &[FlowStep], points: &[Attention], turn: usize) -> String {
+pub(crate) fn turn_request(review: &SessionReview, plan: &[FlowStep], points: &[Attention], turn: usize) -> String {
     let steps = turn_steps(plan, turn);
     let local = |plan_index: usize| steps.iter().position(|&i| i == plan_index).map(|p| p + 1);
     let mut out = String::new();
@@ -166,7 +166,7 @@ fn input_hash(model: &str, request: &str) -> String {
 }
 
 /// Turnos con pasos que revisar.
-fn reviewable_turns(plan: &[FlowStep]) -> Vec<usize> {
+pub(crate) fn reviewable_turns(plan: &[FlowStep]) -> Vec<usize> {
     let mut turns: Vec<usize> = plan.iter().filter_map(|s| s.turn).collect();
     turns.sort_unstable();
     turns.dedup();

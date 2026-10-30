@@ -292,6 +292,23 @@ export interface StepEvidence {
   discarded: string[]
 }
 
+export interface Requirement {
+  text: string
+  status: 'done' | 'partial' | 'missing'
+  /** Índices de los pasos que lo cumplen. */
+  steps: number[]
+  note: string | null
+}
+
+export interface Coverage {
+  turn: number
+  model: string
+  requirements: Requirement[]
+  /** [paso, qué hace] */
+  unrequested: [number, string][]
+  stale: boolean
+}
+
 /** Un uso, fuera de la sesión, de algo que cambió. */
 export interface ImpactUse {
   path: string
@@ -342,5 +359,8 @@ export interface ReviewResult {
   ask_model: string
   /** Qué falta para poder preguntar (sin credencial, sin modelo), o `null`. */
   ask_problem: string | null
+  /** Cobertura de la petición por turno. */
+  coverage: Record<string, Coverage>
+  covering: { running: boolean; error?: string } | null
   narrations: Record<string, Narration>
 }
