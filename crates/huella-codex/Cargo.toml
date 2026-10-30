@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-huella-core = { version = "0.1.0", path = "../huella-core" }
+huella-core = { version = "0.2.0", path = "../huella-core" }
 serde_json = "1.0.154"
 
 [lints]

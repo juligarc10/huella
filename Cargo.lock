@@ -525,7 +525,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "huella-anchoring"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "huella-core",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "huella-claude-code"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "huella-core",
  "serde",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "huella-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "huella-codex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "huella-core",
  "serde_json",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "huella-copilot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "huella-core",
  "serde_json",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "huella-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "serde",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "huella-decisions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "huella-core",
  "serde",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "huella-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "dirs",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "huella-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "huella-anchoring",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "huella-review"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "huella-anchoring",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "huella-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "huella-core",
