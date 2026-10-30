@@ -31,6 +31,9 @@ pub struct Llm {
     pub model: Option<String>,
     /// Fichero con la clave del modelo; debe tener permisos `600`.
     pub api_key_file: Option<PathBuf>,
+    /// Razonamiento del modelo (`false` lo desactiva en Qwen3 y similares);
+    /// sin definir, el servidor decide.
+    pub thinking: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -213,12 +216,13 @@ mod tests {
         std::fs::write(
             &path,
             "[llm]\nprovider = \"openai-compatible\"\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"qwen2.5:7b\"\n\
-             api_key_file = \"~/.config/huella/key\"\n\n[embed]\nmodel = \"bge-m3\"\n\n[ui]\neditor = \"vscode\"\n",
+             api_key_file = \"~/.config/huella/key\"\nthinking = false\n\n[embed]\nmodel = \"bge-m3\"\n\n[ui]\neditor = \"vscode\"\n",
         )
         .unwrap();
         let config = load(&path).unwrap();
         assert!(matches!(config.llm.provider, Some(Provider::OpenaiCompatible)));
         assert_eq!(config.llm.model.as_deref(), Some("qwen2.5:7b"));
+        assert_eq!(config.llm.thinking, Some(false));
         assert_eq!(config.embed.model.as_deref(), Some("bge-m3"));
         assert!(matches!(config.ui.editor, Some(Editor::Vscode)));
     }

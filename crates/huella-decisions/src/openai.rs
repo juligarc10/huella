@@ -26,6 +26,9 @@ pub struct OpenAiCompatible {
     model: String,
     /// Los servidores locales no suelen pedirla.
     api_key: Option<String>,
+    /// Activa o desactiva el razonamiento de los modelos que lo tienen (Qwen3…)
+    /// con `chat_template_kwargs`; `None` no envía nada.
+    thinking: Option<bool>,
 }
 
 impl OpenAiCompatible {
@@ -40,7 +43,16 @@ impl OpenAiCompatible {
             base_url: base_url.unwrap_or_else(|| OLLAMA_BASE_URL.to_owned()).trim_end_matches('/').to_owned(),
             model,
             api_key: api_key.filter(|key| !key.trim().is_empty()),
+            thinking: None,
         }
+    }
+
+    /// Pide al servidor que active o desactive el razonamiento del modelo. Lo
+    /// entienden llama.cpp y vLLM; la API oficial de `OpenAI` lo rechaza.
+    #[must_use]
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -55,7 +67,8 @@ impl JsonModel for OpenAiCompatible {
         if let Some(key) = &self.api_key {
             call = call.header("Authorization", &format!("Bearer {key}"));
         }
-        let mut response = call.send_json(request_body(&self.model, system, user, schema)).map_err(network)?;
+        let body = request_body(&self.model, system, user, schema, self.thinking);
+        let mut response = call.send_json(body).map_err(network)?;
         let status = response.status().as_u16();
         if status != 200 {
             let body = response.body_mut().read_to_string().map_err(network)?;
@@ -65,8 +78,8 @@ impl JsonModel for OpenAiCompatible {
     }
 }
 
-fn request_body(model: &str, system: &str, user: &str, schema: &Value) -> Value {
-    json!({
+fn request_body(model: &str, system: &str, user: &str, schema: &Value, thinking: Option<bool>) -> Value {
+    let mut body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
         "stream": true,
@@ -78,7 +91,13 @@ fn request_body(model: &str, system: &str, user: &str, schema: &Value) -> Value 
             "type": "json_schema",
             "json_schema": {"name": "respuesta", "strict": true, "schema": schema},
         },
-    })
+    });
+    // El razonamiento se descarta y cuenta dentro de max_tokens: sin él, las
+    // respuestas llegan antes y el JSON no se corta.
+    if let Some(enabled) = thinking {
+        body["chat_template_kwargs"] = json!({"enable_thinking": enabled});
+    }
+    body
 }
 
 /// Embeddings con la API de `OpenAI` (`POST /embeddings`): Ollama
@@ -231,11 +250,20 @@ mod tests {
 
     #[test]
     fn request_streams_with_json_schema_response_format() {
-        let body = request_body("qwen2.5:7b", "instrucciones", "x", &output_schema());
+        let body = request_body("qwen2.5:7b", "instrucciones", "x", &output_schema(), None);
         assert_eq!(body["stream"], true);
+        assert!(body.get("chat_template_kwargs").is_none(), "sin la opción no se envía nada");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         assert_eq!(body["response_format"]["json_schema"]["schema"], output_schema());
+    }
+
+    #[test]
+    fn thinking_is_sent_only_when_configured() {
+        let off = request_body("qwen3", "s", "u", &output_schema(), Some(false));
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+        let on = request_body("qwen3", "s", "u", &output_schema(), Some(true));
+        assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
     }
 
     #[test]
