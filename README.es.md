@@ -238,18 +238,38 @@ huella decisions extract --provider openai-compatible \
 
 Solo procesa las sesiones nuevas o que han crecido; `--limit N` acota cuántas.
 
-El mismo modelo responde a las preguntas a una sesión. Para no repetir
-`--provider`, `--base-url` y `--model`, defínelos una vez en tu perfil del shell
-y `huella ui` (y el resto de órdenes) los toma de ahí:
+El mismo modelo responde a las preguntas a una sesión.
 
-```sh
-export HUELLA_LLM_PROVIDER=openai-compatible
-export HUELLA_LLM_BASE_URL=http://localhost:11434/v1
-export HUELLA_LLM_MODEL=qwen2.5:7b
-export HUELLA_LLM_API_KEY=…   # solo si el servidor la pide
+### Configuración
+
+Huella se arranca desde cualquier sitio (el editor, el agente por MCP, una
+terminal), así que su configuración es una por usuario, junto a la base de
+datos: `~/Library/Application Support/huella/config.toml` en macOS,
+`~/.local/share/huella/config.toml` en Linux (o `$HUELLA_CONFIG`).
+
+```toml
+[llm]
+provider = "openai-compatible"          # o "anthropic" (por defecto)
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:7b"
+api_key_file = "~/.config/huella/llm-key"   # opcional; con chmod 600
+
+[embed]
+model = "bge-m3"
+base_url = "http://localhost:11434/v1"
+
+[ui]
+editor = "vscode"                       # o "zed" (por defecto)
 ```
 
-Si falta algo, el panel «Preguntar a la sesión» lo dice antes de que escribas.
+Las opciones de la orden mandan sobre las variables de entorno
+(`HUELLA_LLM_PROVIDER`, `HUELLA_LLM_BASE_URL`, `HUELLA_LLM_MODEL`,
+`HUELLA_EMBED_MODEL`, `HUELLA_EMBED_URL`), y estas sobre el fichero. La clave
+nunca se escribe en `config.toml`: sale de `HUELLA_LLM_API_KEY`
+(`ANTHROPIC_API_KEY` con Claude) o de `api_key_file`, que Huella se niega a leer
+si otros usuarios pueden. Una clave desconocida es un error, para que una errata
+no pase desapercibida. Si falta algo, el panel «Preguntar a la sesión» lo dice
+antes de que escribas.
 
 Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale
 en todos los proyectos, como el idioma de los commits), del proyecto o de una

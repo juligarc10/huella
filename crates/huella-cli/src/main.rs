@@ -1,5 +1,6 @@
 //! `huella`: CLI de Huella.
 
+mod config;
 mod mcp;
 mod report;
 mod review;
@@ -23,7 +24,7 @@ use huella_decisions::anthropic::Anthropic;
 use huella_decisions::openai::{OpenAiCompatible, OpenAiEmbeddings};
 use huella_engine::ExtractionOptions;
 use huella_store::{DecisionFilter, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::report::Summary;
 
@@ -110,8 +111,8 @@ enum Command {
         #[arg(long)]
         no_browser: bool,
         /// Editor al que lleva «Abrir en…».
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Desarrollo de la interfaz: acepta el servidor de Vite (`pnpm --dir ui dev`).
         #[arg(long)]
         dev: bool,
@@ -238,8 +239,8 @@ enum ReviewCommand {
         #[arg(long)]
         open: bool,
         /// Editor que abre `--open`.
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -316,8 +317,8 @@ enum ReviewCommand {
         /// Id de la sesión o su comienzo.
         session: String,
         /// Editor al que llevan los enlaces «Abrir en…».
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Puerto local (0 = uno libre).
         #[arg(long, default_value_t = 0)]
         port: u16,
@@ -348,8 +349,8 @@ enum ReviewCommand {
 #[derive(clap::Args, Clone)]
 struct ModelArgs {
     /// Proveedor del modelo.
-    #[arg(long, value_enum, env = "HUELLA_LLM_PROVIDER", default_value_t = Provider::Anthropic)]
-    provider: Provider,
+    #[arg(long, value_enum, env = "HUELLA_LLM_PROVIDER")]
+    provider: Option<Provider>,
     /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
     #[arg(long, env = "HUELLA_LLM_MODEL")]
     model: Option<String>,
@@ -358,7 +359,23 @@ struct ModelArgs {
     base_url: Option<String>,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+/// Opción o variable de entorno; si no, `config.toml`; si no, el valor por defecto.
+impl ModelArgs {
+    fn provider(&self) -> Provider {
+        self.provider.or(config::get().llm.provider).unwrap_or(Provider::Anthropic)
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.clone().or_else(|| config::get().llm.model.clone())
+    }
+
+    fn base_url(&self) -> Option<String> {
+        self.base_url.clone().or_else(|| config::get().llm.base_url.clone())
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum Provider {
     /// API de Claude (`ANTHROPIC_API_KEY`).
     Anthropic,
@@ -378,6 +395,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    config::init()?;
     match cli.command {
         Command::Scan { projects, json, sample, sample_out, sample_offset } => {
             let projects = claude_projects_dir(projects)?;
@@ -406,7 +424,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Ui { port, no_browser, editor, dev, model, projects } => {
-            ui_command(cli.db, port, !no_browser, editor, dev, model, projects)
+            ui_command(cli.db, port, !no_browser, config::editor(editor), dev, model, projects)
         }
         Command::Embed { model, base_url, limit, projects } => {
             let embedder = embedder(model, base_url)
@@ -432,7 +450,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
-            let extractor = build_model(model)?;
+            let extractor = build_model(&model)?;
             let mut store = open_store(cli.db)?;
             let projects = sources(projects)?;
             // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
@@ -500,7 +518,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
                 None => println!("La sesión no tiene un proyecto claro: abre la carpeta de sus ficheros."),
             }
             if open {
-                open_in_editor(editor, project.as_deref(), first_pending(&store, &review, &plan)?);
+                open_in_editor(config::editor(editor), project.as_deref(), first_pending(&store, &review, &plan)?);
             }
             Ok(())
         }
@@ -514,7 +532,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             review_loop_command(db, action)
         }
         ReviewCommand::Narrate { session, model, projects } => {
-            let model = build_model(model)?;
+            let model = build_model(&model)?;
             let store = open_store(db)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
@@ -535,7 +553,12 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             let plan = huella_review::flow::plan(&review);
             // La misma revisión aparece también en el editor mientras se hace en la web.
             store.set_active_review(Some(&review.session_id))?;
-            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
+            web::serve(
+                &store,
+                &review,
+                &plan,
+                &web::Options { editor: config::editor(editor), port, open_browser: !no_browser },
+            )
         }
         ReviewCommand::Show { session, file, by_file, projects } => {
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
@@ -649,7 +672,7 @@ fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()>
             Ok(())
         }
         ReviewCommand::Ask { session, question, step, model, projects } => {
-            let model = build_model(model)?;
+            let model = build_model(&model)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
             let step = step.map(|step| pick(&plan, step)).transpose()?;
@@ -834,38 +857,57 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// Modelo de embeddings de los argumentos o de `HUELLA_EMBED_MODEL` y
-/// `HUELLA_EMBED_URL`; `None` si no hay ninguno configurado.
+/// Modelo de embeddings de los argumentos, de `HUELLA_EMBED_MODEL` y
+/// `HUELLA_EMBED_URL` o de `[embed]` en `config.toml`; `None` si no hay ninguno.
 pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenAiEmbeddings> {
-    let model = model.or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok()).filter(|m| !m.trim().is_empty())?;
-    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok());
-    Some(OpenAiEmbeddings::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+    let embed = &config::get().embed;
+    let model = model
+        .or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok())
+        .or_else(|| embed.model.clone())
+        .filter(|m| !m.trim().is_empty())?;
+    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok()).or_else(|| embed.base_url.clone());
+    // Un fichero de clave mal configurado ya lo avisa el modelo de lenguaje.
+    let key = config::api_key("HUELLA_LLM_API_KEY").ok().flatten();
+    Some(OpenAiEmbeddings::new(base_url, model, key))
+}
+
+fn config_hint() -> String {
+    config::path().map_or_else(|| "config.toml".to_owned(), |path| path.display().to_string())
 }
 
 /// Qué le falta a la configuración del modelo para poder llamarlo, si algo.
 /// Con openai-compatible la clave es opcional: un servidor local no la pide.
 fn model_problem(args: &ModelArgs) -> Option<String> {
-    match args.provider {
-        Provider::Anthropic if std::env::var_os("ANTHROPIC_API_KEY").is_none_or(|key| key.is_empty()) => Some(
-            "No hay modelo configurado: define ANTHROPIC_API_KEY, o usa un servidor compatible con OpenAI con \
-             HUELLA_LLM_PROVIDER=openai-compatible, HUELLA_LLM_BASE_URL, HUELLA_LLM_MODEL y, si la pide, \
-             HUELLA_LLM_API_KEY. Después vuelve a abrir huella ui."
-                .to_owned(),
-        ),
-        Provider::OpenaiCompatible if args.model.is_none() => {
-            Some("Falta el modelo: define HUELLA_LLM_MODEL (o --model) y vuelve a abrir huella ui.".to_owned())
-        }
-        _ => None,
+    match args.provider() {
+        Provider::Anthropic => match config::api_key("ANTHROPIC_API_KEY") {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!(
+                "No hay modelo configurado: define ANTHROPIC_API_KEY, o un servidor compatible con OpenAI en [llm] \
+                 de {} (provider = \"openai-compatible\", base_url, model y, si la pide, api_key_file). \
+                 Después vuelve a abrir huella ui.",
+                config_hint()
+            )),
+            Err(error) => Some(format!("{error:#}")),
+        },
+        Provider::OpenaiCompatible if args.model().is_none() => Some(format!(
+            "Falta el modelo: añade model en [llm] de {} (o HUELLA_LLM_MODEL) y vuelve a abrir huella ui.",
+            config_hint()
+        )),
+        Provider::OpenaiCompatible => config::api_key("HUELLA_LLM_API_KEY").err().map(|error| format!("{error:#}")),
     }
 }
 
-fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
-    let ModelArgs { provider, model, base_url } = args;
-    Ok(match provider {
-        Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
+fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
+    let (model, base_url) = (args.model(), args.base_url());
+    Ok(match args.provider() {
+        Provider::Anthropic => {
+            let key = config::api_key("ANTHROPIC_API_KEY")?
+                .context("falta la credencial: define ANTHROPIC_API_KEY o api_key_file en config.toml")?;
+            Box::new(Anthropic::new(key, model, base_url))
+        }
         Provider::OpenaiCompatible => {
-            let model = model.context("con openai-compatible indica el modelo con --model (p. ej. qwen2.5:7b)")?;
-            Box::new(OpenAiCompatible::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+            let model = model.context("con openai-compatible indica el modelo con --model o en config.toml")?;
+            Box::new(OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?))
         }
     })
 }

@@ -102,19 +102,38 @@ huella refactors                      # how much memory survives renames and mov
 Decision extraction works with the Claude API (`ANTHROPIC_API_KEY`, default
 `claude-haiku-5-5`) or any OpenAI-compatible server (Ollama, LM Studio,
 llama.cpp, vLLM; key in `HUELLA_LLM_API_KEY`). The same model answers the
-questions you ask a session. Instead of repeating `--provider`, `--base-url` and
-`--model`, set them once in your shell profile and `huella ui` picks them up:
+questions you ask a session. Search by meaning works with any OpenAI-compatible
+embeddings endpoint; a multilingual model such as `bge-m3` works best if your
+sessions aren't in English.
 
-```sh
-export HUELLA_LLM_PROVIDER=openai-compatible
-export HUELLA_LLM_BASE_URL=http://localhost:11434/v1
-export HUELLA_LLM_MODEL=qwen2.5:7b
-export HUELLA_LLM_API_KEY=…   # only if the server asks for one
+### Configuration
+
+Huella is started from anywhere (your editor, your agent over MCP, a terminal),
+so its settings live in one file per user, next to the database:
+`~/Library/Application Support/huella/config.toml` on macOS,
+`~/.local/share/huella/config.toml` on Linux (or `$HUELLA_CONFIG`).
+
+```toml
+[llm]
+provider = "openai-compatible"          # or "anthropic" (default)
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:7b"
+api_key_file = "~/.config/huella/llm-key"   # optional; must be chmod 600
+
+[embed]
+model = "bge-m3"
+base_url = "http://localhost:11434/v1"
+
+[ui]
+editor = "vscode"                       # or "zed" (default)
 ```
 
-Search by meaning works with any
-OpenAI-compatible embeddings endpoint; a multilingual model such as `bge-m3`
-works best if your sessions aren't in English.
+Command-line options win over environment variables (`HUELLA_LLM_PROVIDER`,
+`HUELLA_LLM_BASE_URL`, `HUELLA_LLM_MODEL`, `HUELLA_EMBED_MODEL`,
+`HUELLA_EMBED_URL`), which win over the file. The key is never written in
+`config.toml`: it comes from `HUELLA_LLM_API_KEY` (`ANTHROPIC_API_KEY` for
+Claude) or from `api_key_file`, which Huella refuses to read if other users can.
+Unknown keys are an error, so a typo doesn't go unnoticed.
 
 ## Agents and languages
 

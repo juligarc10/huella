@@ -526,7 +526,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let extractor = crate::build_model(model)?;
+            let extractor = crate::build_model(&model)?;
             huella_engine::review_loop::ask(&store, extractor.as_ref(), &review, &plan, step, &question)?;
             Ok(())
         })();
@@ -638,7 +638,7 @@ fn start_job(app: &App, kind: &str) -> (u16, Value) {
                 }
             }
         };
-        let outcome = run_job(&kind, &db, &sources, model, &progress);
+        let outcome = run_job(&kind, &db, &sources, &model, &progress);
         let mut all = jobs.lock().unwrap_or_else(PoisonError::into_inner);
         let job = all.entry(kind).or_default();
         job.finished_at = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
@@ -661,7 +661,7 @@ fn run_job(
     kind: &str,
     db: &Path,
     projects: &huella_engine::Sources,
-    model: ModelArgs,
+    model: &ModelArgs,
     progress: &dyn Fn(usize, usize, Option<String>),
 ) -> Result<Value> {
     let mut store = Store::open(db)?;
@@ -674,7 +674,7 @@ fn run_job(
         }
         "embed" => {
             let embedder = crate::embedder(None, None)
-                .context("define HUELLA_EMBED_MODEL (y HUELLA_EMBED_URL si no es Ollama local) y reinicia huella ui")?;
+                .context("define el modelo en [embed] de config.toml (o HUELLA_EMBED_MODEL) y reinicia huella ui")?;
             let report = huella_engine::embeddings::embed_pending(&mut store, &embedder, 100_000, |done, total| {
                 progress(done, total, None);
             })?;
@@ -818,7 +818,7 @@ fn editor_name(editor: Editor) -> &'static str {
 
 /// Qué modelo extraería decisiones, para mostrarlo.
 fn extractor_label(model: &ModelArgs) -> String {
-    match (model.provider, &model.model) {
+    match (model.provider(), &model.model()) {
         (crate::Provider::Anthropic, model) => {
             format!("anthropic:{}", model.as_deref().unwrap_or(huella_decisions::anthropic::DEFAULT_MODEL))
         }
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn asking_without_a_model_says_what_is_missing() {
         let model = |name: Option<&str>| ModelArgs {
-            provider: crate::Provider::OpenaiCompatible,
+            provider: Some(crate::Provider::OpenaiCompatible),
             model: name.map(str::to_owned),
             base_url: None,
         };
