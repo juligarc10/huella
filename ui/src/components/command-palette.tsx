@@ -39,20 +39,20 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         <CommandEmpty>Nada con ese nombre.</CommandEmpty>
         {text.trim() && (
           <CommandGroup heading="Memoria">
-            <CommandItem value={`buscar ${text}`} onSelect={() => run(() => navigate(`/?q=${encodeURIComponent(text)}`))}>
+            <CommandItem value={`buscar ${text}`} onSelect={() => run(() => navigate(`/buscar?q=${encodeURIComponent(text)}`))}>
               <Search aria-hidden="true" />
               Buscar «{text}» en la memoria
             </CommandItem>
           </CommandGroup>
         )}
         <CommandGroup heading="Ir a">
-          <CommandItem onSelect={() => run(() => navigate('/'))}>
-            <Search aria-hidden="true" />
-            Buscar
-          </CommandItem>
           <CommandItem onSelect={() => run(() => navigate('/sesiones'))}>
             <GitPullRequestArrow aria-hidden="true" />
-            Sesiones y revisión
+            Por revisar
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => navigate('/buscar'))}>
+            <Search aria-hidden="true" />
+            Buscar
           </CommandItem>
           <CommandItem onSelect={() => run(() => navigate('/decisiones'))}>
             <BookMarked aria-hidden="true" />

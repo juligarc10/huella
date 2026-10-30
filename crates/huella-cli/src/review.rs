@@ -105,7 +105,7 @@ fn render_sources(
     let mut seen_turns: BTreeSet<usize> = under_turn.into_iter().collect();
     for &source in sources {
         match &review.steps[source] {
-            Step::Agent { turn, at, rationale } => {
+            Step::Agent { turn, at, rationale, .. } => {
                 if seen_turns.insert(*turn) {
                     let prompt = review.turns.get(*turn).and_then(|t| t.prompt.as_deref()).map(|p| clip(p, 110));
                     let when = at.as_deref().map(short_date).unwrap_or_default();

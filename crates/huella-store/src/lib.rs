@@ -221,6 +221,53 @@ const MIGRATIONS: &[&str] = &[
         version         INTEGER NOT NULL
     );
 ",
+    // Revisión completa: veredicto por paso, estado de cada sesión en la
+    // bandeja, comentarios para el agente y preguntas a la sesión.
+    r"
+    ALTER TABLE review_mark ADD COLUMN verdict TEXT NOT NULL DEFAULT 'ok';
+    CREATE TABLE review_state (
+        session_id      TEXT PRIMARY KEY,
+        status          TEXT NOT NULL,
+        steps           INTEGER,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE TABLE review_comment (
+        id              INTEGER PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        step_key        TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        symbol          TEXT,
+        quote           TEXT,
+        body            TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'open',
+        created_at      TEXT NOT NULL,
+        resolved_at     TEXT,
+        resolution      TEXT
+    );
+    CREATE INDEX review_comment_by_session ON review_comment(session_id);
+    CREATE TABLE review_question (
+        id              INTEGER PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        step_key        TEXT,
+        question        TEXT NOT NULL,
+        answer          TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+    CREATE INDEX review_question_by_session ON review_question(session_id);
+",
+    // 13: cobertura de la petición de cada turno, generada con un modelo.
+    r"
+    CREATE TABLE review_coverage (
+        session_id      TEXT NOT NULL,
+        turn            INTEGER NOT NULL,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        coverage        TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (session_id, turn)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -331,6 +378,100 @@ pub struct StoredDecision {
     pub extractor: String,
 }
 
+/// Qué le parece a la persona un paso de la revisión.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Revisado y correcto.
+    Ok,
+    /// Hay que cambiarlo (los comentarios dicen cómo).
+    Change,
+    /// Hay que deshacerlo.
+    Discard,
+}
+
+impl Verdict {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Change => "change",
+            Self::Discard => "discard",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "ok" => Some(Self::Ok),
+            "change" => Some(Self::Change),
+            "discard" => Some(Self::Discard),
+            _ => None,
+        }
+    }
+}
+
+/// Veredicto de un paso con el contenido que se vio al darlo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepVerdict {
+    pub content_hash: String,
+    pub verdict: Verdict,
+}
+
+/// Estado de una sesión en la bandeja de revisión.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewState {
+    pub session_id: String,
+    /// `in_review`, `changes_requested` o `approved`; sin fila, pendiente.
+    pub status: String,
+    /// Pasos la última vez que se abrió la revisión.
+    pub steps: Option<usize>,
+    /// Pasos con veredicto (con el contenido que tuvieran entonces).
+    pub reviewed: usize,
+    pub open_comments: usize,
+    pub updated_at: String,
+}
+
+/// Comentario de la persona sobre un paso, para que el agente lo corrija.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub id: i64,
+    pub session_id: String,
+    pub step_key: String,
+    pub path: String,
+    pub symbol: Option<String>,
+    /// La línea del cambio a la que se refiere, si se eligió una.
+    pub quote: Option<String>,
+    pub body: String,
+    /// `open`, `resolved` o `dismissed`.
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    pub resolution: Option<String>,
+}
+
+/// Comentario nuevo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewComment<'a> {
+    pub session_id: &'a str,
+    pub step_key: &'a str,
+    pub path: &'a str,
+    pub symbol: Option<&'a str>,
+    pub quote: Option<&'a str>,
+    pub body: &'a str,
+}
+
+/// Pregunta hecha a la sesión y su respuesta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewQuestion {
+    pub id: i64,
+    pub session_id: String,
+    pub step_key: Option<String>,
+    pub question: String,
+    pub answer: String,
+    pub model: String,
+    pub created_at: String,
+}
+
 /// Worktree de git con el estado previo de la sesión en un commit y su
 /// resultado como cambios sin commitear, para revisarla con las herramientas
 /// de git del editor.
@@ -350,6 +491,15 @@ pub struct StoredNarration {
     pub model: String,
     /// JSON tal como lo devolvió el modelo.
     pub narration: String,
+}
+
+/// Cobertura de la petición de un turno, tal como la devolvió el modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCoverage {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub coverage: String,
 }
 
 /// Resumen de una sesión para elegir qué revisar.
@@ -781,6 +931,270 @@ impl Store {
         Ok(())
     }
 
+    /// Veredicto de cada paso de una sesión.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_verdicts(&self, session_id: &str) -> Result<HashMap<String, StepVerdict>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT step_key, content_hash, verdict FROM review_mark WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| {
+            let verdict: String = row.get(2)?;
+            Ok((
+                row.get(0)?,
+                StepVerdict { content_hash: row.get(1)?, verdict: Verdict::parse(&verdict).unwrap_or(Verdict::Ok) },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Da (o quita, con `None`) el veredicto de un paso con el contenido que
+    /// se vio. Un veredicto cuenta como revisado.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_step_verdict(
+        &self,
+        session_id: &str,
+        step_key: &str,
+        content_hash: &str,
+        verdict: Option<Verdict>,
+    ) -> Result<()> {
+        match verdict {
+            Some(verdict) => self.conn.execute(
+                "INSERT INTO review_mark (session_id, step_key, content_hash, reviewed_at, verdict)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?4)
+                 ON CONFLICT(session_id, step_key) DO UPDATE SET content_hash = excluded.content_hash,
+                     reviewed_at = excluded.reviewed_at, verdict = excluded.verdict",
+                params![session_id, step_key, content_hash, verdict.as_str()],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM review_mark WHERE session_id = ?1 AND step_key = ?2",
+                params![session_id, step_key],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Cambia el estado de una sesión en la bandeja (`in_review`,
+    /// `changes_requested`, `approved`; `None` la devuelve a pendiente) y
+    /// guarda cuántos pasos tiene, si se sabe.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_review_status(&self, session_id: &str, status: Option<&str>, steps: Option<usize>) -> Result<()> {
+        let steps = steps.and_then(|n| i64::try_from(n).ok());
+        match status {
+            Some(status) => self.conn.execute(
+                "INSERT INTO review_state (session_id, status, steps, updated_at)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(session_id) DO UPDATE SET status = excluded.status,
+                     steps = COALESCE(excluded.steps, review_state.steps), updated_at = excluded.updated_at",
+                params![session_id, status, steps],
+            )?,
+            None => self.conn.execute("DELETE FROM review_state WHERE session_id = ?1", [session_id])?,
+        };
+        Ok(())
+    }
+
+    /// Estado guardado de una sesión en la bandeja; `None` si nunca se cambió.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_status(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT status FROM review_state WHERE session_id = ?1", [session_id], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// Guarda cuántos pasos tiene la revisión de una sesión sin cambiar su estado.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn record_review_steps(&self, session_id: &str, steps: usize) -> Result<()> {
+        self.conn.execute(
+            "UPDATE review_state SET steps = ?2 WHERE session_id = ?1",
+            params![session_id, i64::try_from(steps).unwrap_or(i64::MAX)],
+        )?;
+        Ok(())
+    }
+
+    /// Estado de revisión de las sesiones que tienen alguno (las demás están
+    /// pendientes), con sus pasos revisados y sus comentarios abiertos.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn review_states(&self) -> Result<HashMap<String, ReviewState>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT s.session_id, COALESCE(r.status, 'in_review'), r.steps, COALESCE(r.updated_at, ''),
+                    (SELECT COUNT(*) FROM review_mark m WHERE m.session_id = s.session_id),
+                    (SELECT COUNT(*) FROM review_comment c WHERE c.session_id = s.session_id AND c.status = 'open')
+             FROM (SELECT session_id FROM review_state
+                   UNION SELECT session_id FROM review_mark
+                   UNION SELECT session_id FROM review_comment) s
+             LEFT JOIN review_state r ON r.session_id = s.session_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let count = |index| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
+            Ok(ReviewState {
+                session_id: row.get(0)?,
+                status: row.get(1)?,
+                steps: row.get::<_, Option<i64>>(2)?.and_then(|n| usize::try_from(n).ok()),
+                updated_at: row.get(3)?,
+                reviewed: count(4)?,
+                open_comments: count(5)?,
+            })
+        })?;
+        rows.map(|row| row.map(|state| (state.session_id.clone(), state)))
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    /// Añade un comentario abierto y devuelve su id.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_comment(&self, comment: &NewComment) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO review_comment (session_id, step_key, path, symbol, quote, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            params![
+                comment.session_id,
+                comment.step_key,
+                comment.path,
+                comment.symbol,
+                comment.quote,
+                redact(comment.body)
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Comentarios de una sesión, del más antiguo al más reciente.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn comments(&self, session_id: &str) -> Result<Vec<ReviewComment>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id, session_id, step_key, path, symbol, quote, body, status, created_at, resolved_at, resolution
+             FROM review_comment WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok(ReviewComment {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                step_key: row.get(2)?,
+                path: row.get(3)?,
+                symbol: row.get(4)?,
+                quote: row.get(5)?,
+                body: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+                resolved_at: row.get(9)?,
+                resolution: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Cambia el estado de un comentario (`open`, `resolved`, `dismissed`),
+    /// con una nota opcional. Devuelve si existía.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_comment_status(&self, id: i64, status: &str, resolution: Option<&str>) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE review_comment SET status = ?2, resolution = ?3,
+                 resolved_at = CASE WHEN ?2 = 'open' THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', 'now') END
+             WHERE id = ?1",
+            params![id, status, resolution.map(|r| redact(r).into_owned())],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Borra un comentario. Devuelve si existía.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_comment(&self, id: i64) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM review_comment WHERE id = ?1", [id])? > 0)
+    }
+
+    /// Guarda una pregunta a la sesión y su respuesta; devuelve su id.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_question(
+        &self,
+        session_id: &str,
+        step_key: Option<&str>,
+        question: &str,
+        answer: &str,
+        model: &str,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO review_question (session_id, step_key, question, answer, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            params![session_id, step_key, redact(question), redact(answer), model],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Preguntas hechas a una sesión, de la más antigua a la más reciente.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn questions(&self, session_id: &str) -> Result<Vec<ReviewQuestion>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id, session_id, step_key, question, answer, model, created_at
+             FROM review_question WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok(ReviewQuestion {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                step_key: row.get(2)?,
+                question: row.get(3)?,
+                answer: row.get(4)?,
+                model: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Ediciones de cualquier sesión posteriores a `since` en estos ficheros:
+    /// lo que se hizo después de comentar una revisión. Devuelve, por
+    /// sesión, sus ficheros tocados y la fecha de la última edición.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn edits_after(&self, since: &str, paths: &[String]) -> Result<Vec<(String, Vec<String>, String)>> {
+        let mut by_session: std::collections::BTreeMap<String, (Vec<String>, String)> =
+            std::collections::BTreeMap::new();
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT session_id, path, at FROM edit WHERE path = ?1 AND at > ?2 ORDER BY at")?;
+        for path in paths {
+            let rows = statement.query_map(params![path, since], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?;
+            for row in rows {
+                let (session, path, at) = row?;
+                let entry = by_session.entry(session).or_default();
+                if !entry.0.contains(&path) {
+                    entry.0.push(path);
+                }
+                if at > entry.1 {
+                    entry.1 = at;
+                }
+            }
+        }
+        Ok(by_session.into_iter().map(|(session, (paths, at))| (session, paths, at)).collect())
+    }
+
     /// Worktree de git preparado para revisar una sesión en el editor.
     ///
     /// # Errors
@@ -882,6 +1296,45 @@ impl Store {
                 stored.input_hash,
                 stored.model,
                 stored.narration
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Coberturas guardadas de una sesión, por turno.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn coverages(&self, session_id: &str) -> Result<HashMap<usize, StoredCoverage>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT turn, input_hash, model, coverage FROM review_coverage WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| {
+            let turn: i64 = row.get(0)?;
+            Ok((
+                usize::try_from(turn).unwrap_or_default(),
+                StoredCoverage { input_hash: row.get(1)?, model: row.get(2)?, coverage: row.get(3)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Guarda (o sustituye) la cobertura de un turno.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_coverage(&self, session_id: &str, turn: usize, stored: &StoredCoverage) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_coverage (session_id, turn, input_hash, model, coverage, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id, turn) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 coverage = excluded.coverage, created_at = excluded.created_at",
+            params![
+                session_id,
+                i64::try_from(turn).unwrap_or(i64::MAX),
+                stored.input_hash,
+                stored.model,
+                stored.coverage
             ],
         )?;
         Ok(())
@@ -2031,6 +2484,80 @@ mod tests {
         assert_eq!(search(&store, "a8f3k2j9d0s7q1w4e6r5"), Vec::new(), "tampoco en el índice de búsqueda");
         assert_eq!(search(&store, "HUELLA_LLM_API_KEY").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verdicts_count_as_reviewed_and_feed_the_inbox() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_step_verdict("s1", "k1", "h1", Some(Verdict::Ok)).unwrap();
+        store.set_step_verdict("s1", "k2", "h2", Some(Verdict::Change)).unwrap();
+        assert_eq!(store.review_marks("s1").unwrap().len(), 2, "un veredicto es una marca de revisado");
+        assert_eq!(store.review_verdicts("s1").unwrap()["k2"].verdict, Verdict::Change);
+
+        let id = store
+            .add_comment(&NewComment {
+                session_id: "s1",
+                step_key: "k2",
+                path: "/repo/a.ts",
+                symbol: Some("validate"),
+                quote: Some("if (!email) return;"),
+                body: "debería lanzar un error, no salir en silencio",
+            })
+            .unwrap();
+        store.set_review_status("s1", Some("changes_requested"), Some(7)).unwrap();
+        let state = &store.review_states().unwrap()["s1"];
+        assert_eq!(
+            (state.status.as_str(), state.steps, state.reviewed, state.open_comments),
+            ("changes_requested", Some(7), 2, 1)
+        );
+
+        assert!(store.set_comment_status(id, "resolved", Some("ya lanza ValidationError")).unwrap());
+        let comment = &store.comments("s1").unwrap()[0];
+        assert_eq!(
+            (comment.status.as_str(), comment.resolution.as_deref()),
+            ("resolved", Some("ya lanza ValidationError"))
+        );
+        assert!(comment.resolved_at.is_some());
+        assert_eq!(store.review_states().unwrap()["s1"].open_comments, 0);
+
+        store.set_step_verdict("s1", "k1", "h1", None).unwrap();
+        assert_eq!(store.review_marks("s1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn comments_and_questions_are_stored_without_secrets() {
+        let store = Store::open_in_memory().unwrap();
+        let comment = NewComment {
+            session_id: "s1",
+            step_key: "k",
+            path: "/repo/a.ts",
+            symbol: None,
+            quote: None,
+            body: "no dejes API_KEY=a8f3k2j9d0s7q1w4e6r5 en el código",
+        };
+        store.add_comment(&comment).unwrap();
+        assert_eq!(store.comments("s1").unwrap()[0].body, "no dejes API_KEY=[secreto] en el código");
+        store
+            .add_question("s1", Some("k"), "¿por qué un bucle?", "Porque la lista es pequeña.", "test:modelo")
+            .unwrap();
+        let questions = store.questions("s1").unwrap();
+        assert_eq!(
+            (questions[0].question.as_str(), questions[0].model.as_str()),
+            ("¿por qué un bucle?", "test:modelo")
+        );
+    }
+
+    #[test]
+    fn edits_after_a_moment_are_grouped_by_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = edit("e1", "s1", "2026-10-01T10:00:00Z", "crea");
+        let later = edit("e2", "s2", "2026-10-03T10:00:00Z", "corrige");
+        save(&mut store, 10, &[(&old, &anchored(&[("a", "h1")], &[])), (&later, &anchored(&[("a", "h2")], &[]))]);
+        let after = store.edits_after("2026-10-02T00:00:00Z", &["/repo/src/user.ts".to_owned()]).unwrap();
+        assert_eq!(
+            after,
+            vec![("s2".to_owned(), vec!["/repo/src/user.ts".to_owned()], "2026-10-03T10:00:00Z".to_owned())]
+        );
     }
 
     #[test]

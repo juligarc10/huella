@@ -1,3 +1,5 @@
+import type { ReviewStatus } from '@/lib/api'
+
 const dateFormat = new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })
 const dateTimeFormat = new Intl.DateTimeFormat('es-ES', {
   day: 'numeric',
@@ -84,4 +86,11 @@ export const statusLabel: Record<string, string> = {
   superseded: 'Reemplazada',
   rejected: 'Descartada',
   proposed: 'Propuesta',
+}
+
+export const reviewStatusLabel: Record<ReviewStatus, string> = {
+  pending: 'Sin revisar',
+  in_review: 'En revisión',
+  changes_requested: 'Cambios pedidos',
+  approved: 'Aprobada',
 }

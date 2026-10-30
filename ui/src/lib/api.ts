@@ -195,11 +195,65 @@ export interface ReviewSource {
   reason?: string
 }
 
+export type Verdict = 'ok' | 'change' | 'discard'
+
+export type ReviewStatus = 'pending' | 'in_review' | 'changes_requested' | 'approved'
+
+export interface ReviewComment {
+  id: number
+  step_key: string
+  path: string
+  symbol: string | null
+  quote: string | null
+  body: string
+  status: 'open' | 'resolved' | 'dismissed'
+  created_at: string
+  resolved_at: string | null
+  resolution: string | null
+}
+
+export interface ReviewQuestion {
+  id: number
+  step_key: string | null
+  question: string
+  answer: string
+  model: string
+  created_at: string
+}
+
+export interface PendingAsk {
+  question: string
+  step: number | null
+  error: string | null
+}
+
+export interface FollowUp {
+  session_id: string
+  paths: string[]
+  last_at: string
+  same_session: boolean
+}
+
+export interface CommentHint {
+  id: number
+  quote_gone: boolean
+  edited_after: boolean
+}
+
+export interface InboxSession extends SessionInfo {
+  status: ReviewStatus
+  steps: number | null
+  reviewed: number
+  open_comments: number
+  status_at: string | null
+}
+
 export interface ReviewStep {
   index: number
   key: string
   hash: string
   reviewed: boolean
+  verdict: Verdict | null
   turn: number | null
   role: string
   depth: number
@@ -213,6 +267,112 @@ export interface ReviewStep {
   calls: number[]
   sources: ReviewSource[]
   lines: ReviewLine[]
+  evidence: StepEvidence
+}
+
+/** Un hecho de la sesión: qué leyó, buscó o ejecutó el agente. */
+export type Activity = { session_id: string; at: string | null } & (
+  | { kind: 'prompt'; text: string }
+  | { kind: 'read'; target: string }
+  | { kind: 'search'; query: string; scope: string | null }
+  | { kind: 'command'; command: string; description: string | null; ok: boolean | null; output: string }
+  | { kind: 'plan'; items: { text: string; status: string }[] }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'edit'; event_id: string; path: string }
+)
+
+export interface StepEvidence {
+  /** El agente guarda su actividad y se encontraron las ediciones del paso. */
+  available: boolean
+  looked_at: Activity[]
+  reasoning: string[]
+  plan: { text: string; status: string }[] | null
+  /** Comprobaciones ejecutadas después de su última edición, en el mismo turno. */
+  checks: Activity[]
+  discarded: string[]
+}
+
+/** Quién escribió una línea de la rama. */
+export type LineOrigin =
+  | { by: 'session'; session_id: string }
+  | { by: 'terminal'; session_id: string }
+  | { by: 'manual'; author: string }
+
+export type BranchLine =
+  | { kind: 'context'; text: string }
+  | { kind: 'removed'; text: string }
+  | { kind: 'added'; text: string; origin: LineOrigin }
+
+export interface BranchFile {
+  path: string
+  status: 'added' | 'modified' | 'deleted'
+  added: number
+  removed: number
+  hunks: { old_start: number; new_start: number; lines: BranchLine[] }[]
+}
+
+export interface BranchSession {
+  session_id: string
+  agent: string
+  lines: number
+  terminal_lines: number
+  files: number
+  first_at: string | null
+  last_at: string | null
+  prompt: string | null
+}
+
+export interface BranchReview {
+  repo: string
+  branch: string | null
+  base: string
+  merge_base: string
+  files: BranchFile[]
+  sessions: BranchSession[]
+  /** [persona, líneas a mano] */
+  people: [string, number][]
+  skipped: string[]
+  worktrees: { path: string; branch: string | null }[]
+}
+
+export interface Requirement {
+  text: string
+  status: 'done' | 'partial' | 'missing'
+  /** Índices de los pasos que lo cumplen. */
+  steps: number[]
+  note: string | null
+}
+
+export interface Coverage {
+  turn: number
+  model: string
+  requirements: Requirement[]
+  /** [paso, qué hace] */
+  unrequested: [number, string][]
+  stale: boolean
+}
+
+/** Un uso, fuera de la sesión, de algo que cambió. */
+export interface ImpactUse {
+  path: string
+  line: number
+  symbol: string | null
+  text: string
+}
+
+export interface StepImpact {
+  name: string | null
+  uses: ImpactUse[]
+  total: number
+  generic: boolean
+}
+
+export interface ImpactResult {
+  project: string | null
+  /** En el orden de los pasos de la revisión. */
+  steps: StepImpact[]
+  /** El proyecto ya no está en el disco. */
+  missing?: boolean
 }
 
 export interface Narration {
@@ -233,5 +393,17 @@ export interface ReviewResult {
   steps: ReviewStep[]
   attention: { step: number | null; turn: number | null; kind: string; message: string }[]
   unreconstructable: number
+  status: ReviewStatus
+  comments: ReviewComment[]
+  questions: ReviewQuestion[]
+  asking: PendingAsk[]
+  follow_ups: FollowUp[]
+  hints: CommentHint[]
+  ask_model: string
+  /** Qué falta para poder preguntar (sin credencial, sin modelo), o `null`. */
+  ask_problem: string | null
+  /** Cobertura de la petición por turno. */
+  coverage: Record<string, Coverage>
+  covering: { running: boolean; error?: string } | null
   narrations: Record<string, Narration>
 }

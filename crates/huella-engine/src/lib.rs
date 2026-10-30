@@ -2,8 +2,12 @@
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
 pub mod adr;
+pub mod branch;
+pub mod coverage;
 mod decisions;
 pub mod embeddings;
+pub mod evidence;
+pub mod impact;
 mod index;
 pub mod lineage;
 pub mod narration;
@@ -12,6 +16,7 @@ mod query;
 pub mod refactor_bench;
 mod render;
 mod review;
+pub mod review_loop;
 mod sources;
 pub mod workspace;
 
@@ -37,6 +42,8 @@ pub enum EngineError {
     Git(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("el modelo falló: {0}")]
+    Model(String),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]

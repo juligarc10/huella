@@ -1,5 +1,6 @@
 //! `huella`: CLI de Huella.
 
+mod config;
 mod mcp;
 mod report;
 mod review;
@@ -23,7 +24,7 @@ use huella_decisions::anthropic::Anthropic;
 use huella_decisions::openai::{OpenAiCompatible, OpenAiEmbeddings};
 use huella_engine::ExtractionOptions;
 use huella_store::{DecisionFilter, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::report::Summary;
 
@@ -110,8 +111,8 @@ enum Command {
         #[arg(long)]
         no_browser: bool,
         /// Editor al que lleva «Abrir en…».
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Desarrollo de la interfaz: acepta el servidor de Vite (`pnpm --dir ui dev`).
         #[arg(long)]
         dev: bool,
@@ -238,8 +239,8 @@ enum ReviewCommand {
         #[arg(long)]
         open: bool,
         /// Editor que abre `--open`.
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
@@ -262,8 +263,72 @@ enum ReviewCommand {
     },
     /// Quita la revisión activa del editor.
     Stop,
+    /// Comenta un paso de la revisión para que el agente lo corrija.
+    Comment {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Número del paso, como lo muestra `review show`.
+        step: usize,
+        /// Qué hay que cambiar.
+        text: String,
+        /// La línea del cambio a la que se refiere (su texto).
+        #[arg(long)]
+        line: Option<String>,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Instrucciones para el agente con lo que hay que corregir (comentarios
+    /// abiertos y pasos marcados para cambiar o deshacer).
+    Feedback {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Pregunta a la sesión por un paso o por todo lo que hizo.
+    Ask {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// La pregunta.
+        question: String,
+        /// Número del paso, como lo muestra `review show`; sin él, la sesión entera.
+        #[arg(long)]
+        step: Option<usize>,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Genera con un modelo el resumen de cada turno, notas por paso y riesgos.
     Narrate {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Revisa la rama actual contra su base: el diff que se va a entregar, con
+    /// cada línea atribuida a la sesión de agente que la escribió o a quien la
+    /// cambió a mano.
+    Branch {
+        /// Rama base (por defecto la principal del remoto, `main` o `master`).
+        #[arg(long)]
+        base: Option<String>,
+        /// Repositorio (por defecto la carpeta actual).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
+    /// Comprueba con un modelo si cada turno hace lo que se pidió: requisitos
+    /// cumplidos, a medias o sin hacer, y lo que hizo sin pedírselo.
+    Coverage {
         /// Id de la sesión o su comienzo.
         session: String,
         #[command(flatten)]
@@ -277,8 +342,8 @@ enum ReviewCommand {
         /// Id de la sesión o su comienzo.
         session: String,
         /// Editor al que llevan los enlaces «Abrir en…».
-        #[arg(long, value_enum, default_value_t = web::Editor::Zed)]
-        editor: web::Editor,
+        #[arg(long, value_enum)]
+        editor: Option<web::Editor>,
         /// Puerto local (0 = uno libre).
         #[arg(long, default_value_t = 0)]
         port: u16,
@@ -309,17 +374,33 @@ enum ReviewCommand {
 #[derive(clap::Args, Clone)]
 struct ModelArgs {
     /// Proveedor del modelo.
-    #[arg(long, value_enum, default_value_t = Provider::Anthropic)]
-    provider: Provider,
+    #[arg(long, value_enum, env = "HUELLA_LLM_PROVIDER")]
+    provider: Option<Provider>,
     /// Modelo (por defecto claude-haiku-5-5 con Anthropic; obligatorio con openai-compatible).
-    #[arg(long)]
+    #[arg(long, env = "HUELLA_LLM_MODEL")]
     model: Option<String>,
     /// URL base de la API (por defecto la oficial, o Ollama local con openai-compatible).
-    #[arg(long)]
+    #[arg(long, env = "HUELLA_LLM_BASE_URL")]
     base_url: Option<String>,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+/// Opción o variable de entorno; si no, `config.toml`; si no, el valor por defecto.
+impl ModelArgs {
+    fn provider(&self) -> Provider {
+        self.provider.or(config::get().llm.provider).unwrap_or(Provider::Anthropic)
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.clone().or_else(|| config::get().llm.model.clone())
+    }
+
+    fn base_url(&self) -> Option<String> {
+        self.base_url.clone().or_else(|| config::get().llm.base_url.clone())
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum Provider {
     /// API de Claude (`ANTHROPIC_API_KEY`).
     Anthropic,
@@ -339,6 +420,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    config::init()?;
     match cli.command {
         Command::Scan { projects, json, sample, sample_out, sample_offset } => {
             let projects = claude_projects_dir(projects)?;
@@ -367,7 +449,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Ui { port, no_browser, editor, dev, model, projects } => {
-            ui_command(cli.db, port, !no_browser, editor, dev, model, projects)
+            ui_command(cli.db, port, !no_browser, config::editor(editor), dev, model, projects)
         }
         Command::Embed { model, base_url, limit, projects } => {
             let embedder = embedder(model, base_url)
@@ -393,7 +475,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
-            let extractor = build_model(model)?;
+            let extractor = build_model(&model)?;
             let mut store = open_store(cli.db)?;
             let projects = sources(projects)?;
             // El proyecto de cada sesión sale de los ficheros que editó: hay que indexarlos antes.
@@ -461,7 +543,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
                 None => println!("La sesión no tiene un proyecto claro: abre la carpeta de sus ficheros."),
             }
             if open {
-                open_in_editor(editor, project.as_deref(), first_pending(&store, &review, &plan)?);
+                open_in_editor(config::editor(editor), project.as_deref(), first_pending(&store, &review, &plan)?);
             }
             Ok(())
         }
@@ -471,8 +553,11 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             println!("Sin revisión activa.");
             Ok(())
         }
+        action @ (ReviewCommand::Comment { .. } | ReviewCommand::Feedback { .. } | ReviewCommand::Ask { .. }) => {
+            review_loop_command(db, action)
+        }
         ReviewCommand::Narrate { session, model, projects } => {
-            let model = build_model(model)?;
+            let model = build_model(&model)?;
             let store = open_store(db)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
@@ -487,13 +572,20 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             }
             Ok(())
         }
+        ReviewCommand::Coverage { session, model, projects } => coverage_command(db, &session, &model, projects),
+        ReviewCommand::Branch { base, repo, projects } => branch_command(&repo, base.as_deref(), projects),
         ReviewCommand::Open { session, editor, port, no_browser, projects } => {
             let store = open_store(db)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
             // La misma revisión aparece también en el editor mientras se hace en la web.
             store.set_active_review(Some(&review.session_id))?;
-            web::serve(&store, &review, &plan, &web::Options { editor, port, open_browser: !no_browser })
+            web::serve(
+                &store,
+                &review,
+                &plan,
+                &web::Options { editor: config::editor(editor), port, open_browser: !no_browser },
+            )
         }
         ReviewCommand::Show { session, file, by_file, projects } => {
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
@@ -512,6 +604,114 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
 
 /// `huella review zed`: prepara el worktree de revisión y lo abre en Zed, o lo
 /// borra con `--done`.
+fn branch_command(repo: &Path, base: Option<&str>, projects: Option<PathBuf>) -> Result<()> {
+    use huella_engine::branch::{BranchLine, LineOrigin};
+    let review = huella_engine::branch::branch_review(&sources(projects)?, repo, base)?;
+    let total: usize = review.files.iter().map(|file| file.added).sum();
+    let by_sessions: usize = review.sessions.iter().map(|session| session.lines + session.terminal_lines).sum();
+    println!(
+        "{} contra {} (desde {}): {} ficheros, +{total} líneas",
+        review.branch.as_deref().unwrap_or("HEAD"),
+        review.base,
+        review.merge_base,
+        review.files.len()
+    );
+    println!("\nEscritas por agentes: {by_sessions} líneas en {} sesiones", review.sessions.len());
+    for session in &review.sessions {
+        let prompt = session.prompt.as_deref().and_then(|p| p.lines().next()).unwrap_or("");
+        println!(
+            "  {} · {} · {} líneas en {} ficheros, {} por terminal · «{}»",
+            &session.session_id[..8.min(session.session_id.len())],
+            session.agent,
+            session.lines,
+            session.files,
+            session.terminal_lines,
+            prompt.chars().take(70).collect::<String>()
+        );
+    }
+    println!("\nA mano: {} líneas", total - by_sessions);
+    for (person, lines) in &review.people {
+        println!("  {person}: {lines}");
+    }
+    println!("\nFicheros:");
+    for file in &review.files {
+        let agent = file
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| {
+                matches!(
+                    line,
+                    BranchLine::Added { origin: LineOrigin::Session { .. } | LineOrigin::Terminal { .. }, .. }
+                )
+            })
+            .count();
+        println!(
+            "  {:>5} +{:<4} −{:<4} {:>3}% agente  {}",
+            file.status,
+            file.added,
+            file.removed,
+            agent * 100 / file.added.max(1),
+            file.path
+        );
+    }
+    for path in &review.skipped {
+        println!("  (sin atribuir: {path})");
+    }
+    Ok(())
+}
+
+fn coverage_command(db: Option<PathBuf>, session: &str, model: &ModelArgs, projects: Option<PathBuf>) -> Result<()> {
+    use huella_engine::coverage::RequirementStatus;
+    let model = build_model(model)?;
+    let store = open_store(db)?;
+    let review = huella_engine::session_review(&sources(projects)?, session)?;
+    let plan = huella_review::flow::plan(&review);
+    let points = huella_review::attention::attention(&review, &plan);
+    println!("Comprobando la cobertura con {}…", model.model_id());
+    let report = huella_engine::coverage::cover(&store, &review, &plan, &points, model.as_ref(), |turn| {
+        println!("  · turno {}", turn + 1);
+    })?;
+    for failure in &report.failures {
+        eprintln!("aviso: {failure}");
+    }
+    let step_name = |index: usize| {
+        plan[index]
+            .symbol
+            .as_ref()
+            .map_or_else(|| review.files[plan[index].file].path.clone(), |s| s.qualified_name.clone())
+    };
+    for (turn, coverage) in huella_engine::coverage::coverages(&store, &review, &plan, &points)? {
+        let prompt = review.turns.get(turn).and_then(|t| t.prompt.as_deref()).unwrap_or("(sin petición)");
+        println!(
+            "\nTurno {} · «{}»{}",
+            turn + 1,
+            prompt.lines().next().unwrap_or_default(),
+            if coverage.stale { " (desfasada)" } else { "" }
+        );
+        for requirement in &coverage.requirements {
+            let mark = match requirement.status {
+                RequirementStatus::Done => "✓",
+                RequirementStatus::Partial => "~",
+                RequirementStatus::Missing => "✗",
+            };
+            let steps: Vec<String> = requirement.steps.iter().map(|&s| step_name(s)).collect();
+            println!(
+                "  {mark} {}{}",
+                requirement.text,
+                if steps.is_empty() { String::new() } else { format!(" → {}", steps.join(", ")) }
+            );
+            if let Some(note) = &requirement.note {
+                println!("      {note}");
+            }
+        }
+        for (step, note) in &coverage.unrequested {
+            println!("  + sin pedir: {} — {note}", step_name(*step));
+        }
+    }
+    Ok(())
+}
+
 fn review_zed(db: Option<PathBuf>, session: &str, done: bool, open: bool, projects: Option<PathBuf>) -> Result<()> {
     let mut store = open_store(db)?;
     let projects = sources(projects)?;
@@ -571,6 +771,52 @@ fn first_pending(
         .iter()
         .find(|step| marks.get(&step.key(review)) != Some(&step.content_hash()))
         .map(|step| (review.files[step.file].path.clone(), step.symbol.as_ref().map_or(1, |s| s.start_line))))
+}
+
+/// `huella review comment|feedback|ask`: el bucle de corrección.
+fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
+    let store = open_store(db)?;
+    let pick = |plan: &[huella_review::flow::FlowStep], step: usize| -> Result<usize> {
+        let index = step.checked_sub(1).filter(|&i| i < plan.len());
+        index.with_context(|| format!("la revisión tiene {} pasos; elige uno de 1 a {}", plan.len(), plan.len()))
+    };
+    match action {
+        ReviewCommand::Comment { session, step, text, line, projects } => {
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let chosen = &plan[pick(&plan, step)?];
+            let key = chosen.key(&review);
+            let id = store.add_comment(&huella_store::NewComment {
+                session_id: &review.session_id,
+                step_key: &key,
+                path: &review.files[chosen.file].path,
+                symbol: chosen.symbol.as_ref().map(|s| s.qualified_name.as_str()),
+                quote: line.as_deref(),
+                body: &text,
+            })?;
+            store.set_review_status(&review.session_id, Some("changes_requested"), Some(plan.len()))?;
+            println!(
+                "Comentario {id} en el paso {step}. `huella review feedback {session}` da las instrucciones para el agente."
+            );
+            Ok(())
+        }
+        ReviewCommand::Feedback { session, projects } => {
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            emit(&huella_engine::review_loop::feedback(&store, &review, &plan)?.markdown);
+            Ok(())
+        }
+        ReviewCommand::Ask { session, question, step, model, projects } => {
+            let model = build_model(&model)?;
+            let review = huella_engine::session_review(&sources(projects)?, &session)?;
+            let plan = huella_review::flow::plan(&review);
+            let step = step.map(|step| pick(&plan, step)).transpose()?;
+            let answer = huella_engine::review_loop::ask(&store, model.as_ref(), &review, &plan, step, &question)?;
+            emit(&format!("{}\n\n({})\n", answer.answer, answer.model));
+            Ok(())
+        }
+        _ => unreachable!("solo comandos del bucle de corrección"),
+    }
 }
 
 /// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.
@@ -746,21 +992,57 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// Modelo de embeddings de los argumentos o de `HUELLA_EMBED_MODEL` y
-/// `HUELLA_EMBED_URL`; `None` si no hay ninguno configurado.
+/// Modelo de embeddings de los argumentos, de `HUELLA_EMBED_MODEL` y
+/// `HUELLA_EMBED_URL` o de `[embed]` en `config.toml`; `None` si no hay ninguno.
 pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenAiEmbeddings> {
-    let model = model.or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok()).filter(|m| !m.trim().is_empty())?;
-    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok());
-    Some(OpenAiEmbeddings::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+    let embed = &config::get().embed;
+    let model = model
+        .or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok())
+        .or_else(|| embed.model.clone())
+        .filter(|m| !m.trim().is_empty())?;
+    let base_url = base_url.or_else(|| std::env::var("HUELLA_EMBED_URL").ok()).or_else(|| embed.base_url.clone());
+    // Un fichero de clave mal configurado ya lo avisa el modelo de lenguaje.
+    let key = config::api_key("HUELLA_LLM_API_KEY").ok().flatten();
+    Some(OpenAiEmbeddings::new(base_url, model, key))
 }
 
-fn build_model(args: ModelArgs) -> Result<Box<dyn JsonModel>> {
-    let ModelArgs { provider, model, base_url } = args;
-    Ok(match provider {
-        Provider::Anthropic => Box::new(Anthropic::from_env(model, base_url)?),
+fn config_hint() -> String {
+    config::path().map_or_else(|| "config.toml".to_owned(), |path| path.display().to_string())
+}
+
+/// Qué le falta a la configuración del modelo para poder llamarlo, si algo.
+/// Con openai-compatible la clave es opcional: un servidor local no la pide.
+fn model_problem(args: &ModelArgs) -> Option<String> {
+    match args.provider() {
+        Provider::Anthropic => match config::api_key("ANTHROPIC_API_KEY") {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!(
+                "No hay modelo configurado: define ANTHROPIC_API_KEY, o un servidor compatible con OpenAI en [llm] \
+                 de {} (provider = \"openai-compatible\", base_url, model y, si la pide, api_key_file). \
+                 Después vuelve a abrir huella ui.",
+                config_hint()
+            )),
+            Err(error) => Some(format!("{error:#}")),
+        },
+        Provider::OpenaiCompatible if args.model().is_none() => Some(format!(
+            "Falta el modelo: añade model en [llm] de {} (o HUELLA_LLM_MODEL) y vuelve a abrir huella ui.",
+            config_hint()
+        )),
+        Provider::OpenaiCompatible => config::api_key("HUELLA_LLM_API_KEY").err().map(|error| format!("{error:#}")),
+    }
+}
+
+fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
+    let (model, base_url) = (args.model(), args.base_url());
+    Ok(match args.provider() {
+        Provider::Anthropic => {
+            let key = config::api_key("ANTHROPIC_API_KEY")?
+                .context("falta la credencial: define ANTHROPIC_API_KEY o api_key_file en config.toml")?;
+            Box::new(Anthropic::new(key, model, base_url))
+        }
         Provider::OpenaiCompatible => {
-            let model = model.context("con openai-compatible indica el modelo con --model (p. ej. qwen2.5:7b)")?;
-            Box::new(OpenAiCompatible::new(base_url, model, std::env::var("HUELLA_LLM_API_KEY").ok()))
+            let model = model.context("con openai-compatible indica el modelo con --model o en config.toml")?;
+            Box::new(OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?))
         }
     })
 }

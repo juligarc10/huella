@@ -84,8 +84,14 @@ Todo lo de Huella en un sitio, sin salir de tu máquina:
   el editor.
 - **Decisiones y ADRs**: por alcance (proyecto, tuyas, por carpeta) y estado;
   corrige el estado con un clic y exporta los ADRs del proyecto.
-- **Sesiones y revisión**: el guion de cada sesión paso a paso, con las líneas
-  sin explicación resaltadas; `j`/`k` para moverse y `r` para marcar revisado.
+- **Por revisar** (la portada): las sesiones según su estado de revisión (sin
+  revisar, en revisión, cambios pedidos, aprobada). Cada una se revisa paso a
+  paso: veredicto por paso (`r` bien, `c` cambiar, `d` deshacer; `j`/`k` para
+  moverse), comentarios sobre cualquier línea del diff, preguntas a la sesión y
+  «Pedir cambios», que da las instrucciones para el agente. Cada paso enseña
+  su evidencia, su impacto y si el turno cubre lo que pediste (ver abajo).
+- **Rama**: lo que vas a entregar, el diff de la rama contra su base con cada
+  línea atribuida a la sesión que la escribió o a quien la cambió a mano.
 - **Memoria de un símbolo**: su historia, también si se renombró o se movió.
 - **Estado**: supervivencia a refactors, vectores y extracción de decisiones,
   que se lanzan desde aquí y corren en segundo plano.
@@ -170,6 +176,58 @@ Los pasos revisados se guardan con un hash de su contenido: si el código del
 paso cambia, vuelve a quedar pendiente. Web, editor y terminal comparten las
 marcas.
 
+#### Corregir lo que hizo el agente
+
+La revisión no acaba en marcar pasos: lo que no te convence se convierte en
+instrucciones para el agente, y después se revisa solo lo que cambió.
+
+```sh
+huella review comment 84e33d8e 3 "Valida el email antes de guardarlo" --line "await repo.save(user)"
+huella review feedback 84e33d8e      # las instrucciones en Markdown, listas para pegar
+huella review ask 84e33d8e "¿Por qué no reutiliza el validador?" --step 3 --provider openai-compatible …
+```
+
+- **Veredicto por paso**: *bien*, *cambiar* o *deshacer*. Como las marcas, va
+  ligado al hash del paso.
+- **Comentarios** sobre una línea (en la aplicación, clic en ella) o sobre el
+  paso entero. Comentar pasa la sesión a «cambios pedidos».
+- **Instrucciones para el agente**: cada comentario abierto y cada paso a
+  cambiar o deshacer, con el símbolo, el fichero relativo al proyecto, la parte
+  de la petición a la que respondía, la línea citada y el diff del paso. Se
+  copian desde la aplicación o el agente las pide por MCP
+  (`huella_review_feedback`, por defecto la última sesión con cambios pedidos).
+- **Seguimiento**: cuando otra sesión (o la misma) edita después esos ficheros,
+  la revisión lo avisa y enlaza con ella; cada comentario indica si su línea ya
+  no está o si el fichero cambió después, para resolverlo o reabrirlo.
+- **Preguntar a la sesión** por un paso o por toda la sesión. El modelo responde
+  con la petición, las explicaciones del agente, el diff y el código actual del
+  paso, y las preguntas anteriores. Se usa el mismo modelo que para extraer
+  decisiones, y las preguntas y respuestas se guardan (redactadas).
+
+#### Evidencia, impacto y cobertura
+
+Para fiarte de un paso no basta con el diff:
+
+- **Evidencia**: qué leyó y exploró el agente en su turno antes de escribirlo
+  (también por terminal: `grep`, `sed`, `cat`), su último razonamiento, su lista
+  de tareas, las comprobaciones que ejecutó después (tests, compilación, lint,
+  `curl`) con su resultado y salida, y sus intentos descartados: las líneas que
+  escribió y luego rehízo él mismo. Los pasos que no comprobó se marcan «sin
+  probar». Se lee de la transcripción al abrir la revisión, redactada; Claude
+  Code lo guarda todo, otros agentes menos.
+- **Impacto**: qué código del proyecto, fuera de la sesión, usa lo que cambió
+  el paso. Se busca por nombre con tree-sitter en los ficheros del repositorio
+  que importan ese nombre o su módulo; solo cuentan funciones, métodos, tipos y
+  variables de módulo.
+- **Cobertura de la petición**: con un modelo, la petición del turno troceada en
+  requisitos (hecho, a medias o sin hacer) con los pasos que cumplen cada uno, y
+  lo que el agente hizo sin que se le pidiera. Se guarda y se marca como
+  desfasada si el turno cambia.
+
+```sh
+huella review coverage 84e33d8e      # la cobertura en la terminal
+```
+
 #### En Zed, con su vista de cambios
 
 ```sh
@@ -187,6 +245,27 @@ desmarca). Los avisos de Huella explican cada paso y el panel de diagnósticos
 lista lo pendiente. Los ficheros de la sesión fuera del repositorio no se
 incluyen. `.claude/worktrees/` se añade a `.git/info/exclude` del repositorio
 para que el worktree no aparezca como cambio.
+
+### Revisar una rama
+
+```sh
+huella review branch                 # la rama actual contra la principal del remoto
+huella review branch --base develop --repo ../canjea
+```
+
+Lo que se entrega es una rama, no una sesión. Huella toma el diff contra el
+`merge-base` (con lo que aún no tiene commit) y atribuye cada línea añadida:
+
+- a la **sesión** de agente que la escribió, partiendo del contenido en el
+  `merge-base` y aplicando en orden todas las ediciones posteriores de cualquier
+  agente; si la transcripción solo guardó el texto insertado, por su contenido;
+- a la sesión que la cambió **por terminal** (scripts, `sed`, formateadores), si
+  está en un commit que hizo esa sesión;
+- o a la **persona** que la cambió a mano, según `git blame` («Sin commit» si
+  aún no lo tiene).
+
+En la aplicación, la página Rama deja elegir la copia de trabajo, porque los
+agentes suelen trabajar en worktrees.
 
 ### Extraer decisiones
 
@@ -206,6 +285,39 @@ huella decisions extract --provider openai-compatible \
 ```
 
 Solo procesa las sesiones nuevas o que han crecido; `--limit N` acota cuántas.
+
+El mismo modelo responde a las preguntas a una sesión.
+
+### Configuración
+
+Huella se arranca desde cualquier sitio (el editor, el agente por MCP, una
+terminal), así que su configuración es una por usuario, junto a la base de
+datos: `~/Library/Application Support/huella/config.toml` en macOS,
+`~/.local/share/huella/config.toml` en Linux (o `$HUELLA_CONFIG`).
+
+```toml
+[llm]
+provider = "openai-compatible"          # o "anthropic" (por defecto)
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:7b"
+api_key_file = "~/.config/huella/llm-key"   # opcional; con chmod 600
+
+[embed]
+model = "bge-m3"
+base_url = "http://localhost:11434/v1"
+
+[ui]
+editor = "vscode"                       # o "zed" (por defecto)
+```
+
+Las opciones de la orden mandan sobre las variables de entorno
+(`HUELLA_LLM_PROVIDER`, `HUELLA_LLM_BASE_URL`, `HUELLA_LLM_MODEL`,
+`HUELLA_EMBED_MODEL`, `HUELLA_EMBED_URL`), y estas sobre el fichero. La clave
+nunca se escribe en `config.toml`: sale de `HUELLA_LLM_API_KEY`
+(`ANTHROPIC_API_KEY` con Claude) o de `api_key_file`, que Huella se niega a leer
+si otros usuarios pueden. Una clave desconocida es un error, para que una errata
+no pase desapercibida. Si falta algo, el panel «Preguntar a la sesión» lo dice
+antes de que escribas.
 
 Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale
 en todos los proyectos, como el idioma de los commits), del proyecto o de una

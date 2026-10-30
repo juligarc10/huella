@@ -4,6 +4,7 @@
 //! convierte en un [`AnchorOutcome`] que apunta a [`Symbol`]s del código. Este
 //! crate no conoce ningún formato de transcripción ni ningún parser.
 
+pub mod activity;
 pub mod agent;
 mod fingerprint;
 pub mod redact;
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+pub use activity::{Activity, ActivityKind, PlanItem};
 pub use agent::{Agent, AgentBatch, AgentError};
 pub use fingerprint::{Fingerprint, SELF_TOKEN, SKETCH_SIZE};
 
