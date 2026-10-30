@@ -256,6 +256,18 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX review_question_by_session ON review_question(session_id);
 ",
+    // 13: cobertura de la petición de cada turno, generada con un modelo.
+    r"
+    CREATE TABLE review_coverage (
+        session_id      TEXT NOT NULL,
+        turn            INTEGER NOT NULL,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        coverage        TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (session_id, turn)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -479,6 +491,15 @@ pub struct StoredNarration {
     pub model: String,
     /// JSON tal como lo devolvió el modelo.
     pub narration: String,
+}
+
+/// Cobertura de la petición de un turno, tal como la devolvió el modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCoverage {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub coverage: String,
 }
 
 /// Resumen de una sesión para elegir qué revisar.
@@ -1275,6 +1296,45 @@ impl Store {
                 stored.input_hash,
                 stored.model,
                 stored.narration
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Coberturas guardadas de una sesión, por turno.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn coverages(&self, session_id: &str) -> Result<HashMap<usize, StoredCoverage>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT turn, input_hash, model, coverage FROM review_coverage WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| {
+            let turn: i64 = row.get(0)?;
+            Ok((
+                usize::try_from(turn).unwrap_or_default(),
+                StoredCoverage { input_hash: row.get(1)?, model: row.get(2)?, coverage: row.get(3)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Guarda (o sustituye) la cobertura de un turno.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_coverage(&self, session_id: &str, turn: usize, stored: &StoredCoverage) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_coverage (session_id, turn, input_hash, model, coverage, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id, turn) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 coverage = excluded.coverage, created_at = excluded.created_at",
+            params![
+                session_id,
+                i64::try_from(turn).unwrap_or(i64::MAX),
+                stored.input_hash,
+                stored.model,
+                stored.coverage
             ],
         )?;
         Ok(())
