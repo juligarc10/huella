@@ -111,7 +111,7 @@ pub fn payload(
                 .sources
                 .iter()
                 .map(|&s| match &review.steps[s] {
-                    Step::Agent { turn, at, rationale } => {
+                    Step::Agent { turn, at, rationale, .. } => {
                         json!({"kind": "agent", "turn": turn, "at": at, "rationale": rationale})
                     }
                     Step::External { reason } => json!({"kind": "external", "reason": match reason {

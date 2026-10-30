@@ -19,6 +19,9 @@ use similar::{DiffOp, DiffTag, TextDiff};
 /// Líneas de contexto alrededor de cada bloque.
 const CONTEXT_LINES: usize = 3;
 
+/// Líneas descartadas que se guardan por paso; basta para ver qué intentó.
+const MAX_DISCARDED: usize = 60;
+
 /// Revisión de una sesión completa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionReview {
@@ -45,7 +48,18 @@ pub struct Turn {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Step {
     /// Edición del agente, con su explicación.
-    Agent { turn: usize, at: Option<String>, rationale: Option<String> },
+    Agent {
+        turn: usize,
+        at: Option<String>,
+        rationale: Option<String>,
+        /// Evento de la transcripción, para enlazar con lo que hizo el agente alrededor.
+        event_id: String,
+        /// Fichero editado (la clave normalizada).
+        path: String,
+        /// Líneas que escribió y que el propio agente rehízo o borró después en la
+        /// sesión: sus intentos descartados.
+        discarded: Vec<String>,
+    },
     /// El fichero cambió fuera de las ediciones del agente.
     External { reason: ExternalReason },
 }
@@ -162,8 +176,11 @@ pub fn build(
             turn: turn_of(index),
             at: edit.origin.timestamp.clone(),
             rationale: edit.context.rationale.clone(),
+            event_id: edit.origin.event_id.clone(),
+            path: key(edit),
+            discarded: Vec::new(),
         });
-        history.apply(after, steps.len() - 1);
+        history.apply_by_agent(after, steps.len() - 1);
     }
 
     for (path, history) in &mut histories {
@@ -175,6 +192,15 @@ pub fn build(
         }
     }
 
+    for history in histories.values_mut() {
+        for (source, line) in std::mem::take(&mut history.discarded) {
+            if let Some(Step::Agent { discarded, .. }) = steps.get_mut(source)
+                && discarded.len() < MAX_DISCARDED
+            {
+                discarded.push(line);
+            }
+        }
+    }
     let files = histories.into_iter().filter_map(|(path, history)| history.finish(path)).collect();
     SessionReview { session_id: session_id.to_owned(), turns, steps, files, unreconstructable }
 }
@@ -205,6 +231,8 @@ struct History {
     /// Borrados: (línea del estado actual delante de la que se borró, paso).
     deletions: Vec<(usize, usize)>,
     pending_unknown: bool,
+    /// Líneas de un paso que una edición posterior del agente rehízo o borró.
+    discarded: Vec<(usize, String)>,
 }
 
 impl History {
@@ -218,7 +246,27 @@ impl History {
             provenance,
             deletions: Vec::new(),
             pending_unknown: false,
+            discarded: Vec::new(),
         }
+    }
+
+    /// Como `apply`, para una edición del agente: lo que sustituye de pasos
+    /// anteriores son intentos descartados de esos pasos.
+    fn apply_by_agent(&mut self, next: &str, step: usize) {
+        let (old, new) = (lines(&self.current), lines(next));
+        for op in TextDiff::from_slices(&old, &new).ops() {
+            let (tag, old_range, _) = op.as_tag_tuple();
+            if matches!(tag, DiffTag::Delete | DiffTag::Replace) {
+                for index in old_range {
+                    if let Some(source) = self.provenance[index]
+                        && !old[index].trim().is_empty()
+                    {
+                        self.discarded.push((source, old[index].trim_end_matches(['\n', '\r']).to_owned()));
+                    }
+                }
+            }
+        }
+        self.apply(next, step);
     }
 
     /// Pasa al estado `next`; las líneas nuevas o cambiadas se atribuyen a `step`.
@@ -485,5 +533,35 @@ mod tests {
         assert_eq!(map_position(diff.ops(), 0), 1);
         assert_eq!(map_position(diff.ops(), 2), 2);
         assert_eq!(map_position(diff.ops(), 3), 3);
+    }
+
+    #[test]
+    fn lines_the_agent_rewrote_later_are_discarded_attempts_of_their_step() {
+        let first = edit("a.ts", None, "fn a() {\n  return slow();\n}\n", "haz a", "primer intento");
+        let second = edit(
+            "a.ts",
+            Some("fn a() {\n  return slow();\n}\n"),
+            "fn a() {\n  return fast();\n}\n",
+            "haz a",
+            "mejor así",
+        );
+        let review = review(&[first, second]);
+        let discarded = |index: usize| match &review.steps[index] {
+            Step::Agent { discarded, event_id, path, .. } => (discarded.clone(), event_id.clone(), path.clone()),
+            Step::External { .. } => panic!("paso externo"),
+        };
+        let (lines, event_id, path) = discarded(0);
+        assert_eq!(lines, vec!["  return slow();".to_owned()]);
+        assert_eq!((event_id.as_str(), path.as_str()), ("primer intento", "a.ts"));
+        assert!(discarded(1).0.is_empty(), "lo que queda al final no es un descarte");
+    }
+
+    #[test]
+    fn external_changes_are_not_discarded_attempts() {
+        let first = edit("a.ts", None, "x\ny\n", "p", "crea");
+        // Alguien cambió «y» entre ediciones: es un cambio externo, no un descarte del agente.
+        let second = edit("a.ts", Some("x\nY\n"), "x\nY\nz\n", "p", "añade");
+        let review = review(&[first, second]);
+        assert!(matches!(&review.steps[0], Step::Agent { discarded, .. } if discarded.is_empty()));
     }
 }
