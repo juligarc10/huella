@@ -44,12 +44,32 @@ Everything stays on your machine.
 
 ## Install
 
+macOS and Linux:
+
 ```sh
-cargo install --git https://github.com/juligarc10/huella huella-cli   # Rust 1.90+
+curl -fsSL https://raw.githubusercontent.com/juligarc10/huella/main/install.sh | sh
 ```
 
-or download a binary from the [releases](https://github.com/juligarc10/huella/releases).
-Then let Huella set itself up:
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/juligarc10/huella/main/install.ps1 | iex
+```
+
+The installer downloads the binary for your system from the latest
+[release](https://github.com/juligarc10/huella/releases), checks it against the
+release's `SHA256SUMS` (it refuses to install without it), puts it in
+`~/.local/bin` (`%LOCALAPPDATA%\Programs\huella` on Windows) and runs
+`huella setup`. `HUELLA_VERSION` picks a version, `HUELLA_INSTALL_DIR` another
+folder and `HUELLA_NO_SETUP=1` skips the setup.
+
+With Rust 1.90+ you can also build it yourself:
+
+```sh
+cargo install --git https://github.com/juligarc10/huella huella-cli
+```
+
+Either way, Huella then sets itself up:
 
 ```sh
 huella setup        # asks; huella setup --yes takes the defaults
