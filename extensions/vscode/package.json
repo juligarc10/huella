@@ -2,7 +2,7 @@
   "name": "huella",
   "displayName": "Huella",
   "description": "Lo que se habló con la IA sobre cada función, al pasar el ratón.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "juligarc10",
   "license": "MIT OR Apache-2.0",
   "private": true,
@@ -13,7 +13,9 @@
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onLanguage:typescript",
     "onLanguage:typescriptreact",

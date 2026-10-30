@@ -8,10 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 crossbeam-channel = "0.5.17"
-huella-anchoring = { version = "0.1.0", path = "../huella-anchoring" }
-huella-engine = { version = "0.1.0", path = "../huella-engine" }
-huella-review = { version = "0.1.0", path = "../huella-review" }
-huella-store = { version = "0.1.0", path = "../huella-store" }
+huella-anchoring = { version = "0.2.0", path = "../huella-anchoring" }
+huella-engine = { version = "0.2.0", path = "../huella-engine" }
+huella-review = { version = "0.2.0", path = "../huella-review" }
+huella-store = { version = "0.2.0", path = "../huella-store" }
 lsp-server = "0.10.0"
 lsp-types = "0.97.0"
 serde = "1.0.229"

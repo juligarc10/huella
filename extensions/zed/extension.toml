@@ -1,6 +1,6 @@
 id = "huella"
 name = "Huella"
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["juligarc10"]
 description = "Lo que se habló con la IA sobre cada función, al pasar el ratón."
