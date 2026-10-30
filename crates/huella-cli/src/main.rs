@@ -312,6 +312,20 @@ enum ReviewCommand {
         #[arg(long)]
         projects: Option<PathBuf>,
     },
+    /// Revisa la rama actual contra su base: el diff que se va a entregar, con
+    /// cada línea atribuida a la sesión de agente que la escribió o a quien la
+    /// cambió a mano.
+    Branch {
+        /// Rama base (por defecto la principal del remoto, `main` o `master`).
+        #[arg(long)]
+        base: Option<String>,
+        /// Repositorio (por defecto la carpeta actual).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Comprueba con un modelo si cada turno hace lo que se pidió: requisitos
     /// cumplidos, a medias o sin hacer, y lo que hizo sin pedírselo.
     Coverage {
@@ -559,6 +573,7 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             Ok(())
         }
         ReviewCommand::Coverage { session, model, projects } => coverage_command(db, &session, &model, projects),
+        ReviewCommand::Branch { base, repo, projects } => branch_command(&repo, base.as_deref(), projects),
         ReviewCommand::Open { session, editor, port, no_browser, projects } => {
             let store = open_store(db)?;
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
@@ -589,6 +604,63 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
 
 /// `huella review zed`: prepara el worktree de revisión y lo abre en Zed, o lo
 /// borra con `--done`.
+fn branch_command(repo: &Path, base: Option<&str>, projects: Option<PathBuf>) -> Result<()> {
+    use huella_engine::branch::{BranchLine, LineOrigin};
+    let review = huella_engine::branch::branch_review(&sources(projects)?, repo, base)?;
+    let total: usize = review.files.iter().map(|file| file.added).sum();
+    let by_sessions: usize = review.sessions.iter().map(|session| session.lines + session.terminal_lines).sum();
+    println!(
+        "{} contra {} (desde {}): {} ficheros, +{total} líneas",
+        review.branch.as_deref().unwrap_or("HEAD"),
+        review.base,
+        review.merge_base,
+        review.files.len()
+    );
+    println!("\nEscritas por agentes: {by_sessions} líneas en {} sesiones", review.sessions.len());
+    for session in &review.sessions {
+        let prompt = session.prompt.as_deref().and_then(|p| p.lines().next()).unwrap_or("");
+        println!(
+            "  {} · {} · {} líneas en {} ficheros, {} por terminal · «{}»",
+            &session.session_id[..8.min(session.session_id.len())],
+            session.agent,
+            session.lines,
+            session.files,
+            session.terminal_lines,
+            prompt.chars().take(70).collect::<String>()
+        );
+    }
+    println!("\nA mano: {} líneas", total - by_sessions);
+    for (person, lines) in &review.people {
+        println!("  {person}: {lines}");
+    }
+    println!("\nFicheros:");
+    for file in &review.files {
+        let agent = file
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| {
+                matches!(
+                    line,
+                    BranchLine::Added { origin: LineOrigin::Session { .. } | LineOrigin::Terminal { .. }, .. }
+                )
+            })
+            .count();
+        println!(
+            "  {:>5} +{:<4} −{:<4} {:>3}% agente  {}",
+            file.status,
+            file.added,
+            file.removed,
+            agent * 100 / file.added.max(1),
+            file.path
+        );
+    }
+    for path in &review.skipped {
+        println!("  (sin atribuir: {path})");
+    }
+    Ok(())
+}
+
 fn coverage_command(db: Option<PathBuf>, session: &str, model: &ModelArgs, projects: Option<PathBuf>) -> Result<()> {
     use huella_engine::coverage::RequirementStatus;
     let model = build_model(model)?;

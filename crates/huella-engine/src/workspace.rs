@@ -181,7 +181,7 @@ fn ignore_review_worktrees(repo: &Path) -> Result<()> {
     write(&exclude, &content)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
