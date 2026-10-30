@@ -336,6 +336,7 @@ provider = "openai-compatible"          # o "anthropic" (por defecto)
 base_url = "http://localhost:11434/v1"
 model = "qwen2.5:7b"
 api_key_file = "~/.config/huella/llm-key"   # opcional; con chmod 600
+thinking = false                        # Qwen3 y similares: sin razonamiento (más rápido, sin JSON cortado)
 
 [embed]
 model = "bge-m3"
@@ -351,7 +352,10 @@ Las opciones de la orden mandan sobre las variables de entorno
 nunca se escribe en `config.toml`: sale de `HUELLA_LLM_API_KEY`
 (`ANTHROPIC_API_KEY` con Claude) o de `api_key_file`, que Huella se niega a leer
 si otros usuarios pueden. Una clave desconocida es un error, para que una errata
-no pase desapercibida. Si falta algo, el panel «Preguntar a la sesión» lo dice
+no pase desapercibida. `thinking` se envía al servidor como
+`chat_template_kwargs` (lo entienden llama.cpp y vLLM): los modelos que razonan
+antes de responder tardan mucho más y ese razonamiento, que Huella descarta,
+cuenta dentro del límite de la respuesta. Si falta algo, el panel «Preguntar a la sesión» lo dice
 antes de que escribas.
 
 Cada decisión tiene un **alcance**: tuya (una preferencia o convención que vale

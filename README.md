@@ -157,6 +157,7 @@ provider = "openai-compatible"          # or "anthropic" (default)
 base_url = "http://localhost:11434/v1"
 model = "qwen2.5:7b"
 api_key_file = "~/.config/huella/llm-key"   # optional; must be chmod 600
+thinking = false                        # Qwen3 & co.: skip reasoning (faster, no truncated JSON)
 
 [embed]
 model = "bge-m3"

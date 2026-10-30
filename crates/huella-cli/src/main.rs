@@ -1088,7 +1088,10 @@ fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
         }
         Provider::OpenaiCompatible => {
             let model = model.context("con openai-compatible indica el modelo con --model o en config.toml")?;
-            Box::new(OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?))
+            let thinking = config::get().llm.thinking;
+            Box::new(
+                OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?).with_thinking(thinking),
+            )
         }
     })
 }
