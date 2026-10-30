@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import {
   api,
   query,
+  type BranchReview,
   type ImpactResult,
   type InboxSession,
   type ReviewStatus,
@@ -162,6 +163,15 @@ export function useUpdateComment(session: string) {
       client.invalidateQueries({ queryKey: ['inbox'] })
     },
     onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useBranch(project: string | null, base: string) {
+  return useQuery({
+    queryKey: ['branch', project, base],
+    queryFn: () => api.get<BranchReview>(`branch${query({ project, base })}`),
+    enabled: Boolean(project),
+    staleTime: 30_000,
   })
 }
 

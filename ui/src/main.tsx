@@ -12,6 +12,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { ApiError } from '@/lib/api'
 import { ProjectProvider } from '@/lib/project'
 import { ThemeProvider } from '@/lib/theme'
+import { BranchPage } from '@/pages/branch'
 import { DecisionsPage } from '@/pages/decisions'
 import { ReviewPage } from '@/pages/review'
 import { SearchPage } from '@/pages/search'
@@ -43,6 +44,7 @@ const router = createHashRouter([
       { path: 'simbolo', element: <SymbolPage /> },
       { path: 'sesiones', element: <SessionsPage /> },
       { path: 'sesiones/:session', element: <ReviewPage /> },
+      { path: 'rama', element: <BranchPage /> },
       { path: 'estado', element: <StatusPage /> },
     ],
   },

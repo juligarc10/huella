@@ -2,6 +2,7 @@ import {
   Activity,
   BookMarked,
   Command as CommandIcon,
+  GitBranch,
   GitPullRequestArrow,
   Loader2,
   Monitor,
@@ -25,6 +26,7 @@ const ALL = '__todos__'
 
 const nav = [
   { to: '/sesiones', label: 'Por revisar', icon: GitPullRequestArrow, end: false },
+  { to: '/rama', label: 'Rama', icon: GitBranch, end: false },
   { to: '/buscar', label: 'Buscar', icon: Search, end: false },
   { to: '/decisiones', label: 'Decisiones y ADRs', icon: BookMarked, end: false },
   { to: '/estado', label: 'Estado', icon: Activity, end: false },

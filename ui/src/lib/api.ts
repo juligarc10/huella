@@ -292,6 +292,49 @@ export interface StepEvidence {
   discarded: string[]
 }
 
+/** Quién escribió una línea de la rama. */
+export type LineOrigin =
+  | { by: 'session'; session_id: string }
+  | { by: 'terminal'; session_id: string }
+  | { by: 'manual'; author: string }
+
+export type BranchLine =
+  | { kind: 'context'; text: string }
+  | { kind: 'removed'; text: string }
+  | { kind: 'added'; text: string; origin: LineOrigin }
+
+export interface BranchFile {
+  path: string
+  status: 'added' | 'modified' | 'deleted'
+  added: number
+  removed: number
+  hunks: { old_start: number; new_start: number; lines: BranchLine[] }[]
+}
+
+export interface BranchSession {
+  session_id: string
+  agent: string
+  lines: number
+  terminal_lines: number
+  files: number
+  first_at: string | null
+  last_at: string | null
+  prompt: string | null
+}
+
+export interface BranchReview {
+  repo: string
+  branch: string | null
+  base: string
+  merge_base: string
+  files: BranchFile[]
+  sessions: BranchSession[]
+  /** [persona, líneas a mano] */
+  people: [string, number][]
+  skipped: string[]
+  worktrees: { path: string; branch: string | null }[]
+}
+
 export interface Requirement {
   text: string
   status: 'done' | 'partial' | 'missing'

@@ -186,6 +186,7 @@ fn api(
         (Method::Get, ["symbol"]) => symbol(app, params)?,
         (Method::Get, ["sessions"]) => sessions(app, params)?,
         (Method::Get, ["inbox"]) => inbox(app)?,
+        (Method::Get, ["branch"]) => branch(app, params)?,
         (Method::Get, ["review", session]) => review(app, session)?,
         (Method::Post, ["review", session, "mark"]) => mark(app, session, body)?,
         (Method::Post, ["review", session, "status"]) => set_status_of_review(app, session, body)?,
@@ -360,6 +361,14 @@ fn symbol(app: &App, params: &HashMap<String, String>) -> Result<Value> {
         })
     });
     Ok(json!({"path": path, "memory": memory, "decisions": applying}))
+}
+
+/// Revisión de la rama actual de un proyecto contra su base.
+fn branch(app: &App, params: &HashMap<String, String>) -> Result<Value> {
+    let project = non_empty(params.get("project")).context("indica el proyecto")?;
+    let base = non_empty(params.get("base"));
+    let review = huella_engine::branch::branch_review(&app.sources, Path::new(&project), base.as_deref())?;
+    Ok(serde_json::to_value(review)?)
 }
 
 fn sessions(app: &App, params: &HashMap<String, String>) -> Result<Value> {
