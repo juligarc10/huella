@@ -11,7 +11,7 @@ on:
         description: "Etiqueta de la release (p. ej. v0.1.0)"
         required: true
       only:
-        description: "Solo este target, o «checksums» para solo regenerar SHA256SUMS (vacío: todo)"
+        description: "Solo este target, «app» para solo los instaladores de la aplicación, o «checksums» (vacío: todo)"
         required: false
         default: ""
 
@@ -93,10 +93,58 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: huella.vsix
 
+  # La aplicación de escritorio (Tauri) y sus instaladores. Sin firmar: los
+  # README explican cómo abrirla la primera vez en macOS y Windows.
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    if: ${{ !inputs.only || inputs.only == 'app' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bibliotecas de WebKit (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Instaladores
+        working-directory: apps/desktop
+        shell: bash
+        # La versión de los instaladores es la de la etiqueta.
+        run: npx --yes @tauri-apps/cli@2 build --target ${{ matrix.target }} --config "{\"version\":\"${TAG#v}\"}"
+      - name: Subir a la release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          bundle=apps/desktop/target/${{ matrix.target }}/release/bundle
+          files=("$bundle"/dmg/*.dmg "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/msi/*.msi "$bundle"/nsis/*.exe)
+          ls -la "${files[@]}"
+          gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
   # Checksums de todos los ficheros de la release: install.sh e install.ps1
   # no instalan nada sin comprobarlos. Se rehace con cada fichero que se añade.
   checksums:
-    needs: [build, vsix]
+    needs: [build, vsix, app]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -106,7 +154,8 @@ jobs:
         run: |
           mkdir assets
           cd assets
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'huella*'
-          sha256sum huella* > SHA256SUMS
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY"
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber

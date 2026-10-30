@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Huella",
+  "identifier": "com.juligarc10.huella",
+  "build": {
+    "frontendDist": "../../ui/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Revisa el código que escribe tu agente de IA",
+    "longDescription": "Huella guarda la memoria de las sesiones de tus agentes de IA anclada al código y te ayuda a revisar lo que escribieron paso a paso: evidencia, impacto, cobertura de la petición y correcciones.",
+    "copyright": "© 2026 Julián García Pallas",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

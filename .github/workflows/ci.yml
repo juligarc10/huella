@@ -91,3 +91,21 @@ jobs:
           & (Join-Path $env:HUELLA_INSTALL_DIR 'huella.exe') --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Stop-Process $server
+
+  # La aplicación de escritorio tiene su propio workspace (necesita WebKit en
+  # Linux): se comprueba en macOS, donde el sistema ya trae su WebView.
+  app:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings

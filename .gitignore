@@ -4,3 +4,6 @@ node_modules/
 /extensions/vscode/dist/
 *.vsix
 /extensions/zed/target/
+/apps/desktop/target/
+# Esquemas que Tauri regenera en cada compilación.
+/apps/desktop/gen/

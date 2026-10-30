@@ -95,6 +95,23 @@ repository. Zed needs `~/.cargo/bin` on its `PATH`.
 
 ## The app
 
+Download the desktop app from the
+[latest release](https://github.com/juligarc10/huella/releases/latest): `.dmg`
+for macOS (Apple Silicon or Intel), `.msi` or `-setup.exe` for Windows,
+`.AppImage` or `.deb` for Linux. It opens no port: the window talks to Huella
+inside the same process. Closing the window keeps Huella in the menu bar (tray
+on Windows and Linux), which counts the sessions waiting for review.
+
+The installers are not signed yet. The first time:
+
+- **macOS**: open it, then System Settings → Privacy & Security → *Open
+  Anyway*; or run `xattr -dr com.apple.quarantine /Applications/Huella.app`.
+- **Windows**: SmartScreen → *More info* → *Run anyway*.
+
+Agents and editors still use the `huella` command (MCP and LSP), so install it
+too (see above). Without a desktop, `huella ui` serves the same app in the
+browser on `127.0.0.1` only, with a per-run token:
+
 ```sh
 huella ui
 ```
@@ -113,8 +130,7 @@ branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.
 Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
-benchmark) in the background. `⌘K` jumps anywhere. It listens on `127.0.0.1`
-only, with a per-run token.
+benchmark) in the background. `⌘K` jumps anywhere.
 
 ## Command line
 

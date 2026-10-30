@@ -108,6 +108,23 @@ claude mcp add --scope user huella -- huella mcp
 
 ## La aplicación
 
+Descarga la aplicación de escritorio de la
+[última release](https://github.com/juligarc10/huella/releases/latest): `.dmg`
+para macOS (Apple Silicon o Intel), `.msi` o `-setup.exe` para Windows,
+`.AppImage` o `.deb` para Linux. No abre ningún puerto: la ventana habla con
+Huella dentro del mismo proceso. Al cerrar la ventana, Huella sigue en la barra
+de menús (la bandeja en Windows y Linux) contando las sesiones por revisar.
+
+Los instaladores aún no están firmados. La primera vez:
+
+- **macOS**: ábrela y ve a Ajustes del Sistema → Privacidad y seguridad →
+  *Abrir igualmente*; o ejecuta `xattr -dr com.apple.quarantine /Applications/Huella.app`.
+- **Windows**: SmartScreen → *Más información* → *Ejecutar de todas formas*.
+
+Los agentes y los editores siguen usando la orden `huella` (MCP y LSP), así que
+instálala también (ver arriba). Sin escritorio, `huella ui` sirve la misma
+aplicación en el navegador:
+
 ```sh
 huella ui                            # abre la aplicación local en el navegador
 ```
