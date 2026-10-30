@@ -28,13 +28,25 @@ function Get-Target {
     'x86_64-pc-windows-msvc'
 }
 
-# Última versión publicada.
+# Última versión publicada, por la redirección de /releases/latest: la API
+# limita las peticiones anónimas por IP, y en redes compartidas se agota.
 function Get-LatestVersion {
+    $version = $null
     try {
-        $release = Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/juligarc10/huella/releases/latest'
-    } catch { Fail "no se pudo consultar la última versión en $Repo/releases" }
-    if ($release.tag_name -notmatch '^v[0-9]') { Fail 'no hay ninguna release publicada todavía' }
-    $release.tag_name
+        Add-Type -AssemblyName System.Net.Http
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        $handler.AllowAutoRedirect = $false
+        $client = New-Object System.Net.Http.HttpClient($handler)
+        $response = $client.GetAsync("$Repo/releases/latest").GetAwaiter().GetResult()
+        if ($response.Headers.Location) { $version = ($response.Headers.Location.ToString() -split '/')[-1] }
+    } catch { $version = $null }
+    if (-not $version) {
+        try {
+            $version = (Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/juligarc10/huella/releases/latest').tag_name
+        } catch { Fail "no se pudo consultar la última versión en $Repo/releases: $($_.Exception.Message)" }
+    }
+    if ($version -notmatch '^v[0-9]') { Fail 'no hay ninguna release publicada todavía' }
+    $version
 }
 
 $target = Get-Target
@@ -49,7 +61,7 @@ try {
     Write-Host "Descargando Huella $version para $target…"
     try {
         Invoke-WebRequest -UseBasicParsing "$base/$version/$archive" -OutFile (Join-Path $work $archive)
-    } catch { Fail "no se pudo descargar $base/$version/$archive" }
+    } catch { Fail "no se pudo descargar $base/$version/${archive}: $($_.Exception.Message)" }
     try {
         Invoke-WebRequest -UseBasicParsing "$base/$version/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS')
     } catch { Fail "la release $version no publica SHA256SUMS: no se instala sin comprobarla" }
