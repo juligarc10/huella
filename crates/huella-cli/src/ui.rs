@@ -817,7 +817,7 @@ fn editor_name(editor: Editor) -> &'static str {
 }
 
 /// Qué modelo extraería decisiones, para mostrarlo.
-fn extractor_label(model: &ModelArgs) -> String {
+pub fn extractor_label(model: &ModelArgs) -> String {
     match (model.provider(), &model.model()) {
         (crate::Provider::Anthropic, model) => {
             format!("anthropic:{}", model.as_deref().unwrap_or(huella_decisions::anthropic::DEFAULT_MODEL))
@@ -923,6 +923,7 @@ mod tests {
 
     #[test]
     fn asking_without_a_model_says_what_is_missing() {
+        let _config = crate::config::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let model = |name: Option<&str>| ModelArgs {
             provider: Some(crate::Provider::OpenaiCompatible),
             model: name.map(str::to_owned),
