@@ -48,7 +48,7 @@ pub struct Options {
     pub model: ModelArgs,
 }
 
-struct App {
+pub(crate) struct App {
     store: Store,
     db: PathBuf,
     sources: huella_engine::Sources,
@@ -95,6 +95,65 @@ struct Job {
 
 type Jobs = Arc<Mutex<BTreeMap<String, Job>>>;
 
+impl App {
+    /// Estado de la aplicación, sin red: el servidor le añade su token y sus
+    /// `Host` permitidos; el escritorio lo usa tal cual.
+    pub(crate) fn new(
+        store: Store,
+        db: PathBuf,
+        sources: huella_engine::Sources,
+        editor: Editor,
+        model: ModelArgs,
+    ) -> Self {
+        let jobs: Jobs = Arc::new(Mutex::new(JOBS.iter().map(|kind| ((*kind).to_owned(), idle())).collect()));
+        Self {
+            store,
+            db,
+            sources,
+            editor,
+            token: String::new(),
+            allowed_hosts: Vec::new(),
+            jobs,
+            model,
+            review: None,
+            activity: Vec::new(),
+            impact: None,
+            covering: Arc::new(Mutex::new(HashMap::new())),
+            asking: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn db(&self) -> &Path {
+        &self.db
+    }
+
+    pub(crate) fn sources(&self) -> &huella_engine::Sources {
+        &self.sources
+    }
+}
+
+/// Respuesta independiente del transporte: la escribe el servidor HTTP o la
+/// devuelve el protocolo propio de la aplicación de escritorio.
+pub(crate) struct Reply {
+    pub status: u16,
+    pub content_type: &'static str,
+    /// `Cache-Control`, si hace falta.
+    pub cache: Option<&'static str>,
+    pub body: Vec<u8>,
+}
+
+/// Una petición a la aplicación: la API bajo `/api/` y, si no, la interfaz.
+/// La seguridad del transporte (token, `Host`) la comprueba quien llama.
+pub(crate) fn dispatch(app: &mut App, method: &str, path: &str, query: &str, body: &str) -> Reply {
+    if !path.starts_with("/api/") {
+        return asset(path);
+    }
+    match api(app, method, path, &query_params(query), body) {
+        Ok((status, value)) => json_reply(status, &value),
+        Err(error) => json_reply(500, &json!({"error": format!("{error:#}")})),
+    }
+}
+
 pub fn serve(options: Options) -> Result<()> {
     // El puerto pedido; si está ocupado (otra `huella ui` abierta), uno libre.
     let server = Server::http(("127.0.0.1", options.port))
@@ -112,22 +171,9 @@ pub fn serve(options: Options) -> Result<()> {
         port
     };
     let url = format!("http://localhost:{page_port}/?t={token}");
-    let jobs: Jobs = Arc::new(Mutex::new(JOBS.iter().map(|kind| ((*kind).to_owned(), idle())).collect()));
-    let mut app = App {
-        store,
-        db: options.db,
-        sources: options.sources,
-        editor: options.editor,
-        token,
-        allowed_hosts,
-        jobs,
-        model: options.model,
-        review: None,
-        activity: Vec::new(),
-        impact: None,
-        covering: Arc::new(Mutex::new(HashMap::new())),
-        asking: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let mut app = App::new(store, options.db, options.sources, options.editor, options.model);
+    app.token = token;
+    app.allowed_hosts = allowed_hosts;
     if options.dev && Assets::get("index.html").is_none() {
         println!("(sin ui/dist: la interfaz la sirve Vite)");
     }
@@ -151,55 +197,53 @@ fn handle(app: &mut App, mut request: Request) -> Result<()> {
     }
     let url = request.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
-    if !path.starts_with("/api/") {
-        return serve_asset(request, path);
+    if path.starts_with("/api/") && header(&request, "X-Huella-Token").as_deref() != Some(app.token.as_str()) {
+        let reply = json_reply(401, &json!({"error": "token no válido: abre la URL que imprime `huella ui`"}));
+        return respond(request, reply);
     }
-    if header(&request, "X-Huella-Token").as_deref() != Some(app.token.as_str()) {
-        return respond_json(request, 401, &json!({"error": "token no válido: abre la URL que imprime `huella ui`"}));
-    }
-    let method = request.method().clone();
+    let method = if *request.method() == Method::Post { "POST" } else { "GET" };
     let mut body = String::new();
-    if method == Method::Post {
+    if method == "POST" {
         std::io::Read::read_to_string(request.as_reader(), &mut body)?;
     }
-    let params = query_params(query);
-    match api(app, &method, path, &params, &body) {
-        Ok((status, value)) => respond_json(request, status, &value),
-        Err(error) => respond_json(request, 500, &json!({"error": format!("{error:#}")})),
-    }
+    let reply = dispatch(app, method, path, query, &body);
+    respond(request, reply)
 }
 
-fn api(
-    app: &mut App,
-    method: &Method,
-    path: &str,
-    params: &HashMap<String, String>,
-    body: &str,
-) -> Result<(u16, Value)> {
+fn respond(request: Request, reply: Reply) -> Result<()> {
+    let mut response =
+        Response::from_data(reply.body).with_status_code(reply.status).with_header(content_type(reply.content_type));
+    if let Some(cache) = reply.cache {
+        response = response.with_header(raw_header("Cache-Control", cache));
+    }
+    Ok(request.respond(response)?)
+}
+
+fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>, body: &str) -> Result<(u16, Value)> {
     let segments: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let value = match (method, segments.as_slice()) {
-        (Method::Get, ["overview"]) => overview(app)?,
-        (Method::Get, ["search"]) => search(app, params)?,
-        (Method::Get, ["decisions"]) => decisions(app, params)?,
-        (Method::Post, ["decisions", uid, "status"]) => set_status(app, uid, body)?,
-        (Method::Post, ["adr"]) => export_adr(app, body)?,
-        (Method::Get, ["symbol"]) => symbol(app, params)?,
-        (Method::Get, ["sessions"]) => sessions(app, params)?,
-        (Method::Get, ["inbox"]) => inbox(app)?,
-        (Method::Get, ["branch"]) => branch(app, params)?,
-        (Method::Get, ["review", session]) => review(app, session)?,
-        (Method::Post, ["review", session, "mark"]) => mark(app, session, body)?,
-        (Method::Post, ["review", session, "status"]) => set_status_of_review(app, session, body)?,
-        (Method::Post, ["review", session, "comments"]) => add_comment(app, session, body)?,
-        (Method::Get, ["review", session, "feedback"]) => feedback(app, session)?,
-        (Method::Get, ["review", session, "impact"]) => impact(app, session)?,
-        (Method::Post, ["review", session, "coverage"]) => return start_coverage(app, session),
-        (Method::Post, ["review", session, "ask"]) => return ask(app, session, body),
-        (Method::Post, ["comments", id]) => update_comment(app, id, body)?,
-        (Method::Get, ["status"]) => status(app)?,
-        (Method::Get, ["jobs"]) => json!({"jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner)}),
-        (Method::Post, ["jobs", kind]) => return Ok(start_job(app, kind)),
-        (Method::Post, ["open"]) => open(app, body)?,
+        ("GET", ["overview"]) => overview(app)?,
+        ("GET", ["search"]) => search(app, params)?,
+        ("GET", ["decisions"]) => decisions(app, params)?,
+        ("POST", ["decisions", uid, "status"]) => set_status(app, uid, body)?,
+        ("POST", ["adr"]) => export_adr(app, body)?,
+        ("GET", ["symbol"]) => symbol(app, params)?,
+        ("GET", ["sessions"]) => sessions(app, params)?,
+        ("GET", ["inbox"]) => inbox(app)?,
+        ("GET", ["branch"]) => branch(app, params)?,
+        ("GET", ["review", session]) => review(app, session)?,
+        ("POST", ["review", session, "mark"]) => mark(app, session, body)?,
+        ("POST", ["review", session, "status"]) => set_status_of_review(app, session, body)?,
+        ("POST", ["review", session, "comments"]) => add_comment(app, session, body)?,
+        ("GET", ["review", session, "feedback"]) => feedback(app, session)?,
+        ("GET", ["review", session, "impact"]) => impact(app, session)?,
+        ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
+        ("POST", ["review", session, "ask"]) => return ask(app, session, body),
+        ("POST", ["comments", id]) => update_comment(app, id, body)?,
+        ("GET", ["status"]) => status(app)?,
+        ("GET", ["jobs"]) => json!({"jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner)}),
+        ("POST", ["jobs", kind]) => return Ok(start_job(app, kind)),
+        ("POST", ["open"]) => open(app, body)?,
         _ => return Ok((404, json!({"error": "no encontrado"}))),
     };
     Ok((200, value))
@@ -430,7 +474,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
 }
 
 /// La bandeja: sesiones recientes con su estado de revisión.
-fn inbox(app: &App) -> Result<Value> {
+pub(crate) fn inbox(app: &App) -> Result<Value> {
     let states = app.store.review_states()?;
     let sessions = huella_engine::list_sessions(&app.store, 100)?;
     let items: Vec<Value> = sessions
@@ -812,28 +856,31 @@ fn run_job(
     }
 }
 
-fn serve_asset(request: Request, path: &str) -> Result<()> {
+/// Un fichero de la interfaz. Las rutas de la aplicación son de la propia
+/// página: todo lo que no es un fichero es `index.html`.
+fn asset(path: &str) -> Reply {
     let file = path.trim_start_matches('/');
-    // Las rutas de la aplicación son de la propia página: todo lo demás es index.html.
     let found = Assets::get(file).filter(|_| !file.is_empty()).map(|asset| (file, asset));
     let Some((name, asset)) = found.or_else(|| Assets::get("index.html").map(|asset| ("index.html", asset))) else {
         let message = "falta ui/dist: compila la interfaz con `pnpm --dir ui build` o usa `--dev` con Vite";
-        return Ok(request.respond(Response::from_string(message).with_status_code(503))?);
+        return Reply { status: 503, content_type: "text/plain; charset=utf-8", cache: None, body: message.into() };
     };
-    let mut response = Response::from_data(asset.data.into_owned()).with_header(content_type(mime(name)));
-    if name.starts_with("assets/") {
+    Reply {
+        status: 200,
+        content_type: mime(name),
         // Los ficheros de assets llevan su hash en el nombre.
-        response = response.with_header(raw_header("Cache-Control", "public, max-age=31536000, immutable"));
+        cache: name.starts_with("assets/").then_some("public, max-age=31536000, immutable"),
+        body: asset.data.into_owned(),
     }
-    Ok(request.respond(response)?)
 }
 
-fn respond_json(request: Request, status: u16, value: &Value) -> Result<()> {
-    let response = Response::from_string(value.to_string())
-        .with_status_code(status)
-        .with_header(content_type("application/json; charset=utf-8"))
-        .with_header(raw_header("Cache-Control", "no-store"));
-    Ok(request.respond(response)?)
+fn json_reply(status: u16, value: &Value) -> Reply {
+    Reply {
+        status,
+        content_type: "application/json; charset=utf-8",
+        cache: Some("no-store"),
+        body: value.to_string().into_bytes(),
+    }
 }
 
 fn decision_json(decision: &StoredDecision) -> Value {

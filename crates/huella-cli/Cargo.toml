@@ -31,6 +31,10 @@ ureq = "3.5.0"
 [lints]
 workspace = true
 
+[lib]
+name = "huella_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "huella"
 path = "src/main.rs"
