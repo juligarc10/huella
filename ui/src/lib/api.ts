@@ -267,6 +267,29 @@ export interface ReviewStep {
   calls: number[]
   sources: ReviewSource[]
   lines: ReviewLine[]
+  evidence: StepEvidence
+}
+
+/** Un hecho de la sesión: qué leyó, buscó o ejecutó el agente. */
+export type Activity = { session_id: string; at: string | null } & (
+  | { kind: 'prompt'; text: string }
+  | { kind: 'read'; target: string }
+  | { kind: 'search'; query: string; scope: string | null }
+  | { kind: 'command'; command: string; description: string | null; ok: boolean | null; output: string }
+  | { kind: 'plan'; items: { text: string; status: string }[] }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'edit'; event_id: string; path: string }
+)
+
+export interface StepEvidence {
+  /** El agente guarda su actividad y se encontraron las ediciones del paso. */
+  available: boolean
+  looked_at: Activity[]
+  reasoning: string[]
+  plan: { text: string; status: string }[] | null
+  /** Comprobaciones ejecutadas después de su última edición, en el mismo turno. */
+  checks: Activity[]
+  discarded: string[]
 }
 
 export interface Narration {

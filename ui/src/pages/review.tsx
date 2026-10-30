@@ -18,6 +18,7 @@ import { Link, useParams } from 'react-router'
 
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
 import { AskPanel } from '@/components/review/ask-panel'
+import { EvidencePanel } from '@/components/review/evidence'
 import { StepDiff } from '@/components/review/diff'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { Button } from '@/components/ui/button'
@@ -250,6 +251,11 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
                                 )}
                               />
                               <span className="truncate font-mono text-[13px]">{s.symbol ?? baseName(s.path)}</span>
+                              {s.evidence.available && !s.evidence.checks.some((c) => c.kind === 'command') && (
+                                <span className="shrink-0 text-[11px] text-warn" title="No lo comprobó después de escribirlo">
+                                  sin probar
+                                </span>
+                              )}
                               {count > 0 && (
                                 <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-warn" aria-label={`${count} comentarios abiertos`}>
                                   <MessageSquare className="size-3" aria-hidden="true" />
@@ -404,6 +410,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
             )}
           </p>
 
+          <EvidencePanel evidence={step.evidence} path={step.path} />
           <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} />
           <p className="text-xs text-muted-foreground">Empezó {dateTime(review.turns[0]?.started_at)}</p>
         </article>

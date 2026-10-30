@@ -59,6 +59,8 @@ struct App {
     model: ModelArgs,
     /// La última revisión cargada: reconstruirla relee las transcripciones.
     review: Option<(SessionReview, Vec<FlowStep>)>,
+    /// Actividad de la sesión cargada: la evidencia de cada paso.
+    activity: Vec<huella_core::Activity>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
 }
@@ -117,6 +119,7 @@ pub fn serve(options: Options) -> Result<()> {
         jobs,
         model: options.model,
         review: None,
+        activity: Vec::new(),
         asking: Arc::new(Mutex::new(HashMap::new())),
     };
     if options.dev && Assets::get("index.html").is_none() {
@@ -374,6 +377,8 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
                 .filter(|v| v.content_hash == flow.content_hash())
                 .map(|v| v.verdict.as_str());
             step["verdict"] = json!(verdict);
+            step["evidence"] =
+                serde_json::to_value(huella_engine::evidence::step_evidence(review, flow, &app.activity))?;
         }
     }
     app.store.record_review_steps(&review.session_id, plan.len())?;
@@ -570,6 +575,7 @@ fn load_review(app: &mut App, session: &str) -> Result<()> {
     if !cached {
         let review = huella_engine::session_review(&app.sources, session)?;
         let plan = huella_review::flow::plan(&review);
+        app.activity = huella_engine::evidence::session_activity(&app.sources, &review.session_id)?;
         app.review = Some((review, plan));
     }
     Ok(())
