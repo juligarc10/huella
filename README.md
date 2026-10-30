@@ -49,22 +49,29 @@ cargo install --git https://github.com/juligarc10/huella huella-cli   # Rust 1.9
 ```
 
 or download a binary from the [releases](https://github.com/juligarc10/huella/releases).
-
-**VS Code**: build and install the extension (Node 18+):
-
-```sh
-cd extensions/vscode && npm install && npm run package
-code --install-extension huella-0.1.0.vsix
-```
-
-**Zed**: run `zed: install dev extension` and pick `extensions/zed`. Zed needs
-`~/.cargo/bin` on its `PATH`.
-
-**Agents (MCP)**, for example Claude Code:
+Then let Huella set itself up:
 
 ```sh
-claude mcp add huella -- huella mcp
+huella setup        # asks; huella setup --yes takes the defaults
+huella doctor       # checks the installation (--online also calls the models)
 ```
+
+`huella setup` only does what's missing, so running it again after an update is
+safe:
+
+- backs up the database before a schema migration;
+- configures the model (Claude API, local Ollama or any OpenAI-compatible
+  server), tries it, and keeps the key in a separate `chmod 600` file;
+- optionally configures embeddings for search by meaning;
+- registers the MCP server in the agents it finds (Claude Code, Codex, Copilot
+  in VS Code, Copilot CLI) without touching the rest of their settings;
+- installs the VS Code extension from the latest release (`--vsix` for a local
+  one);
+- indexes your sessions.
+
+**Zed** can't install extensions from the command line yet: run
+`zed: install dev extension` and pick `extensions/zed` from a clone of this
+repository. Zed needs `~/.cargo/bin` on its `PATH`.
 
 ## The app
 
