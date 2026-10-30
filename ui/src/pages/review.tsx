@@ -19,6 +19,7 @@ import { Link, useParams } from 'react-router'
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
 import { AskPanel } from '@/components/review/ask-panel'
 import { EvidencePanel } from '@/components/review/evidence'
+import { ImpactPanel } from '@/components/review/impact'
 import { StepDiff } from '@/components/review/diff'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { Button } from '@/components/ui/button'
@@ -411,6 +412,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
           </p>
 
           <EvidencePanel evidence={step.evidence} path={step.path} />
+          <ImpactPanel session={session} step={step} />
           <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} />
           <p className="text-xs text-muted-foreground">Empezó {dateTime(review.turns[0]?.started_at)}</p>
         </article>

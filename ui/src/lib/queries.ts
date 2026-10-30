@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import {
   api,
   query,
+  type ImpactResult,
   type InboxSession,
   type ReviewStatus,
   type Verdict,
@@ -158,6 +159,15 @@ export function useUpdateComment(session: string) {
       client.invalidateQueries({ queryKey: ['inbox'] })
     },
     onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Recorre el proyecto: se pide aparte para no frenar la revisión. */
+export function useImpact(session: string) {
+  return useQuery({
+    queryKey: ['impact', session],
+    queryFn: () => api.get<ImpactResult>(`review/${session}/impact`),
+    staleTime: 5 * 60_000,
   })
 }
 

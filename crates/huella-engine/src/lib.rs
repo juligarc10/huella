@@ -5,6 +5,7 @@ pub mod adr;
 mod decisions;
 pub mod embeddings;
 pub mod evidence;
+pub mod impact;
 mod index;
 pub mod lineage;
 pub mod narration;

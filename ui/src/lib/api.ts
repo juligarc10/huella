@@ -292,6 +292,29 @@ export interface StepEvidence {
   discarded: string[]
 }
 
+/** Un uso, fuera de la sesión, de algo que cambió. */
+export interface ImpactUse {
+  path: string
+  line: number
+  symbol: string | null
+  text: string
+}
+
+export interface StepImpact {
+  name: string | null
+  uses: ImpactUse[]
+  total: number
+  generic: boolean
+}
+
+export interface ImpactResult {
+  project: string | null
+  /** En el orden de los pasos de la revisión. */
+  steps: StepImpact[]
+  /** El proyecto ya no está en el disco. */
+  missing?: boolean
+}
+
 export interface Narration {
   turn: number
   model: string

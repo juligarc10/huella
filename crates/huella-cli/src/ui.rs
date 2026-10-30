@@ -61,6 +61,8 @@ struct App {
     review: Option<(SessionReview, Vec<FlowStep>)>,
     /// Actividad de la sesión cargada: la evidencia de cada paso.
     activity: Vec<huella_core::Activity>,
+    /// Impacto de la sesión cargada, que recorre el proyecto: se calcula una vez.
+    impact: Option<Value>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
 }
@@ -120,6 +122,7 @@ pub fn serve(options: Options) -> Result<()> {
         model: options.model,
         review: None,
         activity: Vec::new(),
+        impact: None,
         asking: Arc::new(Mutex::new(HashMap::new())),
     };
     if options.dev && Assets::get("index.html").is_none() {
@@ -185,6 +188,7 @@ fn api(
         (Method::Post, ["review", session, "status"]) => set_status_of_review(app, session, body)?,
         (Method::Post, ["review", session, "comments"]) => add_comment(app, session, body)?,
         (Method::Get, ["review", session, "feedback"]) => feedback(app, session)?,
+        (Method::Get, ["review", session, "impact"]) => impact(app, session)?,
         (Method::Post, ["review", session, "ask"]) => return ask(app, session, body),
         (Method::Post, ["comments", id]) => update_comment(app, id, body)?,
         (Method::Get, ["status"]) => status(app)?,
@@ -501,6 +505,24 @@ fn update_comment(app: &App, id: &str, body: &str) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// Qué código del proyecto, fuera de la sesión, usa lo que cambió cada paso.
+fn impact(app: &mut App, session: &str) -> Result<Value> {
+    load_review(app, session)?;
+    if let Some(cached) = &app.impact {
+        return Ok(cached.clone());
+    }
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let project = huella_engine::session_project(&app.store, &review.session_id)?;
+    let value = match project.as_deref().map(Path::new).filter(|path| path.is_dir()) {
+        Some(project) => {
+            json!({"project": project, "steps": huella_engine::impact::impact(project, review, plan)})
+        }
+        None => json!({"project": project, "steps": [], "missing": true}),
+    };
+    app.impact = Some(value.clone());
+    Ok(value)
+}
+
 fn feedback(app: &mut App, session: &str) -> Result<Value> {
     load_review(app, session)?;
     let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
@@ -576,6 +598,7 @@ fn load_review(app: &mut App, session: &str) -> Result<()> {
         let review = huella_engine::session_review(&app.sources, session)?;
         let plan = huella_review::flow::plan(&review);
         app.activity = huella_engine::evidence::session_activity(&app.sources, &review.session_id)?;
+        app.impact = None;
         app.review = Some((review, plan));
     }
     Ok(())
