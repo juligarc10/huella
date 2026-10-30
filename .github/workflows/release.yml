@@ -11,7 +11,7 @@ on:
         description: "Etiqueta de la release (p. ej. v0.1.0)"
         required: true
       only:
-        description: "Solo este target (vacío: todos, y la extensión)"
+        description: "Solo este target, o «checksums» para solo regenerar SHA256SUMS (vacío: todo)"
         required: false
         default: ""
 
@@ -92,3 +92,21 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           files: huella.vsix
+
+  # Checksums de todos los ficheros de la release: install.sh e install.ps1
+  # no instalan nada sin comprobarlos. Se rehace con cada fichero que se añade.
+  checksums:
+    needs: [build, vsix]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir assets
+          cd assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'huella*'
+          sha256sum huella* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
