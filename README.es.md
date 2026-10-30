@@ -88,7 +88,10 @@ Todo lo de Huella en un sitio, sin salir de tu máquina:
   revisar, en revisión, cambios pedidos, aprobada). Cada una se revisa paso a
   paso: veredicto por paso (`r` bien, `c` cambiar, `d` deshacer; `j`/`k` para
   moverse), comentarios sobre cualquier línea del diff, preguntas a la sesión y
-  «Pedir cambios», que da las instrucciones para el agente.
+  «Pedir cambios», que da las instrucciones para el agente. Cada paso enseña
+  su evidencia, su impacto y si el turno cubre lo que pediste (ver abajo).
+- **Rama**: lo que vas a entregar, el diff de la rama contra su base con cada
+  línea atribuida a la sesión que la escribió o a quien la cambió a mano.
 - **Memoria de un símbolo**: su historia, también si se renombró o se movió.
 - **Estado**: supervivencia a refactors, vectores y extracción de decisiones,
   que se lanzan desde aquí y corren en segundo plano.
@@ -200,6 +203,51 @@ huella review ask 84e33d8e "¿Por qué no reutiliza el validador?" --step 3 --pr
   con la petición, las explicaciones del agente, el diff y el código actual del
   paso, y las preguntas anteriores. Se usa el mismo modelo que para extraer
   decisiones, y las preguntas y respuestas se guardan (redactadas).
+
+#### Evidencia, impacto y cobertura
+
+Para fiarte de un paso no basta con el diff:
+
+- **Evidencia**: qué leyó y exploró el agente en su turno antes de escribirlo
+  (también por terminal: `grep`, `sed`, `cat`), su último razonamiento, su lista
+  de tareas, las comprobaciones que ejecutó después (tests, compilación, lint,
+  `curl`) con su resultado y salida, y sus intentos descartados: las líneas que
+  escribió y luego rehízo él mismo. Los pasos que no comprobó se marcan «sin
+  probar». Se lee de la transcripción al abrir la revisión, redactada; Claude
+  Code lo guarda todo, otros agentes menos.
+- **Impacto**: qué código del proyecto, fuera de la sesión, usa lo que cambió
+  el paso. Se busca por nombre con tree-sitter en los ficheros del repositorio
+  que importan ese nombre o su módulo; solo cuentan funciones, métodos, tipos y
+  variables de módulo.
+- **Cobertura de la petición**: con un modelo, la petición del turno troceada en
+  requisitos (hecho, a medias o sin hacer) con los pasos que cumplen cada uno, y
+  lo que el agente hizo sin que se le pidiera. Se guarda y se marca como
+  desfasada si el turno cambia.
+
+```sh
+huella review coverage 84e33d8e      # la cobertura en la terminal
+```
+
+### Revisar una rama
+
+```sh
+huella review branch                 # la rama actual contra la principal del remoto
+huella review branch --base develop --repo ../canjea
+```
+
+Lo que se entrega es una rama, no una sesión. Huella toma el diff contra el
+`merge-base` (con lo que aún no tiene commit) y atribuye cada línea añadida:
+
+- a la **sesión** de agente que la escribió, partiendo del contenido en el
+  `merge-base` y aplicando en orden todas las ediciones posteriores de cualquier
+  agente; si la transcripción solo guardó el texto insertado, por su contenido;
+- a la sesión que la cambió **por terminal** (scripts, `sed`, formateadores), si
+  está en un commit que hizo esa sesión;
+- o a la **persona** que la cambió a mano, según `git blame` («Sin commit» si
+  aún no lo tiene).
+
+En la aplicación, la página Rama deja elegir la copia de trabajo, porque los
+agentes suelen trabajar en worktrees.
 
 #### En Zed, con su vista de cambios
 

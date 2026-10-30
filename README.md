@@ -75,6 +75,15 @@ huella ui
 The home page is the review inbox: sessions by review status. Review them step
 by step (`j`/`k` to move; `r` fine, `c` change, `d` undo), comment on any diff
 line, ask the session why it did something, and request changes or approve.
+Each step shows its **evidence**: what the agent read and explored before
+writing it, its reasoning and plan, the checks it ran afterwards (tests, build,
+lint) with their result, and the attempts it discarded; steps it never checked
+are flagged. It also shows the step's **impact** (code outside the session that
+uses what changed) and, with a model, whether the turn **covers the request**:
+requirements done, partial or missing, and what it did without being asked.
+**Branch** reviews what you are about to ship: the diff against the base
+branch, every line attributed to the agent session that wrote it, to a session
+that changed it from the terminal, or to the person who changed it by hand.
 Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
 benchmark) in the background. `⌘K` jumps anywhere. It listens on `127.0.0.1`
@@ -92,6 +101,8 @@ huella review zed 84e33d8e            # review in Zed's git diff (stage = review
 huella review comment 84e33d8e 3 "Validate the email first" --line "await repo.save(user)"
 huella review feedback 84e33d8e       # instructions for the agent, in Markdown
 huella review ask 84e33d8e "Why not reuse the validator?" --step 3
+huella review coverage 84e33d8e       # does each turn do what was asked?
+huella review branch --base main      # the branch, line by line: which session or person
 huella decisions extract --provider openai-compatible --base-url http://localhost:11434/v1 --model qwen2.5:7b
 huella decisions list --scope user    # your preferences, valid in every project
 huella adr                            # export the project's decisions to docs/adr/
