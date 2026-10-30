@@ -28,6 +28,11 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// Versión de esquema que entiende este binario.
+fn supported_schema() -> i64 {
+    i64::try_from(MIGRATIONS.len()).expect("pocas migraciones")
+}
+
 /// Migraciones en orden; la posición + 1 es la versión de esquema.
 const MIGRATIONS: &[&str] = &[
     r"
@@ -592,6 +597,27 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Versión de esquema de un fichero frente a la de este binario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaStatus {
+    pub found: i64,
+    pub supported: i64,
+}
+
+impl SchemaStatus {
+    /// Abrirlo con este binario aplicará migraciones.
+    #[must_use]
+    pub fn needs_migration(self) -> bool {
+        self.found < self.supported
+    }
+
+    /// Lo escribió un binario más nuevo: este no lo puede abrir.
+    #[must_use]
+    pub fn is_newer(self) -> bool {
+        self.found > self.supported
+    }
+}
+
 impl Store {
     /// Abre (o crea) la base de datos y aplica las migraciones pendientes.
     ///
@@ -604,6 +630,32 @@ impl Store {
                 .map_err(|source| StoreError::CreateDir { path: parent.display().to_string(), source })?;
         }
         Self::init(Connection::open(path)?)
+    }
+
+    /// Versión de esquema del fichero y la que entiende este binario, sin
+    /// abrirlo para escribir ni migrarlo; `None` si el fichero no existe.
+    ///
+    /// # Errors
+    /// Si el fichero existe pero SQLite no puede leerlo.
+    pub fn schema_status(path: &Path) -> Result<Option<SchemaStatus>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let supported = supported_schema();
+        Ok(Some(SchemaStatus { found, supported }))
+    }
+
+    /// Copia coherente del fichero en `dest` (aunque otro proceso lo esté
+    /// usando), para guardarla antes de una migración.
+    ///
+    /// # Errors
+    /// Si no se puede leer el original o `dest` ya existe.
+    pub fn backup(path: &Path, dest: &Path) -> Result<()> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+        Ok(())
     }
 
     /// Base de datos en memoria, para tests.
@@ -625,7 +677,7 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<()> {
-        let supported = i64::try_from(MIGRATIONS.len()).expect("pocas migraciones");
+        let supported = supported_schema();
         let current: i64 = self.conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current > supported {
             return Err(StoreError::NewerSchema { found: current, supported });
@@ -2685,6 +2737,32 @@ mod tests {
         assert_eq!(Store::open(&path).unwrap().stats().unwrap().edits, 1);
         Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
         assert!(matches!(Store::open(&path), Err(StoreError::NewerSchema { found: 99, .. })));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn schema_status_reads_without_migrating_and_backups_are_readable() {
+        let dir = std::env::temp_dir().join(format!("huella-store-backup-{}", std::process::id()));
+        let path = dir.join("huella.db");
+        assert_eq!(Store::schema_status(&path).unwrap(), None);
+        {
+            let mut store = Store::open(&path).unwrap();
+            let first = edit("e1", "s1", "2026-10-01T10:00:00Z", "a");
+            save(&mut store, 10, &[(&first, &AnchorOutcome::NoChange)]);
+        }
+        let current = Store::schema_status(&path).unwrap().unwrap();
+        assert!(!current.needs_migration() && !current.is_newer());
+
+        // Un fichero antiguo se informa como pendiente de migrar y sigue sin migrar.
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", 3).unwrap();
+        let old = Store::schema_status(&path).unwrap().unwrap();
+        assert!(old.needs_migration());
+        assert_eq!(Store::schema_status(&path).unwrap().unwrap().found, 3);
+
+        let copy = dir.join("huella.copia.db");
+        Store::backup(&path, &copy).unwrap();
+        assert_eq!(Store::schema_status(&copy).unwrap().unwrap().found, 3);
+        assert!(Store::backup(&path, &copy).is_err(), "no pisa una copia anterior");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
