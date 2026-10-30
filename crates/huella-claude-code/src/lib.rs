@@ -10,12 +10,16 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+mod activity;
+
 use huella_core::{
-    AfterState, Agent, AgentBatch, AgentError, Conversation, EditContext, EditKind, EditOrigin, FileEdit, Speaker,
-    TranscriptCursor, Turn,
+    Activity, AfterState, Agent, AgentBatch, AgentError, Conversation, EditContext, EditKind, EditOrigin, FileEdit,
+    Speaker, TranscriptCursor, Turn,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
+
+pub use activity::read_activity;
 
 pub const AGENT: &str = "claude-code";
 
@@ -379,6 +383,10 @@ impl Agent for ClaudeCode {
 
     fn conversations(&self, path: &Path) -> Result<Vec<Conversation>, AgentError> {
         read_conversations(path).map_err(|error| AgentError::new(AGENT, path, &error))
+    }
+
+    fn activity(&self, path: &Path) -> Result<Vec<Activity>, AgentError> {
+        read_activity(path).map_err(|error| AgentError::new(AGENT, path, &error))
     }
 }
 

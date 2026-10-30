@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Conversation, FileEdit, TranscriptCursor};
+use crate::{Activity, Conversation, FileEdit, TranscriptCursor};
 
 /// Error de un adaptador al leer las sesiones de su agente.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +66,18 @@ pub trait Agent: Send + Sync {
     /// # Errors
     /// Si el fichero no se puede leer.
     fn conversations(&self, path: &Path) -> Result<Vec<Conversation>, AgentError>;
+
+    /// Todo lo que hizo el agente en un fichero de sesión, en orden: qué leyó,
+    /// qué ejecutó y con qué resultado, su plan y su razonamiento, con sus
+    /// ediciones marcadas. Es la evidencia de cada paso de la revisión. Los
+    /// agentes que no lo guardan no devuelven nada.
+    ///
+    /// # Errors
+    /// Si el fichero no se puede leer.
+    fn activity(&self, path: &Path) -> Result<Vec<Activity>, AgentError> {
+        let _ = path;
+        Ok(Vec::new())
+    }
 }
 
 /// Ficheros bajo `root` (recursivo) cuyo nombre cumple `wanted`, ordenados.
