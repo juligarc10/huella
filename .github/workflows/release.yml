@@ -46,3 +46,22 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: huella-*.*
+
+  # Extensión de VS Code. Nombre fijo: huella setup la descarga de
+  # releases/latest/download/huella.vsix.
+  vsix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - working-directory: extensions/vscode
+        # vsce no compila por su cuenta (no hay vscode:prepublish): primero build.
+        run: |
+          npm ci
+          npm run build
+          npx vsce package --no-dependencies --out ../../huella.vsix
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: huella.vsix

@@ -6,6 +6,7 @@ mod report;
 mod review;
 mod sample;
 mod search;
+mod setup;
 mod ui;
 mod web;
 
@@ -99,6 +100,35 @@ enum Command {
         /// Carpeta de transcripciones (por defecto ~/.claude/projects).
         #[arg(long)]
         projects: Option<PathBuf>,
+    },
+    /// Deja lista la instalación: base de datos (con copia antes de migrar),
+    /// modelo, embeddings, Huella en los agentes (MCP) y en los editores, y el
+    /// primer indexado. Se puede repetir: solo hace lo que falta.
+    Setup {
+        /// Sin preguntas: la opción por defecto en cada paso.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Extensión de VS Code local en vez de la de la última release.
+        #[arg(long)]
+        vsix: Option<PathBuf>,
+        /// No indexa las sesiones al terminar.
+        #[arg(long)]
+        skip_index: bool,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+        /// Modelo a guardar en config.toml sin preguntar.
+        #[command(flatten)]
+        model: ModelArgs,
+    },
+    /// Comprueba la instalación: binario, configuración, modelo, base de datos,
+    /// agentes y editores, y dice cómo arreglar lo que falte.
+    Doctor {
+        /// Además, llama al modelo y a los embeddings para ver que responden.
+        #[arg(long)]
+        online: bool,
+        #[command(flatten)]
+        model: ModelArgs,
     },
     /// Abre la aplicación local de Huella: buscar en la memoria, decisiones y
     /// ADRs, revisión de sesiones y estado, con las tareas largas en segundo plano.
@@ -419,8 +449,18 @@ fn main() -> ExitCode {
     }
 }
 
+/// Lee `config.toml`. Un fichero roto detiene cualquier orden salvo doctor y
+/// setup, que tienen que poder explicarlo; a ellas se les pasa el error.
+fn load_config(command: &Command) -> Result<Option<anyhow::Error>> {
+    match config::init() {
+        Ok(()) => Ok(None),
+        Err(error) if matches!(command, Command::Doctor { .. } | Command::Setup { .. }) => Ok(Some(error)),
+        Err(error) => Err(error),
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
-    config::init()?;
+    let config_error = load_config(&cli.command)?;
     match cli.command {
         Command::Scan { projects, json, sample, sample_out, sample_offset } => {
             let projects = claude_projects_dir(projects)?;
@@ -447,6 +487,11 @@ fn run(cli: Cli) -> Result<()> {
             }
             emit(&search::render_hits(&hits));
             Ok(())
+        }
+        Command::Doctor { online, model } => setup::doctor_command(cli.db, &model, online, config_error.as_ref()),
+        Command::Setup { yes, vsix, skip_index, projects, model } => {
+            let options = setup::SetupOptions { yes, vsix, skip_index, db: cli.db, projects, model };
+            setup::setup_command(options, config_error.as_ref())
         }
         Command::Ui { port, no_browser, editor, dev, model, projects } => {
             ui_command(cli.db, port, !no_browser, config::editor(editor), dev, model, projects)
@@ -995,7 +1040,8 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
 /// Modelo de embeddings de los argumentos, de `HUELLA_EMBED_MODEL` y
 /// `HUELLA_EMBED_URL` o de `[embed]` en `config.toml`; `None` si no hay ninguno.
 pub fn embedder(model: Option<String>, base_url: Option<String>) -> Option<OpenAiEmbeddings> {
-    let embed = &config::get().embed;
+    let config = config::get();
+    let embed = &config.embed;
     let model = model
         .or_else(|| std::env::var("HUELLA_EMBED_MODEL").ok())
         .or_else(|| embed.model.clone())
