@@ -21,6 +21,7 @@ import { AskPanel } from '@/components/review/ask-panel'
 import { EvidencePanel } from '@/components/review/evidence'
 import { CoveragePanel } from '@/components/review/coverage'
 import { ImpactPanel } from '@/components/review/impact'
+import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { StepDiff } from '@/components/review/diff'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { Button } from '@/components/ui/button'
@@ -63,7 +64,11 @@ export function ReviewPage() {
 
 function Review({ review, session }: { review: ReviewResult; session: string }) {
   const steps = review.steps
-  const [current, setCurrent] = useState(() => Math.max(0, steps.findIndex((step) => !step.verdict)))
+  // Por defecto se esconde lo que la política deja saltar.
+  const [filter, setFilter] = useState<TriageFilter>('focus')
+  const shown = shownBy(filter)
+  const visible = steps.filter(shown)
+  const [current, setCurrent] = useState(() => Math.max(0, steps.findIndex((step) => !step.verdict && shownBy('focus')(step))))
   // Línea con la caja de comentario abierta (`-1`: el paso entero).
   const [composing, setComposing] = useState<number | null>(null)
   const setVerdict = useSetVerdict(session)
@@ -74,6 +79,9 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
   const unexplained = steps.filter(isUnexplained).length
   const files = new Set(steps.map((s) => s.path)).size
   const openComments = review.comments.filter((c) => c.status === 'open')
+  const mustLeft = review.comprehension.must.total - review.comprehension.must.done
+  const approveBlocker =
+    openComments.length > 0 ? 'Quedan comentarios abiertos' : mustLeft > 0 ? `Quedan ${mustLeft} pasos obligatorios sin veredicto` : undefined
 
   const commentsByStep = useMemo(() => {
     const groups = new Map<string, number>()
@@ -85,23 +93,28 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
 
   const byTurn = useMemo(() => {
     const groups = new Map<number, ReviewStep[]>()
-    for (const s of steps) {
+    for (const s of steps.filter(shownBy(filter))) {
       const turn = s.turn ?? -1
       groups.set(turn, [...(groups.get(turn) ?? []), s])
     }
     return [...groups.entries()]
-  }, [steps])
+  }, [steps, filter])
 
   const go = (index: number) => {
     setCurrent(Math.min(Math.max(index, 0), steps.length - 1))
     setComposing(null)
   }
+  // Siguiente (o anterior) paso de los que se muestran.
+  const move = (direction: 1 | -1) => {
+    const target = direction > 0 ? visible.find((s) => s.index > current) : visible.findLast((s) => s.index < current)
+    if (target) go(target.index)
+  }
   const decide = (target: ReviewStep, verdict: Verdict) => {
     const next = target.verdict === verdict ? null : verdict
     setVerdict.mutate({ key: target.key, hash: target.hash, verdict: next })
     if (next === 'ok') {
-      const after = steps.findIndex((s, index) => index > target.index && !s.verdict)
-      if (after >= 0) go(after)
+      const after = visible.find((s) => s.index > target.index && !s.verdict)
+      if (after) go(after.index)
     } else if (next === 'change' && !commentsByStep.get(target.key)) {
       // «Cambiar» sin decir qué no le sirve al agente: se abre la caja.
       setComposing(-1)
@@ -114,8 +127,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
       const target = event.target as HTMLElement
       if (event.metaKey || event.ctrlKey || target.closest('input, textarea, [role="dialog"]')) return
       const verdict = verdicts.find((v) => v.key === event.key)
-      if (event.key === 'j') go(current + 1)
-      else if (event.key === 'k') go(current - 1)
+      if (event.key === 'j') move(1)
+      else if (event.key === 'k') move(-1)
       else if (verdict && step) decide(step, verdict.value)
       else return
       event.preventDefault()
@@ -158,8 +171,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
               variant={review.status === 'approved' ? 'default' : 'outline'}
               className={cn('min-h-11', review.status === 'approved' && 'bg-brand text-brand-foreground hover:bg-brand/90')}
               onClick={() => setStatus.mutate(review.status === 'approved' ? 'in_review' : 'approved')}
-              disabled={openComments.length > 0 && review.status !== 'approved'}
-              title={openComments.length > 0 ? 'Quedan comentarios abiertos' : undefined}
+              disabled={Boolean(approveBlocker) && review.status !== 'approved'}
+              title={approveBlocker}
             >
               <BadgeCheck aria-hidden="true" /> {review.status === 'approved' ? 'Aprobada · reabrir' : 'Aprobar'}
             </Button>
@@ -195,6 +208,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
       )}
 
       <div className="flex flex-col gap-2">
+        <ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} />
         <div className="flex flex-wrap justify-between gap-2 text-[13px] text-muted-foreground">
           <span>
             <strong className="text-foreground">{decided}</strong> de {steps.length} pasos revisados
@@ -238,6 +252,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
                               className={cn(
                                 'flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors',
                                 s.index === current ? 'bg-muted' : 'hover:bg-muted/60',
+                                s.triage.level === 'skip' && 'opacity-60',
                               )}
                               style={{ paddingLeft: `${10 + Math.min(s.depth, 4) * 12}px` }}
                             >
@@ -253,11 +268,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
                                 )}
                               />
                               <span className="truncate font-mono text-[13px]">{s.symbol ?? baseName(s.path)}</span>
-                              {s.evidence.available && !s.evidence.checks.some((c) => c.kind === 'command') && (
-                                <span className="shrink-0 text-[11px] text-warn" title="No lo comprobó después de escribirlo">
-                                  sin probar
-                                </span>
-                              )}
+                              <LevelMark level={s.triage.level} />
                               {count > 0 && (
                                 <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-warn" aria-label={`${count} comentarios abiertos`}>
                                   <MessageSquare className="size-3" aria-hidden="true" />
@@ -326,6 +337,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
               </Button>
             </div>
             <h2 className="font-mono text-xl font-medium">{step.symbol ?? baseName(step.path)}</h2>
+            <TriageChips triage={step.triage} policy={review.policy} />
             {note && (
               <p className="text-[15px] leading-relaxed">
                 <span className="font-semibold">Nota del modelo:</span> {note}
@@ -384,15 +396,15 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
               <MessageSquarePlus aria-hidden="true" /> Comentar el paso
             </Button>
             <span className="ml-auto flex gap-2">
-              <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(current - 1)} disabled={current === 0} aria-label="Paso anterior">
+              <Button variant="outline" size="lg" className="min-h-11" onClick={() => move(-1)} disabled={!visible.some((s) => s.index < current)} aria-label="Paso anterior">
                 <ArrowUp aria-hidden="true" />
               </Button>
               <Button
                 variant="outline"
                 size="lg"
                 className="min-h-11"
-                onClick={() => go(current + 1)}
-                disabled={current === steps.length - 1}
+                onClick={() => move(1)}
+                disabled={!visible.some((s) => s.index > current)}
                 aria-label="Paso siguiente"
               >
                 <ArrowDown aria-hidden="true" />

@@ -16,8 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use huella_engine::lineage::{Link, read_from_disk};
+use huella_engine::triage::Level;
 use huella_review::SessionReview;
-use huella_review::flow::FlowStep;
+use huella_review::flow::{FlowStep, StepRole};
 use huella_store::{DecisionFilter, FoundBy, HistoryEntry, SearchHit, SearchQuery, Store, StoredDecision, SymbolRole};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -439,6 +440,32 @@ fn sessions(app: &App, params: &HashMap<String, String>) -> Result<Value> {
     Ok(json!({"sessions": listed.iter().map(session_json).collect::<Vec<_>>()}))
 }
 
+/// Cuánto de cada nivel del triaje tiene ya veredicto.
+#[derive(Debug, Default, Serialize)]
+struct Comprehension {
+    must: Tally,
+    acknowledge: Tally,
+    skip: Tally,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct Tally {
+    total: usize,
+    done: usize,
+}
+
+impl Comprehension {
+    fn count(&mut self, level: Level, done: bool) {
+        let tally = match level {
+            Level::Must => &mut self.must,
+            Level::Acknowledge => &mut self.acknowledge,
+            Level::Skip => &mut self.skip,
+        };
+        tally.total += 1;
+        tally.done += usize::from(done);
+    }
+}
+
 fn review(app: &mut App, session: &str) -> Result<Value> {
     load_review(app, session)?;
     let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
@@ -446,20 +473,49 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     let narrations = huella_engine::narration::narrations(&app.store, review, plan, &points)?;
     let mut value = crate::web::payload(review, plan, &app.store.review_marks(&review.session_id)?, app.editor);
     value["narrations"] = serde_json::to_value(&narrations)?;
-    value["project"] = json!(huella_engine::session_project(&app.store, &review.session_id)?);
+    let project = huella_engine::session_project(&app.store, &review.session_id)?;
+    value["project"] = json!(project);
+    let coverage = huella_engine::coverage::coverages(&app.store, review, plan, &points)?;
+    let evidence: Vec<_> =
+        plan.iter().map(|flow| huella_engine::evidence::step_evidence(review, flow, &app.activity)).collect();
+    let (policy, policy_error) = match huella_engine::triage::load_policy(project.as_deref().map(Path::new)) {
+        Ok(policy) => (policy, None),
+        Err(error) => (huella_engine::triage::Policy::default(), Some(error.to_string())),
+    };
+    let unrequested = coverage.values().flat_map(|c| c.unrequested.iter().map(|(step, _)| *step)).collect();
+    // Sin comprobaciones solo cuenta en el código del flujo y si hay actividad que lo diga.
+    let unverified = plan
+        .iter()
+        .zip(&evidence)
+        .enumerate()
+        .filter(|(_, (flow, found))| {
+            flow.role == StepRole::Flow
+                && found.available
+                && !found.checks.iter().any(|check| matches!(check.kind, huella_core::ActivityKind::Command { .. }))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let triage = huella_engine::triage::triage(review, plan, &policy, &unrequested, &unverified);
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
+    let mut comprehension = Comprehension::default();
     if let Some(steps) = value["steps"].as_array_mut() {
-        for (step, flow) in steps.iter_mut().zip(plan) {
+        for (((step, flow), found), triaged) in steps.iter_mut().zip(plan).zip(evidence).zip(&triage) {
             let verdict = verdicts
                 .get(&flow.key(review))
                 .filter(|v| v.content_hash == flow.content_hash())
                 .map(|v| v.verdict.as_str());
+            comprehension.count(triaged.level, verdict.is_some());
             step["verdict"] = json!(verdict);
-            step["evidence"] =
-                serde_json::to_value(huella_engine::evidence::step_evidence(review, flow, &app.activity))?;
+            step["evidence"] = serde_json::to_value(found)?;
+            step["triage"] = serde_json::to_value(triaged)?;
         }
     }
+    value["policy"] = json!({
+        "preset": policy.preset, "source": policy.source, "levels": policy.levels, "default": policy.default,
+        "error": policy_error,
+    });
+    value["comprehension"] = serde_json::to_value(comprehension)?;
     app.store.record_review_steps(&review.session_id, plan.len())?;
     let states = app.store.review_states()?;
     value["status"] = json!(states.get(&review.session_id).map_or("pending", |s| s.status.as_str()));
@@ -482,7 +538,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     );
     value["ask_model"] = json!(extractor_label(&app.model));
     value["ask_problem"] = json!(crate::model_problem(&app.model));
-    value["coverage"] = serde_json::to_value(huella_engine::coverage::coverages(&app.store, review, plan, &points)?)?;
+    value["coverage"] = serde_json::to_value(coverage)?;
     value["covering"] = match app.covering.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id) {
         Some(None) => json!({"running": true}),
         Some(Some(error)) => json!({"running": false, "error": error}),
