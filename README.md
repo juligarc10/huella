@@ -118,7 +118,9 @@ huella ui
 
 The home page is the review inbox: sessions by review status. Review them step
 by step (`j`/`k` to move; `r` fine, `c` change, `d` undo), comment on any diff
-line, ask the session why it did something, and request changes or approve.
+line, ask about any lines you select (the answer uses what was asked, what
+the agent explained and the commits of those lines, and stays next to them),
+and request changes or approve.
 Each step shows its **evidence**: what the agent read and explored before
 writing it, its reasoning and plan, the checks it ran afterwards (tests, build,
 lint) with their result, and the attempts it discarded; steps it never checked
@@ -137,6 +139,7 @@ benchmark) in the background. `⌘K` jumps anywhere.
 ```sh
 huella index                          # index what's new in the agents' sessions
 huella why src/app.ts:42              # what was said about the symbol on that line
+huella ask src/pay.ts:40-62 "Why does it retry three times?"   # ask about any piece of code
 huella search rate limit              # requests, explanations, symbols and decisions
 huella review list                    # recent sessions, with their agent
 huella review show 84e33d8e           # guided review in the terminal

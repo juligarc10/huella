@@ -67,6 +67,18 @@ pub(crate) struct App {
     covering: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
+    /// Preguntas sobre código que el modelo aún está respondiendo.
+    code_asking: Arc<Mutex<Vec<PendingCodeAsk>>>,
+}
+
+/// Una pregunta sobre código en curso o que falló.
+#[derive(Debug, Clone, Serialize)]
+struct PendingCodeAsk {
+    /// Ruta normalizada del fichero.
+    path: String,
+    quote: String,
+    question: String,
+    error: Option<String>,
 }
 
 /// Una pregunta a la sesión en curso o que falló.
@@ -120,6 +132,7 @@ impl App {
             impact: None,
             covering: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
+            code_asking: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -240,6 +253,11 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["comments", id]) => update_comment(app, id, body)?,
+        ("POST", ["code", "ask"]) => return ask_code(app, body),
+        ("GET", ["code", "questions"]) => code_questions(app, params)?,
+        ("POST", ["code", "questions", id, "delete"]) => {
+            json!({"deleted": app.store.delete_code_question(id.parse().context("id no válido")?)?})
+        }
         ("GET", ["status"]) => status(app)?,
         ("GET", ["jobs"]) => json!({"jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner)}),
         ("POST", ["jobs", kind]) => return Ok(start_job(app, kind)),
@@ -635,6 +653,76 @@ fn feedback(app: &mut App, session: &str) -> Result<Value> {
 
 /// Pregunta a la sesión: la responde un hilo con el modelo configurado y la
 /// revisión la muestra como pendiente mientras tanto.
+/// Pregunta sobre un trozo de código (`path`, `quote` y, si hay, `start`/`end`):
+/// la responde un hilo con el modelo configurado, como las preguntas a la sesión.
+fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let text = |key: &str| request[key].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    let path = PathBuf::from(text("path").context("falta el fichero")?);
+    let question = text("question").context("la pregunta está vacía")?;
+    let quote = request["quote"].as_str().unwrap_or_default().to_owned();
+    let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
+    let lines = line("start").zip(line("end"));
+    let key = huella_engine::normalize_path(&path, None);
+    let pending = PendingCodeAsk { path: key, quote: quote.clone(), question: question.clone(), error: None };
+    app.code_asking.lock().unwrap_or_else(PoisonError::into_inner).push(pending.clone());
+    let (asking, db, model) = (Arc::clone(&app.code_asking), app.db.clone(), app.model.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model(&model)?;
+            huella_engine::code_ask::ask_code(&store, llm.as_ref(), &path, &quote, lines, &question)?;
+            Ok(())
+        })();
+        let mut all = asking.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) =
+            all.iter().position(|p| p.path == pending.path && p.question == pending.question && p.error.is_none())
+        {
+            match outcome {
+                Ok(()) => {
+                    all.remove(index);
+                }
+                Err(error) => all[index].error = Some(format!("{error:#}")),
+            }
+        }
+    });
+    Ok((202, json!({"asking": true})))
+}
+
+/// Preguntas sobre el código de un fichero, con sus líneas actuales, y las que
+/// el modelo aún está respondiendo.
+fn code_questions(app: &App, params: &HashMap<String, String>) -> Result<Value> {
+    let path = PathBuf::from(non_empty(params.get("path")).context("falta el fichero")?);
+    let key = huella_engine::normalize_path(&path, None);
+    let questions: Vec<Value> = huella_engine::code_ask::questions_for(&app.store, &path)?
+        .into_iter()
+        .map(|located| {
+            let q = located.question;
+            json!({
+                "id": q.id,
+                "question": q.question,
+                "answer": q.answer,
+                "model": q.model,
+                "created_at": q.created_at,
+                "quote": q.quote,
+                "lines": located.lines.map(|(start, end)| [start, end]),
+            })
+        })
+        .collect();
+    let pending: Vec<PendingCodeAsk> = app
+        .code_asking
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|p| p.path == key)
+        .cloned()
+        .collect();
+    Ok(json!({"questions": questions, "pending": pending, "ask_problem": crate::model_problem(&app.model)}))
+}
+
 fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
     let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
     let question = request["question"]

@@ -292,6 +292,32 @@ export interface StepEvidence {
   discarded: string[]
 }
 
+/** Pregunta sobre un trozo de código, anclada a su texto. */
+export interface CodeQuestion {
+  id: number
+  question: string
+  answer: string
+  model: string
+  created_at: string
+  quote: string
+  /** Líneas actuales del trozo; `null` si ya no está en el fichero. */
+  lines: [number, number] | null
+}
+
+export interface PendingCodeAsk {
+  path: string
+  quote: string
+  question: string
+  error: string | null
+}
+
+export interface CodeQuestionsResult {
+  questions: CodeQuestion[]
+  pending: PendingCodeAsk[]
+  /** Qué falta para poder preguntar, o `null`. */
+  ask_problem: string | null
+}
+
 /** Quién escribió una línea de la rama. */
 export type LineOrigin =
   | { by: 'session'; session_id: string }

@@ -5,6 +5,7 @@ import {
   api,
   query,
   type BranchReview,
+  type CodeQuestionsResult,
   type ImpactResult,
   type InboxSession,
   type ReviewStatus,
@@ -190,6 +191,33 @@ export function useFeedback(session: string, enabled: boolean) {
     queryFn: () => api.get<{ markdown: string; items: number }>(`review/${session}/feedback`),
     enabled,
     staleTime: 0,
+  })
+}
+
+/** Preguntas sobre el código de un fichero; se consulta a menudo mientras el modelo responde. */
+export function useCodeQuestions(path: string) {
+  return useQuery({
+    queryKey: ['code-questions', path],
+    queryFn: () => api.get<CodeQuestionsResult>(`code/questions${query({ path })}`),
+    refetchInterval: (state) => (state.state.data?.pending.some((ask) => !ask.error) ? 1500 : false),
+  })
+}
+
+export function useAskCode(path: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { quote: string; question: string }) => api.post('code/ask', { path, ...ask }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['code-questions', path] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useDeleteCodeQuestion(path: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.post(`code/questions/${id}/delete`),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['code-questions', path] }),
+    onError: (error) => toast.error(error.message),
   })
 }
 
