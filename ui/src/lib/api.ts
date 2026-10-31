@@ -269,6 +269,20 @@ export interface ReviewStep {
   lines: ReviewLine[]
   evidence: StepEvidence
   triage: StepTriage
+  guide: StepGuide | null
+}
+
+/** Rango de líneas del diff del paso: índices en `lines`, inclusive. */
+export type LineRange = [number, number]
+
+/** Guía de un paso: qué hace, en qué orden leerlo y qué comprobar. */
+export interface StepGuide {
+  model: string
+  explanation: string
+  walkthrough: { lines: LineRange; note: string }[]
+  checks: { lines: LineRange | null; check: string; done: boolean }[]
+  /** El paso cambió desde que se generó: las líneas pueden no cuadrar. */
+  stale: boolean
 }
 
 export type TriageTag =
@@ -474,4 +488,6 @@ export interface ReviewResult {
   narrations: Record<string, Narration>
   policy: ReviewPolicy
   comprehension: Comprehension
+  /** Guías en cola (la primera, en curso) y las que fallaron. */
+  guiding: { pending: string[]; errors: string[] } | null
 }

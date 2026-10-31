@@ -24,11 +24,12 @@ import { ImpactPanel } from '@/components/review/impact'
 import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { StepDiff } from '@/components/review/diff'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
+import { GuidePanel } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { ReviewResult, ReviewStep, Verdict } from '@/lib/api'
+import type { LineRange, ReviewResult, ReviewStep, Verdict } from '@/lib/api'
 import { baseName, cleanPrompt, clip, dateTime, reviewStatusLabel, shortId } from '@/lib/format'
 import { useOpenInEditor, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
 import { cn } from '@/lib/utils'
@@ -71,6 +72,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
   const [current, setCurrent] = useState(() => Math.max(0, steps.findIndex((step) => !step.verdict && shownBy('focus')(step))))
   // Línea con la caja de comentario abierta (`-1`: el paso entero).
   const [composing, setComposing] = useState<number | null>(null)
+  // Líneas que señala la guía.
+  const [focus, setFocus] = useState<LineRange | null>(null)
   const setVerdict = useSetVerdict(session)
   const setStatus = useSetReviewStatus(session)
   const open = useOpenInEditor()
@@ -103,6 +106,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
   const go = (index: number) => {
     setCurrent(Math.min(Math.max(index, 0), steps.length - 1))
     setComposing(null)
+    setFocus(null)
   }
   // Siguiente (o anterior) paso de los que se muestran.
   const move = (direction: 1 | -1) => {
@@ -150,6 +154,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
   const rationale = [...step.sources].reverse().find((s) => s.kind === 'agent' && s.rationale)?.rationale
   const external = step.sources.find((s) => s.kind === 'external')?.reason
   const stepComments = review.comments.filter((c) => c.step_key === step.key)
+  // Una guía desfasada no señala líneas: pueden haberse movido.
+  const anchored = step.guide && !step.guide.stale ? step.guide : null
 
   return (
     <>
@@ -363,6 +369,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
             )}
           </Panel>
 
+          <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
+
           <StepDiff
             key={step.key}
             step={step}
@@ -372,6 +380,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
             model={review.ask_model}
             composing={composing}
             onCompose={setComposing}
+            stops={anchored?.walkthrough.map((stop) => stop.lines)}
+            focus={anchored ? focus : null}
           />
           {isUnexplained(step) && (
             <p className="-mt-2 rounded-xl bg-warn-soft/60 px-5 py-3 text-[13px] text-warn">
