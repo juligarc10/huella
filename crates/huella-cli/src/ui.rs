@@ -669,12 +669,13 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let key = huella_engine::normalize_path(&path, None);
     let pending = PendingCodeAsk { path: key, quote: quote.clone(), question: question.clone(), error: None };
     app.code_asking.lock().unwrap_or_else(PoisonError::into_inner).push(pending.clone());
-    let (asking, db, model) = (Arc::clone(&app.code_asking), app.db.clone(), app.model.clone());
+    let (asking, db, model, sources) =
+        (Arc::clone(&app.code_asking), app.db.clone(), app.model.clone(), app.sources.clone());
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
             let llm = crate::build_model(&model)?;
-            huella_engine::code_ask::ask_code(&store, llm.as_ref(), &path, &quote, lines, &question)?;
+            huella_engine::code_ask::ask_code(&store, Some(&sources), llm.as_ref(), &path, &quote, lines, &question)?;
             Ok(())
         })();
         let mut all = asking.lock().unwrap_or_else(PoisonError::into_inner);

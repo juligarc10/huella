@@ -4,6 +4,7 @@
 //! anclada al texto seleccionado, para que siga junto a esas líneas aunque el
 //! fichero cambie alrededor.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -13,8 +14,7 @@ use huella_store::{CodeQuestion, NewCodeQuestion, Store};
 use serde_json::{Value, json};
 
 use crate::paths::normalize_path;
-use crate::query::memory_at;
-use crate::render::render_markdown;
+use crate::query::{SymbolMemory, memory_at};
 use crate::workspace::git;
 use crate::{EngineError, Result};
 
@@ -22,6 +22,10 @@ const MAX_CHARS: usize = 60_000;
 /// Líneas de código alrededor de la selección que se envían al modelo.
 const AROUND: usize = 30;
 const MAX_SELECTION_LINES: usize = 400;
+/// Ediciones de la historia de un símbolo que se envían al modelo.
+const MAX_HISTORY: usize = 8;
+/// De las más recientes, cuántas llevan además lo que pensó el agente.
+const WITH_REASONING: usize = 3;
 
 const SYSTEM: &str = "\
 Ayudas a una persona a entender código, muchas veces escrito por un agente de IA. Respondes a su pregunta sobre \
@@ -33,6 +37,7 @@ líneas (lo que se pidió y lo que explicó el agente que las escribió) y sus c
   tú leyendo el código. Si es deducción, dilo.
 - Si el contexto no basta para responder, dilo y explica qué habría que mirar.
 - Si ves un problema real relacionado con la pregunta (un caso límite, un error), señálalo.
+- Responde y termina: no ofrezcas hacer cambios ni acabes con preguntas, desde aquí no se puede editar.
 - Escribe en el idioma de la pregunta, en markdown breve.";
 
 /// Respuesta a una pregunta sobre código, ya guardada.
@@ -77,6 +82,7 @@ pub fn locate(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, 
 /// base de datos.
 pub fn ask_code(
     store: &Store,
+    sources: Option<&crate::Sources>,
     model: &dyn JsonModel,
     path: &Path,
     quote: &str,
@@ -93,7 +99,7 @@ pub fn ask_code(
     let key = normalize_path(path, None);
     let previous = questions_for(store, path)?;
 
-    let context = context(store, path, &source, start, end, &previous)?;
+    let context = context(store, sources, path, &source, start, end, &previous)?;
     let request = huella_core::redact::redact(&format!("{context}\n## Pregunta\n\n{}", question.trim())).into_owned();
     let schema = json!({
         "type": "object",
@@ -142,6 +148,7 @@ pub fn questions_for(store: &Store, path: &Path) -> Result<Vec<LocatedQuestion>>
 /// historia en Huella, sus commits y lo que ya se preguntó de esas líneas.
 fn context(
     store: &Store,
+    sources: Option<&crate::Sources>,
     path: &Path,
     source: &str,
     start: usize,
@@ -173,12 +180,13 @@ fn context(
 
     out.push_str("## Historia de estas líneas en Huella\n\n");
     let mut told = Vec::new();
+    let mut activity: HashMap<String, Vec<huella_core::Activity>> = HashMap::new();
     for line in [start, end] {
         if let Some(memory) = memory_at(store, path, source, line)?
             && !told.contains(&memory.symbol.qualified_name)
         {
             told.push(memory.symbol.qualified_name.clone());
-            let _ = writeln!(out, "{}\n", render_markdown(&memory, 8));
+            write_history(&mut out, &memory, sources, &mut activity)?;
         }
     }
     if told.is_empty() {
@@ -201,6 +209,52 @@ fn context(
         }
     }
     Ok(clip(&out, MAX_CHARS))
+}
+
+/// Cada edición del símbolo con lo que se pidió y lo que explicó el agente,
+/// completos: es lo que responde al «por qué».
+fn write_history(
+    out: &mut String,
+    memory: &SymbolMemory,
+    sources: Option<&crate::Sources>,
+    activity: &mut HashMap<String, Vec<huella_core::Activity>>,
+) -> Result<()> {
+    let _ = writeln!(out, "### `{}`\n", memory.symbol.qualified_name);
+    if memory.changed_since_last_session {
+        out.push_str("El código actual no es el que dejó la última sesión que lo tocó: hubo cambios después.\n\n");
+    }
+    for (index, entry) in memory.entries.iter().take(MAX_HISTORY).enumerate() {
+        let when = entry.at.as_deref().map_or("sin fecha", |at| &at[..16.min(at.len())]);
+        let _ = writeln!(out, "- **{when}** · sesión {}", &entry.session_id[..8.min(entry.session_id.len())]);
+        if let Some(prompt) = &entry.context.prompt {
+            let _ = writeln!(out, "  - Petición: «{}»", clip(&one_line(prompt), 1500));
+        }
+        if let Some(rationale) = &entry.context.rationale {
+            let _ = writeln!(out, "  - Lo que explicó el agente: {}", clip(&one_line(rationale), 2500));
+        }
+        // La explicación guardada es solo el último texto antes de editar; lo
+        // pensado en el turno suele contar mejor el porqué.
+        if let Some(sources) = sources.filter(|_| index < WITH_REASONING) {
+            if !activity.contains_key(&entry.session_id) {
+                let read = crate::evidence::session_activity(sources, &entry.session_id)?;
+                activity.insert(entry.session_id.clone(), read);
+            }
+            for thought in crate::evidence::reasoning_before(&activity[&entry.session_id], &entry.edit_id, 3) {
+                if entry.context.rationale.as_deref() != Some(thought.as_str()) {
+                    let _ = writeln!(out, "  - Lo que pensó antes de escribirlo: {}", clip(&one_line(&thought), 1500));
+                }
+            }
+        }
+    }
+    if memory.entries.len() > MAX_HISTORY {
+        let _ = writeln!(out, "- … y {} ediciones anteriores", memory.entries.len() - MAX_HISTORY);
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Commits que dejaron las líneas como están: `abc1234 · autor · fecha · resumen`.
@@ -316,7 +370,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let model = Fake { seen: RefCell::new(String::new()) };
 
-        let answer = ask_code(&store, &model, &path, "let total = sum();\nsave(total)", None, "¿Qué hace?").unwrap();
+        let answer =
+            ask_code(&store, None, &model, &path, "let total = sum();\nsave(total)", None, "¿Qué hace?").unwrap();
         assert_eq!((answer.start_line, answer.end_line), (4, 5));
         let seen = model.seen.borrow().clone();
         assert!(seen.contains(">    4      let total = sum();"), "{seen}");

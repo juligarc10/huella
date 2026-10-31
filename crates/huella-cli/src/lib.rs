@@ -1067,7 +1067,16 @@ fn ask_code(store: &Store, location: &str, question: &str, model: &ModelArgs) ->
     let path = fs::canonicalize(file).with_context(|| format!("no se encontró {file}"))?;
     let llm = build_model(model)?;
     eprintln!("Preguntando a {} sobre {file}:{start}-{end}…", llm.model_id());
-    let answer = huella_engine::code_ask::ask_code(store, llm.as_ref(), &path, "", Some((start, end)), question)?;
+    let sources = sources(None)?;
+    let answer = huella_engine::code_ask::ask_code(
+        store,
+        Some(&sources),
+        llm.as_ref(),
+        &path,
+        "",
+        Some((start, end)),
+        question,
+    )?;
     println!("{}", answer.answer);
     Ok(())
 }
