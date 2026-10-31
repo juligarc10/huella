@@ -127,6 +127,24 @@ lint) with their result, and the attempts it discarded; steps it never checked
 are flagged. It also shows the step's **impact** (code outside the session that
 uses what changed) and, with a model, whether the turn **covers the request**:
 requirements done, partial or missing, and what it did without being asked.
+Not every step deserves the same attention: each one is **triaged** with tags
+saying why (security, data, public API, dependencies, not requested, never
+checked, unexplained lines, config, tests, docs, generated, formatting only),
+and a policy turns them into *must review*, *glance* or *skip*. The review
+shows how much of each level has a verdict, hides skippable steps by default
+and won't approve while a must-review step has none. The policy defaults to
+`balanced`; teams can version their own in a `.huella.toml` at the repository
+root:
+
+```toml
+[review]
+preset = "balanced"            # strict | balanced | light
+must = ["public-api"]          # raise tags to must review
+acknowledge = ["dependencies"] # …to glance
+skip = ["tests"]               # …or let them be skipped
+default = "acknowledge"        # code with no tags
+```
+
 **Branch** reviews what you are about to ship: the diff against the base
 branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.
