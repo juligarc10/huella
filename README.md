@@ -145,6 +145,15 @@ skip = ["tests"]               # …or let them be skipped
 default = "acknowledge"        # code with no tags
 ```
 
+To understand a step before accepting it, **Guide me** asks the model what the
+code does and why the request needs it, a walkthrough of 1 to 6 stops in
+reading order (numbered in the diff margin; clicking one points at its lines)
+and 1 to 4 concrete checks to tick off, starting with why the step was flagged.
+It uses the request, what the agent thought and explained before writing it,
+and the triage. Guides are kept, marked stale when the step changes, and can be
+prepared for every must-review step in the background, or from the terminal
+with `huella review guide <session> [--all | --step N]`.
+
 **Branch** reviews what you are about to ship: the diff against the base
 branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.
