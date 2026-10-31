@@ -19,6 +19,7 @@ mod render;
 mod review;
 pub mod review_loop;
 mod sources;
+pub mod triage;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -45,6 +46,8 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
     #[error("el modelo falló: {0}")]
     Model(String),
+    #[error("política de revisión: {0}")]
+    Policy(String),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]

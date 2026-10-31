@@ -268,6 +268,46 @@ export interface ReviewStep {
   sources: ReviewSource[]
   lines: ReviewLine[]
   evidence: StepEvidence
+  triage: StepTriage
+}
+
+export type TriageTag =
+  | 'security'
+  | 'data'
+  | 'public-api'
+  | 'dependencies'
+  | 'unrequested'
+  | 'unverified'
+  | 'unexplained'
+  | 'config'
+  | 'tests'
+  | 'docs'
+  | 'generated'
+  | 'formatting'
+
+/** Cuánta atención merece un paso según la política. */
+export type TriageLevel = 'must' | 'acknowledge' | 'skip'
+
+export interface StepTriage {
+  level: TriageLevel
+  /** Etiquetas, de la más exigente a la menos, con lo que las disparó. */
+  findings: { tag: TriageTag; reason: string }[]
+}
+
+export interface ReviewPolicy {
+  preset: 'strict' | 'balanced' | 'light'
+  /** `.huella.toml` del repositorio, o `null` si es la de por defecto. */
+  source: string | null
+  levels: Record<TriageTag, TriageLevel>
+  default: TriageLevel
+  /** El fichero existe pero no se pudo leer; se usa la de por defecto. */
+  error: string | null
+}
+
+export interface Comprehension {
+  must: { total: number; done: number }
+  acknowledge: { total: number; done: number }
+  skip: { total: number; done: number }
 }
 
 /** Un hecho de la sesión: qué leyó, buscó o ejecutó el agente. */
@@ -432,4 +472,6 @@ export interface ReviewResult {
   coverage: Record<string, Coverage>
   covering: { running: boolean; error?: string } | null
   narrations: Record<string, Narration>
+  policy: ReviewPolicy
+  comprehension: Comprehension
 }

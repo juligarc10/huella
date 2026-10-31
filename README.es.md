@@ -287,6 +287,39 @@ Para fiarte de un paso no basta con el diff:
 huella review coverage 84e33d8e      # la cobertura en la terminal
 ```
 
+#### Qué revisar a fondo: triaje y política
+
+No hace falta revisar el 100 % con la misma atención. Cada paso recibe
+etiquetas, cada una con lo que la disparó: `security` (contraseñas, tokens,
+`eval`, carpetas `auth/`), `data` (SQL, migraciones), `public-api` (lo que se
+exporta, rutas), `dependencies` (manifiestos), `unrequested` (la cobertura dice
+que no se pidió), `unverified` (no ejecutó nada después), `unexplained` (líneas
+cambiadas fuera del agente), `config`, `tests`, `docs`, `generated` (lockfiles,
+`dist/`) y `formatting` (solo espacios). No usa modelo: es una ayuda para
+repartir la atención, no un veredicto.
+
+La política decide el nivel de cada etiqueta: **obligatorio**, **vistazo** o
+**saltable**; un paso toma el más exigente de los suyos. La interfaz muestra
+«Obligatorio 3/7 · Vistazo 10/20 · Saltable 5», deja filtrar los pasos (por
+defecto esconde lo saltable) y no deja aprobar mientras quede algo obligatorio
+sin veredicto. Sin configurar se usa `balanced`; para cambiarla, un
+`.huella.toml` en la raíz del repositorio, que se versiona con el equipo:
+
+```toml
+[review]
+preset = "balanced"            # strict | balanced | light
+must = ["public-api"]          # sube etiquetas a obligatorio
+acknowledge = ["dependencies"] # …a vistazo
+skip = ["tests"]               # …o las deja saltar
+default = "acknowledge"        # el código sin etiquetas
+```
+
+| Preset     | Obligatorio                                  | Vistazo                                         | Saltable                     |
+| ---------- | -------------------------------------------- | ----------------------------------------------- | ---------------------------- |
+| `strict`   | todo lo demás, también el código sin etiquetas |                                               | `generated`, `formatting`    |
+| `balanced` | `security`, `data`, `unrequested`, `dependencies` | el resto y el código sin etiquetas         | `docs`, `generated`, `formatting` |
+| `light`    | `security`, `data`, `unrequested`            | `public-api`, `dependencies`, `unverified`, `unexplained` | el resto y el código sin etiquetas |
+
 #### En Zed, con su vista de cambios
 
 ```sh
