@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use huella_engine::lineage::{Link, read_from_disk};
-use huella_engine::triage::Level;
+use huella_engine::triage::{Assessment, Level, assess};
 use huella_review::SessionReview;
-use huella_review::flow::{FlowStep, StepRole};
+use huella_review::flow::FlowStep;
 use huella_store::{DecisionFilter, FoundBy, HistoryEntry, SearchHit, SearchQuery, Store, StoredDecision, SymbolRole};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -66,6 +66,8 @@ pub(crate) struct App {
     impact: Option<Value>,
     /// Cobertura en curso por sesión: `None` mientras se calcula, o el error.
     covering: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// Guías en curso por sesión.
+    guiding: Arc<Mutex<HashMap<String, Guiding>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
@@ -92,6 +94,15 @@ struct PendingAsk {
 }
 
 type Asking = Arc<Mutex<HashMap<String, Vec<PendingAsk>>>>;
+
+/// Guías de una sesión que un hilo está generando, una a una.
+#[derive(Debug, Clone, Default, Serialize)]
+struct Guiding {
+    /// Claves de los pasos que faltan, la primera en curso.
+    pending: Vec<String>,
+    /// Pasos que fallaron, con el porqué.
+    errors: Vec<String>,
+}
 
 /// Estado de una tarea en segundo plano.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -132,6 +143,7 @@ impl App {
             activity: Vec::new(),
             impact: None,
             covering: Arc::new(Mutex::new(HashMap::new())),
+            guiding: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
         }
@@ -252,6 +264,8 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["review", session, "feedback"]) => feedback(app, session)?,
         ("GET", ["review", session, "impact"]) => impact(app, session)?,
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
+        ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
+        ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["comments", id]) => update_comment(app, id, body)?,
         ("POST", ["code", "ask"]) => return ask_code(app, body),
@@ -475,32 +489,17 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     value["narrations"] = serde_json::to_value(&narrations)?;
     let project = huella_engine::session_project(&app.store, &review.session_id)?;
     value["project"] = json!(project);
-    let coverage = huella_engine::coverage::coverages(&app.store, review, plan, &points)?;
-    let evidence: Vec<_> =
-        plan.iter().map(|flow| huella_engine::evidence::step_evidence(review, flow, &app.activity)).collect();
-    let (policy, policy_error) = match huella_engine::triage::load_policy(project.as_deref().map(Path::new)) {
-        Ok(policy) => (policy, None),
-        Err(error) => (huella_engine::triage::Policy::default(), Some(error.to_string())),
-    };
-    let unrequested = coverage.values().flat_map(|c| c.unrequested.iter().map(|(step, _)| *step)).collect();
-    // Sin comprobaciones solo cuenta en el código del flujo y si hay actividad que lo diga.
-    let unverified = plan
-        .iter()
-        .zip(&evidence)
-        .enumerate()
-        .filter(|(_, (flow, found))| {
-            flow.role == StepRole::Flow
-                && found.available
-                && !found.checks.iter().any(|check| matches!(check.kind, huella_core::ActivityKind::Command { .. }))
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let triage = huella_engine::triage::triage(review, plan, &policy, &unrequested, &unverified);
+    let Assessment { coverage, evidence, policy, policy_error, triage } =
+        assess(&app.store, review, plan, &points, &app.activity, project.as_deref())?;
+    let context: Vec<_> = evidence.iter().zip(&triage).collect();
+    let mut guides = huella_engine::guide::guides(&app.store, review, plan, &context)?;
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
     if let Some(steps) = value["steps"].as_array_mut() {
-        for (((step, flow), found), triaged) in steps.iter_mut().zip(plan).zip(evidence).zip(&triage) {
+        for (index, (((step, flow), found), triaged)) in
+            steps.iter_mut().zip(plan).zip(evidence).zip(&triage).enumerate()
+        {
             let verdict = verdicts
                 .get(&flow.key(review))
                 .filter(|v| v.content_hash == flow.content_hash())
@@ -509,12 +508,14 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
             step["verdict"] = json!(verdict);
             step["evidence"] = serde_json::to_value(found)?;
             step["triage"] = serde_json::to_value(triaged)?;
+            step["guide"] = serde_json::to_value(guides.remove(&index))?;
         }
     }
     value["policy"] = json!({
         "preset": policy.preset, "source": policy.source, "levels": policy.levels, "default": policy.default,
         "error": policy_error,
     });
+    value["guiding"] = json!(app.guiding.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     value["comprehension"] = serde_json::to_value(comprehension)?;
     app.store.record_review_steps(&review.session_id, plan.len())?;
     let states = app.store.review_states()?;
@@ -680,6 +681,108 @@ fn start_coverage(app: &mut App, session: &str) -> Result<(u16, Value)> {
         }
     });
     Ok((202, json!({"running": true})))
+}
+
+/// Guía de los pasos pedidos (`keys`): un hilo los recorre en orden con el
+/// modelo configurado. Si ya hay uno con esta sesión, los nuevos se añaden a
+/// su cola.
+fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let keys: Vec<String> = request["keys"]
+        .as_array()
+        .context("falta keys")?
+        .iter()
+        .filter_map(|key| key.as_str().map(str::to_owned))
+        .collect();
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let session_id = review.session_id.clone();
+    let project = huella_engine::session_project(&app.store, &session_id)?;
+    let points = huella_review::attention::attention(&review, &plan);
+    let Assessment { evidence, triage, .. } =
+        assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
+    let wanted: Vec<String> = plan
+        .iter()
+        .zip(&triage)
+        .map(|(flow, triaged)| (flow.key(&review), triaged))
+        .filter(|(key, triaged)| keys.contains(key) && huella_engine::guide::wanted(triaged))
+        .map(|(key, _)| key)
+        .collect();
+    {
+        let mut all = app.guiding.lock().unwrap_or_else(PoisonError::into_inner);
+        let running = all.get(&session_id).is_some_and(|guiding| !guiding.pending.is_empty());
+        let guiding = all.entry(session_id.clone()).or_default();
+        if !running {
+            guiding.errors.clear();
+        }
+        for key in wanted {
+            if !guiding.pending.contains(&key) {
+                guiding.pending.push(key);
+            }
+        }
+        if running || guiding.pending.is_empty() {
+            return Ok((202, json!(guiding)));
+        }
+    }
+    let (guiding, db, model) = (Arc::clone(&app.guiding), app.db.clone(), app.model.clone());
+    std::thread::spawn(move || {
+        let setup =
+            Store::open(&db).map_err(anyhow::Error::from).and_then(|store| Ok((store, crate::build_model(&model)?)));
+        loop {
+            let Some(key) = guiding
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&session_id)
+                .and_then(|guiding| guiding.pending.first().cloned())
+            else {
+                break;
+            };
+            let outcome = match &setup {
+                Ok((store, llm)) => plan
+                    .iter()
+                    .position(|flow| flow.key(&review) == key)
+                    .context("el paso ya no está en la revisión")
+                    .and_then(|index| {
+                        huella_engine::guide::guide_step(
+                            store,
+                            &review,
+                            &plan,
+                            index,
+                            &evidence[index],
+                            &triage[index],
+                            llm.as_ref(),
+                        )
+                        .map_err(anyhow::Error::from)
+                    }),
+                Err(error) => Err(anyhow::anyhow!("{error:#}")),
+            };
+            let mut all = guiding.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(state) = all.get_mut(&session_id) else { break };
+            state.pending.retain(|pending| *pending != key);
+            if let Err(error) = outcome {
+                state.errors.push(format!("{key}: {error:#}"));
+            }
+        }
+    });
+    Ok((202, json!({"running": true})))
+}
+
+/// Marca o desmarca una comprobación de la guía de un paso.
+fn check_guide(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let key = request["key"].as_str().context("falta key")?;
+    let index = request["index"].as_u64().and_then(|i| usize::try_from(i).ok()).context("falta index")?;
+    let done = request["done"].as_bool().context("falta done")?;
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    start_reviewing(app, &review.session_id, plan.len())?;
+    if !app.store.set_guide_check(&review.session_id, key, index, done)? {
+        bail!("el paso no tiene guía");
+    }
+    Ok(json!({}))
 }
 
 /// Qué código del proyecto, fuera de la sesión, usa lo que cambió cada paso.

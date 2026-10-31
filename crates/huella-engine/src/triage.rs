@@ -168,6 +168,53 @@ impl Policy {
     }
 }
 
+/// Lo que hace falta para decidir cuánta atención merece cada paso.
+#[derive(Debug)]
+pub struct Assessment {
+    pub coverage: BTreeMap<usize, crate::coverage::Coverage>,
+    pub evidence: Vec<crate::evidence::StepEvidence>,
+    pub policy: Policy,
+    /// El `.huella.toml` no se pudo leer: se usa la política por defecto.
+    pub policy_error: Option<String>,
+    pub triage: Vec<StepTriage>,
+}
+
+/// Triaje de la revisión con todo lo que Huella sabe: la cobertura guardada,
+/// la evidencia de la actividad y la política del proyecto.
+///
+/// # Errors
+/// Si falla la base de datos. Una política inválida no es un error: se anota.
+pub fn assess(
+    store: &huella_store::Store,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    points: &[huella_review::attention::Attention],
+    activity: &[huella_core::Activity],
+    project: Option<&str>,
+) -> Result<Assessment> {
+    let coverage = crate::coverage::coverages(store, review, plan, points)?;
+    let evidence: Vec<_> = plan.iter().map(|flow| crate::evidence::step_evidence(review, flow, activity)).collect();
+    let (policy, policy_error) = match load_policy(project.map(Path::new)) {
+        Ok(policy) => (policy, None),
+        Err(error) => (Policy::default(), Some(error.to_string())),
+    };
+    let unrequested = coverage.values().flat_map(|c| c.unrequested.iter().map(|(step, _)| *step)).collect();
+    // Sin comprobaciones solo cuenta en el código del flujo y si hay actividad que lo diga.
+    let unverified = plan
+        .iter()
+        .zip(&evidence)
+        .enumerate()
+        .filter(|(_, (flow, found))| {
+            flow.role == StepRole::Flow
+                && found.available
+                && !found.checks.iter().any(|check| matches!(check.kind, huella_core::ActivityKind::Command { .. }))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let triage = triage(review, plan, &policy, &unrequested, &unverified);
+    Ok(Assessment { coverage, evidence, policy, policy_error, triage })
+}
+
 /// La política del repositorio de `project`, o la de por defecto si no tiene.
 ///
 /// # Errors

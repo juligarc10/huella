@@ -385,6 +385,23 @@ enum ReviewCommand {
         #[arg(long)]
         projects: Option<PathBuf>,
     },
+    /// Guía con un modelo los pasos que hay que revisar a fondo: qué hace el
+    /// código, en qué orden leerlo y qué comprobar.
+    Guide {
+        /// Id de la sesión o su comienzo.
+        session: String,
+        /// Solo este paso (su número en la revisión).
+        #[arg(long, conflicts_with = "all")]
+        step: Option<usize>,
+        /// También los pasos de vistazo, no solo los obligatorios.
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
+    },
     /// Abre la revisión guiada de una sesión en el navegador.
     Open {
         /// Id de la sesión o su comienzo.
@@ -639,6 +656,9 @@ fn review_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()> {
             Ok(())
         }
         ReviewCommand::Coverage { session, model, projects } => coverage_command(db, &session, &model, projects),
+        ReviewCommand::Guide { session, step, all, model, projects } => {
+            guide_command(db, &session, step, all, &model, projects)
+        }
         ReviewCommand::Branch { base, repo, projects } => branch_command(&repo, base.as_deref(), projects),
         ReviewCommand::Open { session, editor, port, no_browser, projects } => {
             let store = open_store(db)?;
@@ -773,6 +793,77 @@ fn coverage_command(db: Option<PathBuf>, session: &str, model: &ModelArgs, proje
         }
         for (step, note) in &coverage.unrequested {
             println!("  + sin pedir: {} — {note}", step_name(*step));
+        }
+    }
+    Ok(())
+}
+
+fn guide_command(
+    db: Option<PathBuf>,
+    session: &str,
+    step: Option<usize>,
+    all: bool,
+    model: &ModelArgs,
+    projects: Option<PathBuf>,
+) -> Result<()> {
+    use huella_engine::triage::Level;
+    let model = build_model(model)?;
+    let store = open_store(db)?;
+    let sources = sources(projects)?;
+    let review = huella_engine::session_review(&sources, session)?;
+    let plan = huella_review::flow::plan(&review);
+    let points = huella_review::attention::attention(&review, &plan);
+    let activity = huella_engine::evidence::session_activity(&sources, &review.session_id)?;
+    let project = huella_engine::session_project(&store, &review.session_id)?;
+    let assessment = huella_engine::triage::assess(&store, &review, &plan, &points, &activity, project.as_deref())?;
+    let chosen: Vec<usize> = match step {
+        Some(number) => {
+            let index = number.checked_sub(1).filter(|&i| i < plan.len()).context("no hay ese paso")?;
+            vec![index]
+        }
+        None => (0..plan.len())
+            .filter(|&i| {
+                let level = assessment.triage[i].level;
+                level == Level::Must || (all && level == Level::Acknowledge)
+            })
+            .collect(),
+    };
+    let name = |index: usize| {
+        plan[index]
+            .symbol
+            .as_ref()
+            .map_or_else(|| review.files[plan[index].file].path.clone(), |s| s.qualified_name.clone())
+    };
+    println!("Guiando {} pasos con {}…", chosen.len(), model.model_id());
+    for &index in &chosen {
+        println!("  · paso {} {}", index + 1, name(index));
+        if let Err(error) = huella_engine::guide::guide_step(
+            &store,
+            &review,
+            &plan,
+            index,
+            &assessment.evidence[index],
+            &assessment.triage[index],
+            model.as_ref(),
+        ) {
+            eprintln!("aviso: paso {}: {error}", index + 1);
+        }
+    }
+    let context: Vec<_> = assessment.evidence.iter().zip(&assessment.triage).collect();
+    let guides = huella_engine::guide::guides(&store, &review, &plan, &context)?;
+    for index in chosen {
+        let Some(guide) = guides.get(&index) else { continue };
+        let lines = |(from, to): (usize, usize)| {
+            if from == to { format!("L{}", from + 1) } else { format!("L{}-{}", from + 1, to + 1) }
+        };
+        println!("\nPaso {} · {}{}", index + 1, name(index), if guide.stale { " (desfasada)" } else { "" });
+        println!("  {}", guide.explanation);
+        for (number, stop) in guide.walkthrough.iter().enumerate() {
+            println!("  {}. {} {}", number + 1, lines(stop.lines), stop.note);
+        }
+        for check in &guide.checks {
+            let at = check.lines.map(|range| format!(" ({})", lines(range))).unwrap_or_default();
+            println!("  [{}] {}{at}", if check.done { "x" } else { " " }, check.check);
         }
     }
     Ok(())

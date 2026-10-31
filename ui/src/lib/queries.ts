@@ -96,7 +96,7 @@ export function useReview(session: string | undefined) {
     // Mientras el modelo responde una pregunta, se consulta a menudo.
     refetchInterval: (state) => {
       const data = state.state.data
-      return data?.asking.some((ask) => !ask.error) || data?.covering?.running ? 1500 : false
+      return data?.asking.some((ask) => !ask.error) || data?.covering?.running || data?.guiding?.pending.length ? 1500 : false
     },
   })
 }
@@ -227,6 +227,46 @@ export function useCoverage(session: string) {
     mutationFn: () => api.post(`review/${session}/coverage`, {}),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Pide la guía de esos pasos; se generan de uno en uno en segundo plano. */
+export function useGuide(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (keys: string[]) => api.post(`review/${session}/guide`, { keys }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Marca una comprobación de la guía. Se refleja al momento. */
+export function useGuideCheck(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (check: { key: string; index: number; done: boolean }) => api.post(`review/${session}/guide/check`, check),
+    onMutate: (check) => {
+      client.setQueryData<ReviewResult>(['review', session], (review) =>
+        review && {
+          ...review,
+          steps: review.steps.map((step) =>
+            step.key === check.key && step.guide
+              ? {
+                  ...step,
+                  guide: {
+                    ...step.guide,
+                    checks: step.guide.checks.map((c, index) => (index === check.index ? { ...c, done: check.done } : c)),
+                  },
+                }
+              : step,
+          ),
+        },
+      )
+    },
+    onError: (error) => {
+      toast.error(error.message)
+      client.invalidateQueries({ queryKey: ['review', session] })
+    },
   })
 }
 

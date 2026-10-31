@@ -8,6 +8,7 @@ pub mod coverage;
 mod decisions;
 pub mod embeddings;
 pub mod evidence;
+pub mod guide;
 pub mod impact;
 mod index;
 pub mod lineage;

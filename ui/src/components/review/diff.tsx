@@ -1,10 +1,11 @@
 import { MessageCircleQuestion, MessageSquarePlus, X } from 'lucide-react'
-import { Fragment, useState, type MouseEvent } from 'react'
+import { Fragment, useEffect, useRef, useState, type MouseEvent } from 'react'
 
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
 import { CommentCard, CommentComposer } from '@/components/review/comments'
+import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
-import type { CodeQuestion, CommentHint, ReviewComment, ReviewStep } from '@/lib/api'
+import type { CodeQuestion, CommentHint, LineRange, ReviewComment, ReviewStep } from '@/lib/api'
 import { useAddComment, useAskCode, useCodeQuestions } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
@@ -27,6 +28,8 @@ export function StepDiff({
   model,
   composing,
   onCompose,
+  stops = [],
+  focus = null,
 }: {
   step: ReviewStep
   comments: ReviewComment[]
@@ -37,6 +40,10 @@ export function StepDiff({
   /** Línea con la caja de comentario abierta (`-1`: comentario del paso entero). */
   composing: number | null
   onCompose: (line: number | null) => void
+  /** Paradas del recorrido de la guía: su número sale en el margen. */
+  stops?: LineRange[]
+  /** Líneas que la guía está señalando. */
+  focus?: LineRange | null
 }) {
   const add = useAddComment(session)
   const ask = useAskCode(step.path)
@@ -44,6 +51,11 @@ export function StepDiff({
   const [selection, setSelection] = useState<Selection | null>(null)
   const [asking, setAsking] = useState(false)
   const hintOf = (id: number) => hints.find((hint) => hint.id === id)
+  const focused = (index: number) => focus !== null && index >= focus[0] && index <= focus[1]
+  const firstFocused = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    firstFocused.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [focus])
 
   // Cada comentario, bajo la primera línea con su texto; si no la hay, al final.
   const placed = new Map<number, ReviewComment[]>()
@@ -107,15 +119,24 @@ export function StepDiff({
           {step.lines.map((line, index) => (
             <Fragment key={index}>
               <div
+                ref={focus?.[0] === index ? firstFocused : undefined}
                 className={cn(
                   'group flex cursor-pointer pr-4 select-none',
                   line.kind === 'added' && (line.external ? 'bg-warn-soft' : 'bg-brand-soft/60'),
                   line.kind === 'removed' && 'bg-muted text-muted-foreground line-through decoration-muted-foreground/40',
+                  focused(index) && 'bg-brand/10 shadow-[inset_3px_0_0_var(--color-brand)]',
                   selected(index) && 'bg-brand/15 shadow-[inset_3px_0_0_var(--color-brand)]',
                   composing === index && 'ring-2 ring-brand/50 ring-inset',
                 )}
                 onClick={(event) => select(index, event)}
               >
+                {stops.length > 0 && (
+                  <span className="flex w-7 shrink-0 items-center justify-end">
+                    {stops.findIndex((stop) => stop[0] === index) >= 0 && (
+                      <StopBadge number={stops.findIndex((stop) => stop[0] === index) + 1} className="size-4 text-[10px]" />
+                    )}
+                  </span>
+                )}
                 <span
                   aria-hidden="true"
                   className={cn(

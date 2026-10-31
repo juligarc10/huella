@@ -320,6 +320,24 @@ default = "acknowledge"        # el código sin etiquetas
 | `balanced` | `security`, `data`, `unrequested`, `dependencies` | el resto y el código sin etiquetas         | `docs`, `generated`, `formatting` |
 | `light`    | `security`, `data`, `unrequested`            | `public-api`, `dependencies`, `unverified`, `unexplained` | el resto y el código sin etiquetas |
 
+#### Revisión guiada
+
+Para entender un paso antes de aceptarlo, «Guíame por este paso» pide al modelo
+una guía: qué hace el código y para qué lo necesita la petición, un recorrido
+de 1 a 6 paradas en el orden en que conviene leerlo (su número sale en el
+margen del diff y, al pulsarlas, se señalan sus líneas) y de 1 a 4
+comprobaciones concretas, empezando por los motivos del triaje, que se marcan
+al hacerlas. Usa la petición, lo que pensó y explicó el agente antes de
+escribirlo y por qué se marcó el paso. «Guiar los N obligatorios» las prepara
+todas en segundo plano. Se guarda y se marca como desfasada si el paso cambia;
+lo saltable no se guía.
+
+```sh
+huella review guide 84e33d8e          # guía los pasos obligatorios
+huella review guide 84e33d8e --all    # también los de vistazo
+huella review guide 84e33d8e --step 3
+```
+
 #### En Zed, con su vista de cambios
 
 ```sh
