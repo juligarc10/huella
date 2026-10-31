@@ -62,6 +62,48 @@ impl JsonModel for OpenAiCompatible {
     }
 
     fn complete_json(&self, system: &str, user: &str, schema: &Value) -> Result<String, ExtractError> {
+        // Un corte sin respuesta suele ser el proxy cerrando por inactividad
+        // mientras el servidor carga el modelo: el segundo intento ya lo encuentra cargado.
+        match self.attempt(system, user, schema) {
+            Err(error) if is_cut(&error) => {
+                std::thread::sleep(RETRY_AFTER);
+                self.attempt(system, user, schema).map_err(explain)
+            }
+            other => other.map_err(explain),
+        }
+    }
+}
+
+/// Espera antes de reintentar una petición cortada.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// Un error de red que merece otro intento: la conexión se abrió y se cortó.
+/// Si se rechazó (el servidor está apagado), reintentar no sirve.
+fn is_cut(error: &ExtractError) -> bool {
+    matches!(error, ExtractError::Network { message, .. } if !message.to_lowercase().contains("refused"))
+}
+
+/// Los errores de red de rustls o del sistema no dicen qué hacer: se explica.
+fn explain(error: ExtractError) -> ExtractError {
+    match error {
+        ExtractError::Network { provider, message } if is_cut_message(&message) => ExtractError::Network {
+            provider,
+            message: format!(
+                "el servidor cortó la conexión sin responder ({message}). Si el modelo se estaba cargando, vuelve a \
+                 intentarlo; si pasa siempre, sube el tiempo de espera del proxy que tengas delante del servidor"
+            ),
+        },
+        other => other,
+    }
+}
+
+fn is_cut_message(message: &str) -> bool {
+    let message = message.to_lowercase();
+    ["close_notify", "closed", "reset", "eof", "timed out", "broken pipe"].iter().any(|hint| message.contains(hint))
+}
+
+impl OpenAiCompatible {
+    fn attempt(&self, system: &str, user: &str, schema: &Value) -> Result<String, ExtractError> {
         let network = |error: ureq::Error| ExtractError::Network { provider: PROVIDER, message: error.to_string() };
         let mut call = self.agent.post(format!("{}/chat/completions", self.base_url));
         if let Some(key) = &self.api_key {
@@ -256,6 +298,20 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         assert_eq!(body["response_format"]["json_schema"]["schema"], output_schema());
+    }
+
+    #[test]
+    fn cut_connections_are_retried_and_explained_but_refusals_are_not() {
+        let cut = ExtractError::Network {
+            provider: PROVIDER,
+            message: "io: peer closed connection without sending TLS close_notify".into(),
+        };
+        assert!(is_cut(&cut));
+        assert!(explain(cut).to_string().contains("tiempo de espera del proxy"));
+        let refused = ExtractError::Network { provider: PROVIDER, message: "Connection refused (os error 61)".into() };
+        assert!(!is_cut(&refused));
+        assert!(!explain(refused).to_string().contains("proxy"));
+        assert!(!is_cut(&ExtractError::Truncated));
     }
 
     #[test]
