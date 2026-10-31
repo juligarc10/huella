@@ -56,6 +56,25 @@ pub fn session_activity(sources: &crate::Sources, session_id: &str) -> Result<Ve
     Ok(activity)
 }
 
+/// Lo último que pensó o explicó el agente en su turno antes de la edición
+/// `event_id` (como mucho `max` textos). Vacío si la edición no aparece.
+pub fn reasoning_before(activity: &[Activity], event_id: &str, max: usize) -> Vec<String> {
+    let Some(edit) =
+        activity.iter().position(|a| matches!(&a.kind, ActivityKind::Edit { event_id: id, .. } if id == event_id))
+    else {
+        return Vec::new();
+    };
+    let start = activity[..edit].iter().rposition(|a| matches!(a.kind, ActivityKind::Prompt { .. })).unwrap_or(0);
+    let texts: Vec<String> = activity[start..edit]
+        .iter()
+        .filter_map(|a| match &a.kind {
+            ActivityKind::Reasoning { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    texts[texts.len().saturating_sub(max)..].to_vec()
+}
+
 /// Evidencia de un paso del guion a partir de la actividad de su sesión.
 pub fn step_evidence(review: &SessionReview, step: &FlowStep, activity: &[Activity]) -> StepEvidence {
     let edit_position: HashMap<&str, usize> = activity
@@ -208,6 +227,20 @@ mod tests {
         assert_eq!(evidence.checks.len(), 1, "solo comprobaciones, después y en el mismo turno");
         assert!(matches!(&evidence.checks[0].kind, ActivityKind::Command { ok: Some(false), .. }));
         assert_eq!(evidence.discarded, vec!["  return slow();".to_owned()]);
+    }
+
+    #[test]
+    fn reasoning_before_an_edit_stays_within_its_turn() {
+        let activity = vec![
+            act(ActivityKind::Reasoning { text: "de otro turno".into() }),
+            act(ActivityKind::Prompt { text: "haz a".into() }),
+            act(ActivityKind::Reasoning { text: "miro la config".into() }),
+            act(ActivityKind::Reasoning { text: "añado la comprobación".into() }),
+            act(ActivityKind::Edit { event_id: "e1".into(), path: "a.ts".into() }),
+        ];
+        assert_eq!(reasoning_before(&activity, "e1", 1), vec!["añado la comprobación".to_owned()]);
+        assert_eq!(reasoning_before(&activity, "e1", 5).len(), 2);
+        assert_eq!(reasoning_before(&activity, "otra", 3), Vec::<String>::new());
     }
 
     #[test]

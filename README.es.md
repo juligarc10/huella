@@ -161,6 +161,7 @@ extraer decisiones desde la aplicación, las mismas que `decisions extract`
 ```sh
 huella index                         # indexa lo nuevo de las transcripciones
 huella why src/app.ts:42             # qué se habló del símbolo en esa línea
+huella ask src/pago.ts:40-62 "¿Por qué reintenta tres veces?"   # pregunta sobre cualquier trozo de código
 huella symbols src/app.ts            # símbolos que Huella reconoce en un fichero
 huella scan                          # mide la tasa de anclaje (validación de la F0)
 
@@ -251,6 +252,12 @@ huella review ask 84e33d8e "¿Por qué no reutiliza el validador?" --step 3 --pr
 - **Seguimiento**: cuando otra sesión (o la misma) edita después esos ficheros,
   la revisión lo avisa y enlaza con ella; cada comentario indica si su línea ya
   no está o si el fichero cambió después, para resolverlo o reabrirlo.
+- **Preguntar sobre cualquier trozo de código**: selecciona líneas del diff
+  (clic, y mayúsculas+clic para un rango) → «Preguntar», o desde la terminal con
+  `huella ask fichero:inicio-fin`. La respuesta se apoya en la historia de esas
+  líneas (lo que se pidió, lo que explicó el agente que las escribió y sus
+  commits), distingue lo que consta de lo que deduce el modelo, y queda guardada
+  junto a ese código: si el fichero cambia alrededor, sigue encontrándolo.
 - **Preguntar a la sesión** por un paso o por toda la sesión. El modelo responde
   con la petición, las explicaciones del agente, el diff y el código actual del
   paso, y las preguntas anteriores. Se usa el mismo modelo que para extraer

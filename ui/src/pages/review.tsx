@@ -352,10 +352,12 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
           </Panel>
 
           <StepDiff
+            key={step.key}
             step={step}
             comments={stepComments}
             hints={review.hints}
             session={session}
+            model={review.ask_model}
             composing={composing}
             onCompose={setComposing}
           />
@@ -398,7 +400,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
             </span>
           </div>
           <p className="-mt-2 text-xs text-muted-foreground">
-            Haz clic en cualquier línea del diff para comentarla.
+            Selecciona líneas del diff (clic, y mayúsculas+clic para un rango) para preguntar sobre ellas o comentarlas.
             {step.symbol && (
               <>
                 {' '}

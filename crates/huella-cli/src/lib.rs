@@ -88,6 +88,19 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Pregunta sobre un trozo de código: `huella ask src/pago.ts:40-62 "¿por
+    /// qué reintenta tres veces?"`. Responde con la historia de esas líneas (qué
+    /// se pidió, qué explicó el agente, sus commits) y guarda la respuesta junto
+    /// a ellas.
+    Ask {
+        /// Fichero y líneas: `FICHERO:INICIO-FIN` o `FICHERO:LÍNEA`.
+        #[arg(value_name = "FICHERO:LÍNEAS")]
+        location: String,
+        /// La pregunta.
+        question: String,
+        #[command(flatten)]
+        model: ModelArgs,
+    },
     /// Busca en la memoria: peticiones, explicaciones del agente, ficheros,
     /// símbolos y decisiones. Sin tildes ni mayúsculas que importen.
     Search {
@@ -526,6 +539,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Adr { project, out, all } => adr(&open_store(cli.db)?, project, out, all),
         Command::Why { location, limit } => why(&open_store(cli.db)?, &location, limit),
+        Command::Ask { location, question, model } => ask_code(&open_store(cli.db)?, &location, &question, &model),
         Command::Decisions { action: DecisionsCommand::Extract { model, limit, chunk_chars, projects } } => {
             let extractor = build_model(&model)?;
             let mut store = open_store(cli.db)?;
@@ -1041,6 +1055,29 @@ fn why(store: &Store, location: &str, limit: usize) -> Result<()> {
         Some(memory) => print!("{}", huella_engine::render_markdown(&memory, limit)),
         None => println!("Huella no recuerda ninguna sesión que tocara {file}:{line}."),
     }
+    Ok(())
+}
+
+fn ask_code(store: &Store, location: &str, question: &str, model: &ModelArgs) -> Result<()> {
+    let (file, range) =
+        location.rsplit_once(':').context("usa el formato FICHERO:INICIO-FIN, por ejemplo src/app.ts:40-62")?;
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let number = |text: &str| text.trim().parse::<usize>().context("las líneas tienen que ser números");
+    let (start, end) = (number(start)?, number(end)?);
+    let path = fs::canonicalize(file).with_context(|| format!("no se encontró {file}"))?;
+    let llm = build_model(model)?;
+    eprintln!("Preguntando a {} sobre {file}:{start}-{end}…", llm.model_id());
+    let sources = sources(None)?;
+    let answer = huella_engine::code_ask::ask_code(
+        store,
+        Some(&sources),
+        llm.as_ref(),
+        &path,
+        "",
+        Some((start, end)),
+        question,
+    )?;
+    println!("{}", answer.answer);
     Ok(())
 }
 

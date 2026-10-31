@@ -273,6 +273,22 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, turn)
     );
 ",
+    // 14: preguntas sobre un trozo de código, ancladas al fichero y al texto
+    // seleccionado (no a números de línea, que cambian).
+    r"
+    CREATE TABLE code_question (
+        id              INTEGER PRIMARY KEY,
+        path            TEXT NOT NULL,
+        start_line      INTEGER NOT NULL,
+        end_line        INTEGER NOT NULL,
+        quote           TEXT NOT NULL,
+        question        TEXT NOT NULL,
+        answer          TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+    CREATE INDEX code_question_by_path ON code_question(path);
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -475,6 +491,34 @@ pub struct ReviewQuestion {
     pub answer: String,
     pub model: String,
     pub created_at: String,
+}
+
+/// Pregunta sobre un trozo de código y su respuesta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeQuestion {
+    pub id: i64,
+    pub path: String,
+    /// Líneas (1-based, inclusivas) cuando se preguntó.
+    pub start_line: usize,
+    pub end_line: usize,
+    /// El código seleccionado: sirve para volver a encontrarlo si se mueve.
+    pub quote: String,
+    pub question: String,
+    pub answer: String,
+    pub model: String,
+    pub created_at: String,
+}
+
+/// Lo que se guarda de una pregunta nueva sobre código.
+#[derive(Debug, Clone, Copy)]
+pub struct NewCodeQuestion<'a> {
+    pub path: &'a str,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub quote: &'a str,
+    pub question: &'a str,
+    pub answer: &'a str,
+    pub model: &'a str,
 }
 
 /// Worktree de git con el estado previo de la sesión en un commit y su
@@ -1192,6 +1236,61 @@ impl Store {
             params![session_id, step_key, redact(question), redact(answer), model],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Guarda una pregunta sobre un trozo de código, redactada.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_code_question(&self, new: &NewCodeQuestion<'_>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO code_question (path, start_line, end_line, quote, question, answer, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            params![
+                new.path,
+                i64::try_from(new.start_line).unwrap_or(i64::MAX),
+                i64::try_from(new.end_line).unwrap_or(i64::MAX),
+                redact(new.quote),
+                redact(new.question),
+                redact(new.answer),
+                new.model
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Preguntas sobre el código de un fichero, de la más antigua a la más reciente.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn code_questions(&self, path: &str) -> Result<Vec<CodeQuestion>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id, path, start_line, end_line, quote, question, answer, model, created_at
+             FROM code_question WHERE path = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([path], |row| {
+            let line = |index: usize| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
+            Ok(CodeQuestion {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                start_line: line(2)?,
+                end_line: line(3)?,
+                quote: row.get(4)?,
+                question: row.get(5)?,
+                answer: row.get(6)?,
+                model: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Borra una pregunta sobre código.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_code_question(&self, id: i64) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM code_question WHERE id = ?1", [id])? > 0)
     }
 
     /// Preguntas hechas a una sesión, de la más antigua a la más reciente.
@@ -2798,6 +2897,28 @@ mod tests {
         Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
         assert!(matches!(Store::open(&path), Err(StoreError::NewerSchema { found: 99, .. })));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn code_questions_are_kept_per_file_and_redacted() {
+        let store = Store::open_in_memory().unwrap();
+        let new = NewCodeQuestion {
+            path: "/r/a.ts",
+            start_line: 3,
+            end_line: 5,
+            quote: "const key = 'API_KEY=a8f3k2j9d0s7q1w4e6r5';",
+            question: "¿Por qué está aquí la clave?",
+            answer: "Porque API_KEY=a8f3k2j9d0s7q1w4e6r5 se leía antes del entorno.",
+            model: "fake:1",
+        };
+        let id = store.add_code_question(&new).unwrap();
+        store.add_code_question(&NewCodeQuestion { path: "/r/b.ts", ..new }).unwrap();
+        let found = store.code_questions("/r/a.ts").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].start_line, found[0].end_line), (3, 5));
+        assert!(!found[0].quote.contains("a8f3k2j9") && !found[0].answer.contains("a8f3k2j9"));
+        assert!(store.delete_code_question(id).unwrap());
+        assert_eq!(store.code_questions("/r/a.ts").unwrap(), Vec::new());
     }
 
     #[test]
