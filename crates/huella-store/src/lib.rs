@@ -289,6 +289,20 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX code_question_by_path ON code_question(path);
 ",
+    // 15: guía de cada paso (explicación, recorrido y comprobaciones) y qué
+    // comprobaciones marcó la persona.
+    r"
+    CREATE TABLE review_guide (
+        session_id      TEXT NOT NULL,
+        step_key        TEXT NOT NULL,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        guide           TEXT NOT NULL,
+        checked         TEXT NOT NULL DEFAULT '[]',
+        created_at      TEXT NOT NULL,
+        PRIMARY KEY (session_id, step_key)
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -540,6 +554,17 @@ pub struct StoredNarration {
     pub model: String,
     /// JSON tal como lo devolvió el modelo.
     pub narration: String,
+}
+
+/// Guía de un paso generada por un modelo, con las comprobaciones marcadas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGuide {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub guide: String,
+    /// Índices de las comprobaciones que la persona dio por hechas.
+    pub checked: Vec<usize>,
 }
 
 /// Cobertura de la petición de un turno, tal como la devolvió el modelo.
@@ -1450,6 +1475,82 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Guías guardadas de una sesión, por clave de paso.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn guides(&self, session_id: &str) -> Result<HashMap<String, StoredGuide>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT step_key, input_hash, model, guide, checked FROM review_guide WHERE session_id = ?1",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            let checked: String = row.get(4)?;
+            Ok((
+                row.get(0)?,
+                StoredGuide {
+                    input_hash: row.get(1)?,
+                    model: row.get(2)?,
+                    guide: row.get(3)?,
+                    checked: serde_json::from_str(&checked).unwrap_or_default(),
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Guarda (o sustituye) la guía de un paso. Una guía nueva empieza sin
+    /// comprobaciones marcadas: las de la anterior hablaban de otro texto.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_guide(
+        &self,
+        session_id: &str,
+        step_key: &str,
+        input_hash: &str,
+        model: &str,
+        guide: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_guide (session_id, step_key, input_hash, model, guide, checked, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, '[]', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id, step_key) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 guide = excluded.guide, checked = '[]', created_at = excluded.created_at",
+            params![session_id, step_key, input_hash, model, guide],
+        )?;
+        Ok(())
+    }
+
+    /// Marca o desmarca una comprobación de la guía de un paso. Devuelve
+    /// `false` si el paso no tiene guía.
+    ///
+    /// # Errors
+    /// Si falla la base de datos.
+    pub fn set_guide_check(&self, session_id: &str, step_key: &str, index: usize, done: bool) -> Result<bool> {
+        let Some(mut checked) = self
+            .conn
+            .query_row(
+                "SELECT checked FROM review_guide WHERE session_id = ?1 AND step_key = ?2",
+                params![session_id, step_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|text| serde_json::from_str::<Vec<usize>>(&text).unwrap_or_default())
+        else {
+            return Ok(false);
+        };
+        checked.retain(|&i| i != index);
+        if done {
+            checked.push(index);
+            checked.sort_unstable();
+        }
+        self.conn.execute(
+            "UPDATE review_guide SET checked = ?3 WHERE session_id = ?1 AND step_key = ?2",
+            params![session_id, step_key, serde_json::to_string(&checked).unwrap_or_else(|_| "[]".into())],
+        )?;
+        Ok(true)
     }
 
     /// Coberturas guardadas de una sesión, por turno.
@@ -2882,6 +2983,20 @@ mod tests {
         store.save_narration("s1", 3, &first).unwrap();
         let stored = store.narrations("s1").unwrap();
         assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
+    }
+
+    #[test]
+    fn guides_keep_their_checks_until_they_are_regenerated() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!store.set_guide_check("s1", "k", 0, true).unwrap());
+        store.save_guide("s1", "k", "h1", "m", "{}").unwrap();
+        assert!(store.set_guide_check("s1", "k", 2, true).unwrap());
+        store.set_guide_check("s1", "k", 0, true).unwrap();
+        store.set_guide_check("s1", "k", 2, false).unwrap();
+        assert_eq!(store.guides("s1").unwrap()["k"].checked, vec![0]);
+        store.save_guide("s1", "k", "h2", "m", "{}").unwrap();
+        let guide = &store.guides("s1").unwrap()["k"];
+        assert_eq!((guide.input_hash.as_str(), guide.checked.len()), ("h2", 0));
     }
 
     #[test]
