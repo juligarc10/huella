@@ -545,7 +545,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     }
     value["policy"] = json!({
         "preset": policy.preset, "source": policy.source, "levels": policy.levels, "default": policy.default,
-        "error": policy_error,
+        "checkpoints": policy.checkpoints, "error": policy_error,
     });
     value["guiding"] = json!(app.guiding.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     value["comprehension"] = serde_json::to_value(comprehension)?;
