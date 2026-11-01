@@ -13,6 +13,7 @@ import { ApiError } from '@/lib/api'
 import { ProjectProvider } from '@/lib/project'
 import { ThemeProvider } from '@/lib/theme'
 import { BranchPage } from '@/pages/branch'
+import { CodePage } from '@/pages/code'
 import { DecisionsPage } from '@/pages/decisions'
 import { ReviewPage } from '@/pages/review'
 import { SearchPage } from '@/pages/search'
@@ -42,6 +43,7 @@ const router = createHashRouter([
       { path: 'buscar', element: <SearchPage /> },
       { path: 'decisiones', element: <DecisionsPage /> },
       { path: 'simbolo', element: <SymbolPage /> },
+      { path: 'codigo', element: <CodePage /> },
       { path: 'sesiones', element: <SessionsPage /> },
       { path: 'sesiones/:session', element: <ReviewPage /> },
       { path: 'rama', element: <BranchPage /> },

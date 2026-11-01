@@ -9,6 +9,7 @@ let client: LanguageClient | undefined;
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(
     vscode.commands.registerCommand("huella.restart", restart),
+    vscode.commands.registerTextEditorCommand("huella.askSelection", askSelection),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("huella")) {
         void restart();
@@ -46,6 +47,21 @@ async function start(): Promise<void> {
       `Huella no pudo arrancar «${command}»: ${message}. Instálalo con «cargo install --path crates/huella-cli» o configura huella.serverPath.`,
     );
   }
+}
+
+/** Abre Huella para preguntar sobre las líneas seleccionadas (o la del cursor). */
+async function askSelection(editor: vscode.TextEditor): Promise<void> {
+  if (!client) {
+    void vscode.window.showErrorMessage("Huella no está en marcha.");
+    return;
+  }
+  const { start, end } = editor.selection;
+  // Una selección que acaba al principio de una línea no la incluye.
+  const last = end.line > start.line && end.character === 0 ? end.line : end.line + 1;
+  await client.sendRequest("workspace/executeCommand", {
+    command: "huella.askCode",
+    arguments: [{ uri: editor.document.uri.toString(), start: start.line + 1, end: last }],
+  });
 }
 
 async function restart(): Promise<void> {

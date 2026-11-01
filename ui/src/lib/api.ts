@@ -365,6 +365,14 @@ export interface PendingCodeAsk {
   error: string | null
 }
 
+export interface CodeFile {
+  /** Ruta tal como se pidió: el servidor la normaliza al guardar las preguntas. */
+  path: string
+  lines: string[]
+  /** El fichero es más grande de lo que se muestra. */
+  truncated: boolean
+}
+
 export interface CodeQuestionsResult {
   questions: CodeQuestion[]
   pending: PendingCodeAsk[]
