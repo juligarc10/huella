@@ -30,7 +30,10 @@ Everything stays on your machine.
 2. **Work as usual with your agent.** Huella indexes its sessions on its own:
    the editor extension every few seconds, the app when it opens.
 3. **While coding**, hover a function to see why it exists: the request, the
-   agent's explanation, the session, and whether the code changed since.
+   agent's explanation, the session, and whether the code changed since. To
+   ask about any lines, select them and pick **Huella: ask about these lines**
+   among the code actions (also in VS Code's context menu): Huella opens with
+   that code selected, and the answer then shows up in the hover of those lines.
 4. **After a session**, review it in `huella ui` (or in Zed's git diff with
    `huella review zed`): steps in flow order, unexplained lines in amber, a
    verdict per step (fine, change, undo), comments on any line and questions to

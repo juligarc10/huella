@@ -99,6 +99,15 @@ desaparece). Zed debe ver
 lanzaste antes de instalar Rust). Zed muestra el hover; los `CodeLens` puede
 no pintarlos.
 
+**Preguntar desde el editor**: selecciona unas líneas y elige «Huella: preguntar
+sobre estas líneas» entre las acciones de código (`⌘.` en Zed, `Ctrl+.` o el
+menú contextual en VS Code). Se abre Huella en el navegador con ese código
+seleccionado para escribir la pregunta (el servidor del editor arranca la
+aplicación la primera vez, sin puerto fijo); la respuesta se queda anclada al
+código y sale en el hover de esas líneas, con un `CodeLens` que cuenta las
+preguntas. Usa el mismo modelo que el resto (`config.toml` o las variables
+`HUELLA_LLM_*`).
+
 **Agentes (MCP)**: `huella setup` los registra. A mano, por ejemplo en Claude
 Code:
 
@@ -486,8 +495,9 @@ cadenas de conexión y valores aleatorios asignados a nombres como `API_KEY` o
    los renombrados del propio agente. El hover lo indica («renombrado desde
    `register` en `user.ts`»).
 5. **Servidor LSP** (`huella-lsp`) y extensiones de VS Code y Zed: hover con
-   las últimas ediciones del símbolo, `CodeLens` con su actividad y los pasos
-   pendientes de la revisión activa como diagnosis. Un hilo indexa en segundo
+   las últimas ediciones del símbolo y las preguntas sobre esas líneas,
+   `CodeLens` con su actividad, los pasos pendientes de la revisión activa como
+   diagnosis y una acción para preguntar sobre cualquier selección. Un hilo indexa en segundo
    plano.
 6. **Revisión** (`huella-review`): diff neto con el origen de cada línea, plan
    por turnos y flujo, y puntos de atención.
