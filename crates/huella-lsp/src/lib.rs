@@ -3,7 +3,9 @@
 //! - **Hover**: al pasar el ratón por una función, las ediciones que la
 //!   tocaron, con la petición y la explicación del agente.
 //! - **`CodeLens`**: encima de cada símbolo con historia, cuántas ediciones y
-//!   sesiones lo tocaron.
+//!   sesiones lo tocaron, y cuántas preguntas se hicieron de cada trozo.
+//! - **Preguntar**: una acción de código sobre cualquier selección abre
+//!   Huella para preguntar por esas líneas; las respuestas salen en el hover.
 //!
 //! Un hilo aparte indexa las transcripciones nuevas periódicamente con su
 //! propia conexión a SQLite (WAL permite leer mientras se escribe) y pide al
@@ -12,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +33,10 @@ use lsp_types::{
 
 /// Ediciones que se muestran en el hover; el resto se resume en una línea.
 const HOVER_ENTRIES: usize = 3;
+/// Caracteres de cada respuesta en el hover.
+const HOVER_ANSWER: usize = 1500;
+/// Comando de la acción «preguntar sobre estas líneas».
+pub const ASK_CODE: &str = "huella.askCode";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -54,6 +61,33 @@ pub struct Config {
     /// Agentes cuyas sesiones se indexan en segundo plano; `None` desactiva el indexado.
     pub sources: Option<huella_engine::Sources>,
     pub index_every: Duration,
+    /// Abre Huella para preguntar sobre unas líneas; `None` quita la acción.
+    pub ask: Option<AskOpener>,
+}
+
+/// Líneas sobre las que se quiere preguntar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskTarget {
+    pub path: PathBuf,
+    /// 1-based e inclusivas.
+    pub start_line: usize,
+    pub end_line: usize,
+    /// Nombre del editor (`clientInfo`), para que Huella sepa adónde volver.
+    pub client: Option<String>,
+}
+
+/// Abre la página de preguntar de Huella. El servidor LSP no puede pedir
+/// texto al editor: la pregunta se escribe allí.
+#[derive(Clone)]
+pub struct AskOpener(pub Arc<OpenAsk>);
+
+/// Abre Huella sobre esas líneas, o dice por qué no pudo.
+pub type OpenAsk = dyn Fn(&AskTarget) -> std::result::Result<(), String> + Send + Sync;
+
+impl std::fmt::Debug for AskOpener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AskOpener")
+    }
 }
 
 /// Sirve por stdin/stdout hasta que el editor cierra la sesión.
@@ -79,7 +113,7 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(false) }),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
-            commands: vec![review::MARK_REVIEWED.to_owned()],
+            commands: vec![review::MARK_REVIEWED.to_owned(), ASK_CODE.to_owned()],
             ..lsp_types::ExecuteCommandOptions::default()
         }),
         ..ServerCapabilities::default()
@@ -91,6 +125,7 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(result)?)?;
     let params: InitializeParams = serde_json::from_value(params)?;
+    let client = params.client_info.as_ref().map(|info| info.name.clone());
     let can_refresh_lenses = params
         .capabilities
         .workspace
@@ -105,6 +140,8 @@ pub fn serve(connection: &Connection, config: &Config) -> Result<()> {
         sources: config.sources.clone(),
         review: None,
         published: HashSet::new(),
+        ask: config.ask.clone(),
+        client,
     };
     server.reload_review();
     if server.review.is_some() {
@@ -175,6 +212,9 @@ struct Server {
     review: Option<review::ActiveReview>,
     /// Documentos con diagnosis publicadas, para poder vaciarlas.
     published: HashSet<String>,
+    ask: Option<AskOpener>,
+    /// Nombre del editor.
+    client: Option<String>,
 }
 
 impl Server {
@@ -271,7 +311,7 @@ impl Server {
             CodeLensRequest::METHOD => parse::<lsp_types::CodeLensParams>(request)
                 .map(|params| serde_json::to_value(self.code_lenses(&params.text_document.uri))),
             lsp_types::request::CodeActionRequest::METHOD => parse::<lsp_types::CodeActionParams>(request)
-                .map(|params| serde_json::to_value(code_actions(&params.context.diagnostics))),
+                .map(|params| serde_json::to_value(self.code_actions(&params))),
             lsp_types::request::ExecuteCommand::METHOD => parse::<lsp_types::ExecuteCommandParams>(request)
                 .map(|params| serde_json::to_value(self.execute(&params))),
             _ => return Response::new_err(id, ErrorCode::MethodNotFound as i32, "método no soportado".into()),
@@ -308,8 +348,52 @@ impl Server {
         }
     }
 
-    /// `huella.markReviewed`: guarda la marca del paso de la diagnosis.
+    /// Las de la revisión activa (marcar pasos) y, con cualquier selección,
+    /// preguntar sobre esas líneas.
+    fn code_actions(&self, params: &lsp_types::CodeActionParams) -> Vec<lsp_types::CodeActionOrCommand> {
+        let mut actions = code_actions(&params.context.diagnostics);
+        if self.ask.is_some() && uri_to_path(params.text_document.uri.as_str()).is_some() {
+            let range = params.range;
+            let start = range.start.line as usize + 1;
+            // Una selección que acaba al principio de una línea no la incluye.
+            let end = if range.end.line > range.start.line && range.end.character == 0 {
+                range.end.line as usize
+            } else {
+                range.end.line as usize + 1
+            };
+            let lines = if start == end { "esta línea".to_owned() } else { format!("las líneas {start}–{end}") };
+            actions.push(lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+                title: format!("Huella: preguntar sobre {lines}"),
+                command: Some(Command {
+                    title: "Preguntar en Huella".into(),
+                    command: ASK_CODE.into(),
+                    arguments: Some(vec![serde_json::json!({
+                        "uri": params.text_document.uri.as_str(), "start": start, "end": end,
+                    })]),
+                }),
+                ..lsp_types::CodeAction::default()
+            }));
+        }
+        actions
+    }
+
+    /// `huella.markReviewed` guarda la marca del paso de la diagnosis;
+    /// `huella.askCode` abre Huella para preguntar.
     fn execute(&self, params: &lsp_types::ExecuteCommandParams) -> Option<serde_json::Value> {
+        if params.command == ASK_CODE {
+            let data = params.arguments.first()?;
+            let line = |key: &str| data[key].as_u64().and_then(|n| usize::try_from(n).ok());
+            let target = AskTarget {
+                path: uri_to_path(data["uri"].as_str()?)?,
+                start_line: line("start")?,
+                end_line: line("end")?,
+                client: self.client.clone(),
+            };
+            if let Some(Err(error)) = self.ask.as_ref().map(|ask| (ask.0)(&target)) {
+                eprintln!("huella: no se pudo abrir Huella para preguntar: {error}");
+            }
+            return None;
+        }
         let review = self.review.as_ref()?;
         if params.command != review::MARK_REVIEWED {
             return None;
@@ -322,18 +406,48 @@ impl Server {
         None
     }
 
+    /// La historia del símbolo bajo el cursor y las preguntas que se hicieron
+    /// sobre esa línea.
     fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
         let (path, source) = self.document(uri)?;
         let line = usize::try_from(position.line).ok()? + 1;
         let memory = huella_engine::memory_at(&self.store, &path, source, line)
             .inspect_err(|error| eprintln!("huella: hover en {}: {error}", path.display()))
-            .ok()??;
+            .ok()
+            .flatten();
+        let questions: Vec<_> = huella_engine::code_ask::questions_in(&self.store, &path, source)
+            .inspect_err(|error| eprintln!("huella: preguntas de {}: {error}", path.display()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|located| located.lines.is_some_and(|(start, end)| (start..=end).contains(&line)))
+            .collect();
+        let mut value =
+            memory.as_ref().map(|memory| huella_engine::render_markdown(memory, HOVER_ENTRIES)).unwrap_or_default();
+        for located in &questions {
+            if !value.is_empty() {
+                value.push_str("\n\n---\n\n");
+            }
+            let question = &located.question;
+            let _ = write!(
+                value,
+                "**Preguntaste:** {}\n\n{}\n\n_{} · {}_",
+                question.question,
+                clip(&question.answer, HOVER_ANSWER),
+                question.model.split_once(':').map_or(question.model.as_str(), |(_, model)| model),
+                question.created_at.get(..10).unwrap_or_default()
+            );
+        }
+        if value.is_empty() {
+            return None;
+        }
+        let range = match (&memory, questions.first().and_then(|located| located.lines)) {
+            (Some(memory), _) => line_range(memory.symbol.start_line, memory.symbol.end_line),
+            (None, Some((start, end))) => line_range(start, end),
+            (None, None) => return None,
+        };
         Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: huella_engine::render_markdown(&memory, HOVER_ENTRIES),
-            }),
-            range: Some(line_range(memory.symbol.start_line, memory.symbol.end_line)),
+            contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value }),
+            range: Some(range),
         })
     }
 
@@ -342,18 +456,27 @@ impl Server {
         let lenses = huella_engine::lenses(&self.store, &path, source)
             .inspect_err(|error| eprintln!("huella: CodeLens en {}: {error}", path.display()))
             .unwrap_or_default();
+        // Sin comando: el texto informa y el hover da el detalle.
+        let lens = |line: usize, title: String| CodeLens {
+            range: line_range(line, line),
+            command: Some(Command { title, command: String::new(), arguments: None }),
+            data: None,
+        };
+        let mut questions: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        for located in huella_engine::code_ask::questions_in(&self.store, &path, source).unwrap_or_default() {
+            if let Some((start, _)) = located.lines {
+                *questions.entry(start).or_default() += 1;
+            }
+        }
         lenses
             .into_iter()
-            .map(|lens| CodeLens {
-                range: line_range(lens.symbol.start_line, lens.symbol.start_line),
-                command: Some(Command {
-                    title: lens_title(&lens.activity),
-                    // Sin comando: el texto informa y el hover da el detalle.
-                    command: String::new(),
-                    arguments: None,
-                }),
-                data: None,
-            })
+            .map(|found| lens(found.symbol.start_line, lens_title(&found.activity)))
+            .chain(questions.into_iter().map(|(line, count)| {
+                lens(
+                    line,
+                    if count == 1 { "Huella · 1 pregunta".into() } else { format!("Huella · {count} preguntas") },
+                )
+            }))
             .collect()
     }
 
@@ -403,6 +526,13 @@ fn parse_notification<P: serde::de::DeserializeOwned>(
     notification: Notification,
 ) -> std::result::Result<P, serde_json::Error> {
     serde_json::from_value(notification.params)
+}
+
+fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }
 }
 
 fn lens_title(activity: &huella_store::SymbolActivity) -> String {

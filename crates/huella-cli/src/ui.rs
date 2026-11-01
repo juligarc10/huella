@@ -181,13 +181,49 @@ pub(crate) fn dispatch(app: &mut App, method: &str, path: &str, query: &str, bod
 }
 
 pub fn serve(options: Options) -> Result<()> {
+    let (dev, open_browser) = (options.dev, options.open_browser);
+    let Bound { server, mut app, url } = bind(options, true)?;
+    if dev && Assets::get("index.html").is_none() {
+        println!("(sin ui/dist: la interfaz la sirve Vite)");
+    }
+    println!("Huella en {url}");
+    println!("Ctrl+C para terminar.");
+    if open_browser {
+        crate::web::open_in_browser(&url);
+    }
+    run(&server, &mut app);
+    Ok(())
+}
+
+/// Arranca la aplicación en un hilo, sin escribir nada (desde el servidor del
+/// editor, la salida es el protocolo) ni indexar (ya lo hace él). Devuelve la
+/// URL de entrada, con el token.
+///
+/// # Errors
+/// Si no se puede abrir el puerto o la base de datos.
+pub(crate) fn spawn(options: Options) -> Result<String> {
+    let Bound { server, mut app, url } = bind(options, false)?;
+    std::thread::spawn(move || run(&server, &mut app));
+    Ok(url)
+}
+
+/// Servidor escuchando y su aplicación, aún sin atender peticiones.
+struct Bound {
+    server: Server,
+    app: App,
+    url: String,
+}
+
+fn bind(options: Options, index: bool) -> Result<Bound> {
     // El puerto pedido; si está ocupado (otra `huella ui` abierta), uno libre.
     let server = Server::http(("127.0.0.1", options.port))
         .or_else(|_| Server::http(("127.0.0.1", 0)))
         .map_err(|error| anyhow::anyhow!("no se pudo abrir el servidor local: {error}"))?;
     let port = server.server_addr().to_ip().context("dirección del servidor desconocida")?.port();
     let mut store = Store::open(&options.db).with_context(|| format!("abriendo {}", options.db.display()))?;
-    huella_engine::index(&mut store, &options.sources)?;
+    if index {
+        huella_engine::index(&mut store, &options.sources)?;
+    }
     let token = crate::web::token("huella-ui");
     let mut allowed_hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let page_port = if options.dev {
@@ -200,20 +236,15 @@ pub fn serve(options: Options) -> Result<()> {
     let mut app = App::new(store, options.db, options.sources, options.editor, options.model);
     app.token = token;
     app.allowed_hosts = allowed_hosts;
-    if options.dev && Assets::get("index.html").is_none() {
-        println!("(sin ui/dist: la interfaz la sirve Vite)");
-    }
-    println!("Huella en {url}");
-    println!("Ctrl+C para terminar.");
-    if options.open_browser {
-        crate::web::open_in_browser(&url);
-    }
+    Ok(Bound { server, app, url })
+}
+
+fn run(server: &Server, app: &mut App) {
     for request in server.incoming_requests() {
-        if let Err(error) = handle(&mut app, request) {
+        if let Err(error) = handle(app, request) {
             eprintln!("aviso: {error:#}");
         }
     }
-    Ok(())
 }
 
 fn handle(app: &mut App, mut request: Request) -> Result<()> {
@@ -270,6 +301,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["comments", id]) => update_comment(app, id, body)?,
         ("POST", ["code", "ask"]) => return ask_code(app, body),
         ("GET", ["code", "questions"]) => code_questions(app, params)?,
+        ("GET", ["code", "file"]) => code_file(params)?,
         ("POST", ["code", "questions", id, "delete"]) => {
             json!({"deleted": app.store.delete_code_question(id.parse().context("id no válido")?)?})
         }
@@ -850,6 +882,22 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
         }
     });
     Ok((202, json!({"asking": true})))
+}
+
+/// Ficheros más grandes no se muestran enteros en la página de preguntar.
+const MAX_CODE_FILE: usize = 2 * 1024 * 1024;
+
+/// El contenido actual de un fichero, para preguntar sobre él.
+fn code_file(params: &HashMap<String, String>) -> Result<Value> {
+    let path = PathBuf::from(non_empty(params.get("path")).context("falta el fichero")?);
+    let bytes = std::fs::read(&path).with_context(|| format!("no se pudo leer {}", path.display()))?;
+    let truncated = bytes.len() > MAX_CODE_FILE;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_CODE_FILE)]).into_owned();
+    Ok(json!({
+        "path": path,
+        "lines": text.lines().collect::<Vec<_>>(),
+        "truncated": truncated,
+    }))
 }
 
 /// Preguntas sobre el código de un fichero, con sus líneas actuales, y las que

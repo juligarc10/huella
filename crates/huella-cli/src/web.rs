@@ -4,6 +4,8 @@
 //! aleatorio que va en la URL: así ninguna otra web abierta en el navegador
 //! puede leer la revisión ni marcar pasos.
 
+use std::fmt::Write as _;
+
 use anyhow::{Context, Result};
 use huella_review::flow::FlowStep;
 use huella_review::{DiffLine, ExternalReason, SessionReview, Step};
@@ -182,6 +184,19 @@ pub(crate) fn token(session: &str) -> String {
     hasher.finalize().to_hex()[..32].to_owned()
 }
 
+/// Codifica un valor para la query de una URL.
+pub(crate) fn encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 pub(crate) fn open_in_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -190,7 +205,12 @@ pub(crate) fn open_in_browser(url: &str) {
     } else {
         "xdg-open"
     };
-    if let Err(error) = std::process::Command::new(opener).arg(url).spawn() {
+    if let Err(error) = std::process::Command::new(opener)
+        .arg(url)
+        // Desde el servidor del editor, la salida estándar es el protocolo.
+        .stdout(std::process::Stdio::null())
+        .spawn()
+    {
         eprintln!("No se pudo abrir el navegador ({error}); abre la URL a mano.");
     }
 }

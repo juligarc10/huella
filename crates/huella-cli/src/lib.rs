@@ -226,6 +226,9 @@ enum Command {
         /// Segundos entre indexados en segundo plano; 0 lo desactiva.
         #[arg(long, default_value_t = 30)]
         index_every: u64,
+        /// Modelo para las preguntas que se hacen desde el editor.
+        #[command(flatten)]
+        model: ModelArgs,
     },
 }
 
@@ -594,7 +597,7 @@ fn run(cli: Cli) -> Result<()> {
             let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
             mcp::serve(&mut context)
         }
-        Command::Lsp { projects, index_every } => lsp(cli.db, projects, index_every),
+        Command::Lsp { projects, index_every, model } => lsp(cli.db, projects, index_every, model),
     }
 }
 
@@ -977,12 +980,49 @@ fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()>
 }
 
 /// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.
-fn lsp(db: Option<PathBuf>, projects: Option<PathBuf>, index_every: u64) -> Result<()> {
+fn lsp(db: Option<PathBuf>, projects: Option<PathBuf>, index_every: u64, model: ModelArgs) -> Result<()> {
     let db = db.or_else(huella_engine::default_db_path).context("no se encontró dónde guardar datos; usa --db")?;
-    let sources = if index_every == 0 { None } else { Some(sources(projects)?) };
-    let config = huella_lsp::Config { db, sources, index_every: Duration::from_secs(index_every.max(1)) };
+    let all = sources(projects)?;
+    let ask = ask_opener(db.clone(), all.clone(), model);
+    let sources = if index_every == 0 { None } else { Some(all) };
+    let config =
+        huella_lsp::Config { db, sources, index_every: Duration::from_secs(index_every.max(1)), ask: Some(ask) };
     huella_lsp::serve_stdio(&config)?;
     Ok(())
+}
+
+/// Lo que hace la acción «preguntar» del editor: arranca la aplicación en
+/// segundo plano la primera vez y abre su página de preguntar en el navegador.
+fn ask_opener(db: PathBuf, sources: huella_engine::Sources, model: ModelArgs) -> huella_lsp::AskOpener {
+    let started: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    huella_lsp::AskOpener(std::sync::Arc::new(move |target: &huella_lsp::AskTarget| {
+        let mut started = started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if started.is_none() {
+            let editor = match target.client.as_deref() {
+                Some(name) if name.to_lowercase().contains("zed") => web::Editor::Zed,
+                _ => web::Editor::Vscode,
+            };
+            let options = ui::Options {
+                port: 0,
+                open_browser: false,
+                editor,
+                dev: false,
+                db: db.clone(),
+                sources: sources.clone(),
+                model: model.clone(),
+            };
+            *started = Some(ui::spawn(options).map_err(|error| format!("{error:#}"))?);
+        }
+        let base = started.as_deref().unwrap_or_default();
+        let path = target.path.display().to_string();
+        web::open_in_browser(&format!(
+            "{base}#/codigo?path={}&from={}&to={}",
+            web::encode_query(&path),
+            target.start_line,
+            target.end_line
+        ));
+        Ok(())
+    }))
 }
 
 /// `huella ui`: la aplicación local.

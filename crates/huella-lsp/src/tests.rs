@@ -137,7 +137,74 @@ fn config(fixture: &Fixture, projects: Option<&Path>) -> Config {
         db: fixture.db.clone(),
         sources: projects.map(huella_engine::Sources::claude_code),
         index_every: Duration::from_secs(3600),
+        ask: None,
     }
+}
+
+#[test]
+fn any_selection_can_be_asked_about_in_huella() {
+    let fixture = Fixture::new("ask");
+    let opened = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&opened);
+    let mut config = config(&fixture, None);
+    config.ask = Some(AskOpener(Arc::new(move |target: &AskTarget| {
+        seen.lock().unwrap().push(target.clone());
+        Ok(())
+    })));
+    let mut client = Client::start(config, false);
+    let uri = fixture.uri();
+    client.open(&uri, V2);
+    // Seleccionar las líneas 2 y 3 enteras: el final cae al principio de la 4.
+    let range = json!({"start": {"line": 1, "character": 0}, "end": {"line": 3, "character": 0}});
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({"textDocument": {"uri": uri}, "range": range, "context": {"diagnostics": []}}),
+    );
+    let action = &actions[0];
+    assert_eq!(action["title"], "Huella: preguntar sobre las líneas 2–3");
+    client.request("workspace/executeCommand", action["command"].clone());
+    let opened = opened.lock().unwrap().clone();
+    assert_eq!(opened, vec![AskTarget { path: fixture.source.clone(), start_line: 2, end_line: 3, client: None }]);
+    client.shutdown();
+}
+
+#[test]
+fn answers_to_questions_show_up_in_the_hover_and_lenses() {
+    let fixture = Fixture::new("answers");
+    fixture.index();
+    Store::open(&fixture.db)
+        .unwrap()
+        .add_code_question(&huella_store::NewCodeQuestion {
+            path: &huella_engine::normalize_path(&fixture.source, None),
+            start_line: 3,
+            end_line: 3,
+            quote: "    return save(email.trim());",
+            question: "¿Por qué trim?",
+            answer: "Para no guardar espacios del formulario.",
+            model: "openai-compatible:qwen",
+        })
+        .unwrap();
+    let mut client = Client::start(config(&fixture, None), false);
+    let uri = fixture.uri();
+    // Una línea más arriba: la pregunta sigue a su código.
+    client.open(&uri, &format!("// cabecera\n{V2}"));
+    let text = client.hover(&uri, 3)["contents"]["value"].as_str().unwrap().to_owned();
+    assert!(text.contains("`UserService.register`"), "{text}");
+    assert!(
+        text.contains("**Preguntaste:** ¿Por qué trim?\n\nPara no guardar espacios del formulario.\n\n_qwen · "),
+        "{text}"
+    );
+    assert!(!client.hover(&uri, 2)["contents"]["value"].as_str().unwrap().contains("Preguntaste"));
+    let lenses = client.request("textDocument/codeLens", json!({"textDocument": {"uri": uri}}));
+    assert!(
+        lenses
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lens| lens["command"]["title"] == "Huella · 1 pregunta" && lens["range"]["start"]["line"] == 3),
+        "{lenses}"
+    );
+    client.shutdown();
 }
 
 #[test]

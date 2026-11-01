@@ -133,12 +133,20 @@ pub fn ask_code(
 /// # Errors
 /// Si falla la base de datos.
 pub fn questions_for(store: &Store, path: &Path) -> Result<Vec<LocatedQuestion>> {
-    let source = std::fs::read_to_string(path).unwrap_or_default();
+    questions_in(store, path, &std::fs::read_to_string(path).unwrap_or_default())
+}
+
+/// Como [`questions_for`], pero sobre `source`: el texto que tiene el editor,
+/// aunque no esté guardado.
+///
+/// # Errors
+/// Si falla la base de datos.
+pub fn questions_in(store: &Store, path: &Path, source: &str) -> Result<Vec<LocatedQuestion>> {
     Ok(store
         .code_questions(&normalize_path(path, None))?
         .into_iter()
         .map(|question| {
-            let lines = locate(&source, &question.quote, Some(question.start_line));
+            let lines = locate(source, &question.quote, Some(question.start_line));
             LocatedQuestion { question, lines }
         })
         .collect())
