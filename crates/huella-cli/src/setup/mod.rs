@@ -6,6 +6,7 @@
 
 mod agents;
 mod editors;
+mod hooks;
 mod model;
 mod wizard;
 
@@ -129,6 +130,9 @@ pub fn checks(context: &Context<'_>, online: bool) -> Vec<Check> {
             checks.push(check);
         }
     }
+    if McpAgent::ClaudeCode.detected(context.dirs) {
+        checks.push(hooks_check(context.dirs, &exe));
+    }
     checks.extend(editor_checks(context.dirs));
     checks
 }
@@ -205,6 +209,16 @@ fn agent_check(agent: McpAgent, dirs: &Dirs, exe: &Path) -> Option<Check> {
         }
         Err(error) => Check::new(area, Status::Warn, format!("{error:#}")).hint(agent.manual(dirs, exe)),
     })
+}
+
+fn hooks_check(dirs: &Dirs, exe: &Path) -> Check {
+    let area = "Puntos de control · Claude Code";
+    match hooks::installed(dirs) {
+        Ok(true) => Check::new(area, Status::Ok, "hooks instalados"),
+        Ok(false) => Check::new(area, Status::Warn, "sin hooks: no avisa de lo obligatorio al acabar cada turno")
+            .hint("huella setup los instala"),
+        Err(error) => Check::new(area, Status::Warn, format!("{error:#}")).hint(hooks::manual(dirs, exe)),
+    }
 }
 
 fn editor_checks(dirs: &Dirs) -> Vec<Check> {

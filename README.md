@@ -157,6 +157,18 @@ and the triage. Guides are kept, marked stale when the step changes, and can be
 prepared for every must-review step in the background, or from the terminal
 with `huella review guide <session> [--all | --step N]`.
 
+**Checkpoints** keep the review at the agent's pace: `huella setup` adds two
+Claude Code hooks. When a turn ends, Claude Code tells you how many must-review
+steps are still without a verdict; with `block_after` set in `.huella.toml`, the
+agent can't keep editing past that many until you review them. A failure in
+Huella never stops the agent.
+
+```toml
+[checkpoints]
+notify = true     # tell you at the end of each turn (default)
+block_after = 5   # stop the agent at 5 unreviewed must-review steps (default: never)
+```
+
 **Branch** reviews what you are about to ship: the diff against the base
 branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.

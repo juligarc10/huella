@@ -37,6 +37,25 @@ pub enum Tag {
 }
 
 impl Tag {
+    /// Nombre para personas.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Security => "seguridad",
+            Self::Data => "datos",
+            Self::PublicApi => "API pública",
+            Self::Dependencies => "dependencias",
+            Self::Unrequested => "no pedido",
+            Self::Unverified => "sin probar",
+            Self::Unexplained => "sin explicación",
+            Self::Config => "configuración",
+            Self::Tests => "tests",
+            Self::Docs => "documentación",
+            Self::Generated => "generado",
+            Self::Formatting => "solo formato",
+        }
+    }
+
     pub const ALL: [Self; 12] = [
         Self::Security,
         Self::Data,
@@ -92,6 +111,24 @@ pub struct StepTriage {
 #[serde(default, deny_unknown_fields)]
 struct PolicyFile {
     review: ReviewSection,
+    checkpoints: Checkpoints,
+}
+
+/// Puntos de control mientras el agente trabaja (`[checkpoints]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Checkpoints {
+    /// Al acabar cada turno, avisar de lo obligatorio que sigue sin revisar.
+    pub notify: bool,
+    /// Con tantos pasos obligatorios sin veredicto, el agente no puede seguir
+    /// editando hasta que se revisen. `None`: nunca se le para.
+    pub block_after: Option<usize>,
+}
+
+impl Default for Checkpoints {
+    fn default() -> Self {
+        Self { notify: true, block_after: None }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -113,6 +150,7 @@ pub struct Policy {
     pub default: Level,
     /// De dónde sale: el fichero del repositorio, o `None` si es la de por defecto.
     pub source: Option<PathBuf>,
+    pub checkpoints: Checkpoints,
 }
 
 impl Default for Policy {
@@ -141,7 +179,13 @@ impl Policy {
             Preset::Balanced => Acknowledge,
             Preset::Light => Skip,
         };
-        Self { preset, levels: Tag::ALL.iter().map(|&tag| (tag, level(tag))).collect(), default, source: None }
+        Self {
+            preset,
+            levels: Tag::ALL.iter().map(|&tag| (tag, level(tag))).collect(),
+            default,
+            source: None,
+            checkpoints: Checkpoints::default(),
+        }
     }
 
     /// El nivel de un paso: el más alto de sus etiquetas, o el de por defecto.
@@ -164,6 +208,7 @@ impl Policy {
             policy.default = default;
         }
         policy.source = Some(source);
+        policy.checkpoints = file.checkpoints;
         policy
     }
 }
@@ -569,6 +614,14 @@ mod tests {
         assert_eq!(policy.levels[&Tag::Unverified], Level::Skip);
         assert_eq!(policy.default, Level::Acknowledge);
         assert!(policy.source.is_some());
+        assert_eq!(policy.checkpoints, Checkpoints { notify: true, block_after: None });
+
+        std::fs::write(dir.join(POLICY_FILE), "[checkpoints]\nnotify = false\nblock_after = 5\n").unwrap();
+        let policy = load_policy(Some(&dir)).unwrap();
+        assert_eq!(
+            (policy.preset, policy.checkpoints),
+            (Preset::Balanced, Checkpoints { notify: false, block_after: Some(5) })
+        );
 
         std::fs::write(dir.join(POLICY_FILE), "[review]\npreset = \"loose\"\n").unwrap();
         assert!(load_policy(Some(&dir)).is_err(), "una errata no pasa en silencio");

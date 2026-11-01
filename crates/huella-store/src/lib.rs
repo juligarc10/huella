@@ -303,6 +303,16 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, step_key)
     );
 ",
+    // 16: lo último que se contó de una sesión al acabar un turno, para que el
+    // agente no tenga que esperar a recalcular la revisión en cada edición.
+    r"
+    CREATE TABLE session_checkpoint (
+        session_id      TEXT PRIMARY KEY,
+        must_total      INTEGER NOT NULL,
+        must_pending    INTEGER NOT NULL,
+        checked_at      TEXT NOT NULL
+    );
+",
 ];
 
 /// Edición ya anclada, lista para guardar.
@@ -565,6 +575,13 @@ pub struct StoredGuide {
     pub guide: String,
     /// Índices de las comprobaciones que la persona dio por hechas.
     pub checked: Vec<usize>,
+}
+
+/// Recuento de lo obligatorio de una sesión en su último punto de control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredCheckpoint {
+    pub must_total: usize,
+    pub must_pending: usize,
 }
 
 /// Cobertura de la petición de un turno, tal como la devolvió el modelo.
@@ -1551,6 +1568,43 @@ impl Store {
             params![session_id, step_key, serde_json::to_string(&checked).unwrap_or_else(|_| "[]".into())],
         )?;
         Ok(true)
+    }
+
+    /// Último punto de control de una sesión.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn checkpoint(&self, session_id: &str) -> Result<Option<StoredCheckpoint>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT must_total, must_pending FROM session_checkpoint WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    let (total, pending): (i64, i64) = (row.get(0)?, row.get(1)?);
+                    Ok(StoredCheckpoint {
+                        must_total: usize::try_from(total).unwrap_or_default(),
+                        must_pending: usize::try_from(pending).unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Guarda (o sustituye) el punto de control de una sesión.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_checkpoint(&self, session_id: &str, checkpoint: StoredCheckpoint) -> Result<()> {
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        self.conn.execute(
+            "INSERT INTO session_checkpoint (session_id, must_total, must_pending, checked_at)
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(session_id) DO UPDATE SET must_total = excluded.must_total,
+                 must_pending = excluded.must_pending, checked_at = excluded.checked_at",
+            params![session_id, count(checkpoint.must_total), count(checkpoint.must_pending)],
+        )?;
+        Ok(())
     }
 
     /// Coberturas guardadas de una sesión, por turno.
@@ -2983,6 +3037,15 @@ mod tests {
         store.save_narration("s1", 3, &first).unwrap();
         let stored = store.narrations("s1").unwrap();
         assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
+    }
+
+    #[test]
+    fn checkpoints_are_replaced_per_session() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.checkpoint("s1").unwrap(), None);
+        store.save_checkpoint("s1", StoredCheckpoint { must_total: 4, must_pending: 3 }).unwrap();
+        store.save_checkpoint("s1", StoredCheckpoint { must_total: 5, must_pending: 1 }).unwrap();
+        assert_eq!(store.checkpoint("s1").unwrap(), Some(StoredCheckpoint { must_total: 5, must_pending: 1 }));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 mod config;
 pub mod desktop;
+mod hook;
 mod mcp;
 mod report;
 mod review;
@@ -211,6 +212,15 @@ enum Command {
     Review {
         #[command(subcommand)]
         action: ReviewCommand,
+    },
+    /// Puntos de control para los hooks de Claude Code: lee el evento por
+    /// stdin. `huella setup` los instala.
+    Hook {
+        #[arg(value_enum)]
+        event: hook::HookEvent,
+        /// Carpeta de transcripciones (por defecto ~/.claude/projects).
+        #[arg(long)]
+        projects: Option<PathBuf>,
     },
     /// Servidor MCP por stdin/stdout para que los agentes consulten la memoria.
     Mcp {
@@ -593,6 +603,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Review { action } => review_command(cli.db, action),
+        Command::Hook { event, projects } => hook::run(event, cli.db, projects),
         Command::Mcp { projects } => {
             let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
             mcp::serve(&mut context)

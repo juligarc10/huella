@@ -108,6 +108,10 @@ pub fn setup(
     if !any_agent {
         println!("No se encontró ningún agente compatible (Claude Code, Codex, Copilot).");
     }
+    if McpAgent::ClaudeCode.detected(dirs) {
+        step("Puntos de control (Claude Code)");
+        checkpoints_step(&prompt, dirs, &exe)?;
+    }
 
     step("Editores");
     editors_step(&prompt, dirs, config_path, options.vsix.as_deref())?;
@@ -316,6 +320,29 @@ fn register_agent(prompt: &Prompt, agent: McpAgent, dirs: &Dirs, exe: &Path) -> 
             }
         }
         Err(error) => println!("! {}: {error:#}\n  a mano: {}", agent.label(), agent.manual(dirs, exe)),
+    }
+    Ok(())
+}
+
+/// Hooks para avisar al acabar cada turno de lo obligatorio sin revisar y, si
+/// el repositorio lo pide, parar al agente.
+fn checkpoints_step(prompt: &Prompt, dirs: &Dirs, exe: &Path) -> Result<()> {
+    match super::hooks::installed(dirs) {
+        Ok(true) => println!("✓ hooks instalados"),
+        Ok(false) => {
+            println!(
+                "Al acabar cada turno, Claude Code te dirá cuántos pasos obligatorios quedan sin revisar; \
+                 con block_after en .huella.toml, además, el agente no seguirá editando con demasiado pendiente."
+            );
+            if !prompt.confirm("¿Instalar los hooks en ~/.claude/settings.json?", true)? {
+                return Ok(());
+            }
+            match super::hooks::install(dirs, exe) {
+                Ok(()) => println!("✓ hooks instalados"),
+                Err(error) => println!("! {error:#}\n  a mano: {}", super::hooks::manual(dirs, exe)),
+            }
+        }
+        Err(error) => println!("! {error:#}\n  a mano: {}", super::hooks::manual(dirs, exe)),
     }
     Ok(())
 }

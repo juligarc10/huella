@@ -134,7 +134,7 @@ pub fn vscode_user_dir(dirs: &Dirs) -> PathBuf {
     dirs.config.join("Code").join("User")
 }
 
-fn read_json(path: &Path, text: &str) -> Result<Value> {
+pub(super) fn read_json(path: &Path, text: &str) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
