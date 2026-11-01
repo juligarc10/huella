@@ -51,8 +51,20 @@
       {
         "command": "huella.restart",
         "title": "Huella: reiniciar el servidor"
+      },
+      {
+        "command": "huella.askSelection",
+        "title": "Huella: preguntar sobre la selección"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "huella.askSelection",
+          "group": "navigation@100"
+        }
+      ]
+    }
   },
   "scripts": {
     "check": "tsc --noEmit",

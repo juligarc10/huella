@@ -15,6 +15,7 @@ import {
   type Job,
   type JobKind,
   type Overview,
+  type CodeFile,
   type ReviewResult,
   type SearchResult,
   type SessionInfo,
@@ -68,6 +69,16 @@ export function useExportAdrs() {
   return useMutation({
     mutationFn: (project: string) => api.post<AdrReport>('adr', { project }),
     onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Contenido actual de un fichero, para preguntar sobre él. */
+export function useCodeFile(path: string | null) {
+  return useQuery({
+    queryKey: ['code-file', path],
+    queryFn: () => api.get<CodeFile>(`code/file${query({ path })}`),
+    enabled: Boolean(path),
+    retry: false,
   })
 }
 
@@ -206,7 +217,7 @@ export function useCodeQuestions(path: string) {
 export function useAskCode(path: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { quote: string; question: string }) => api.post('code/ask', { path, ...ask }),
+    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number }) => api.post('code/ask', { path, ...ask }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['code-questions', path] }),
     onError: (error) => toast.error(error.message),
   })
