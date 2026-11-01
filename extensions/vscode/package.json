@@ -2,7 +2,7 @@
   "name": "huella",
   "displayName": "Huella",
   "description": "Lo que se habló con la IA sobre cada función, al pasar el ratón.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "juligarc10",
   "license": "MIT OR Apache-2.0",
   "private": true,
