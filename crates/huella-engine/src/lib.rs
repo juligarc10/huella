@@ -3,6 +3,7 @@
 
 pub mod adr;
 pub mod branch;
+pub mod checkpoint;
 pub mod code_ask;
 pub mod coverage;
 mod decisions;
