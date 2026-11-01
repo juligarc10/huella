@@ -347,6 +347,30 @@ huella review guide 84e33d8e --all    # también los de vistazo
 huella review guide 84e33d8e --step 3
 ```
 
+#### Puntos de control mientras el agente trabaja
+
+Para que la revisión vaya al paso del agente y no se acumule para el final,
+`huella setup` instala dos hooks en Claude Code (`~/.claude/settings.json`,
+junto a los que ya tengas):
+
+- **Al acabar cada turno** (`Stop`), Huella indexa la sesión, rehace el triaje y,
+  si quedan pasos obligatorios sin veredicto, te lo dice en Claude Code: cuántos,
+  cuántos son de este turno y los últimos, con su motivo.
+- **Antes de cada edición** (`PreToolUse`), si el repositorio fija un límite, el
+  agente no puede seguir editando con tantos pasos obligatorios sin revisar: se
+  le dice por qué, te pide que los revises y, en cuanto les das veredicto en
+  Huella, sigue. Sin límite, este hook no abre ni la base de datos.
+
+```toml
+[checkpoints]
+notify = true     # el aviso al acabar cada turno (por defecto, sí)
+block_after = 5   # parar al agente con 5 obligatorios sin revisar (por defecto, nunca)
+```
+
+Si algo falla en Huella, el hook sale sin decir nada: nunca para al agente por
+un error suyo. A mano: `huella hook stop` y `huella hook pre-edit` leen el
+evento de Claude Code por la entrada estándar.
+
 #### En Zed, con su vista de cambios
 
 ```sh
