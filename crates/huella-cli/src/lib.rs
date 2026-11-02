@@ -13,6 +13,7 @@ mod review;
 mod sample;
 mod search;
 mod setup;
+mod task;
 mod ui;
 mod web;
 
@@ -212,6 +213,12 @@ enum Command {
     Review {
         #[command(subcommand)]
         action: ReviewCommand,
+    },
+    /// Revisión por tarea: la rama de cada repositorio contra la rama a la que
+    /// se va a mergear, con lo que pide la tarea.
+    Task {
+        #[command(subcommand)]
+        action: task::TaskCommand,
     },
     /// Puntos de control para los hooks de Claude Code: lee el evento por
     /// stdin. `huella setup` los instala.
@@ -603,6 +610,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Review { action } => review_command(cli.db, action),
+        Command::Task { action } => task::command(&open_store(cli.db)?, &sources(None)?, action),
         Command::Hook { event, projects } => hook::run(event, cli.db, projects),
         Command::Mcp { projects } => {
             let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
