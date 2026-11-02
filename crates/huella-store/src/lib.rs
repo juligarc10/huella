@@ -356,6 +356,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX declaration_by_path ON declaration(path);
 ",
+    // 19: la rama de una tarea, para encontrarla en cada repositorio cuando su
+    // nombre no lleva la clave.
+    r"
+    ALTER TABLE task ADD COLUMN branch TEXT;
+",
 ];
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -365,6 +370,7 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         description: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
+        branch: row.get(5)?,
     })
 }
 
@@ -673,6 +679,8 @@ pub struct Task {
     pub key: String,
     pub title: Option<String>,
     pub description: String,
+    /// Nombre de la rama en todos sus repositorios, si no lleva la clave.
+    pub branch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1783,7 +1791,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT key, title, description, created_at, updated_at FROM task WHERE key = ?1",
+                "SELECT key, title, description, created_at, updated_at, branch FROM task WHERE key = ?1",
                 [key],
                 task_row,
             )
@@ -1796,10 +1804,19 @@ impl Store {
     /// Si falla la consulta.
     pub fn tasks(&self) -> Result<Vec<Task>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT key, title, description, created_at, updated_at FROM task ORDER BY updated_at DESC, key",
+            "SELECT key, title, description, created_at, updated_at, branch FROM task ORDER BY updated_at DESC, key",
         )?;
         let rows = statement.query_map([], task_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Fija (o quita) la rama de la tarea.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_task_branch(&self, key: &str, branch: Option<&str>) -> Result<()> {
+        self.conn.execute("UPDATE task SET branch = ?2 WHERE key = ?1", params![key, branch])?;
+        Ok(())
     }
 
     /// Borra la tarea y sus repositorios. Devuelve si existía.
@@ -3364,8 +3381,10 @@ mod tests {
             vec![repo("api", Some("sprint/42")), repo("billing", Some("sprint/42"))]
         );
         store.save_task("DENMS-1", Some("Filtros de auditoría"), "otra").unwrap();
+        store.set_task_branch("DENMS-1", Some("feature/filtros")).unwrap();
         let task = store.task("DENMS-1").unwrap().unwrap();
         assert_eq!((task.title.as_deref(), task.description.as_str()), (Some("Filtros de auditoría"), "otra"));
+        assert_eq!(task.branch.as_deref(), Some("feature/filtros"));
         assert!(store.remove_task_repo("DENMS-1", "/w/billing").unwrap());
         assert_eq!(store.tasks().unwrap().len(), 1);
         assert!(store.delete_task("DENMS-1").unwrap());
