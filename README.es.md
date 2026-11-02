@@ -466,7 +466,9 @@ quien mejor sabe el porqué y el orden. Lo que no cuente sale igualmente en «No
 contó el agente», y si el código cambia después, el guion se marca como
 desfasado. Si no lo contó, lo escribe el modelo revisor con «Escribir el guion»,
 en el mismo formato; sin modelo, hay un capítulo por repositorio en el orden del
-flujo.
+flujo. Si el cambio no cabe en el contexto del modelo (`context_tokens` en
+`[llm]`; por defecto, 32768), el revisor lo lee por partes y una última llamada
+las junta; cuanto más contexto, más cabe en una sola petición.
 
 - **Las ramas se encuentran solas**: las que llevan la clave en el nombre
   (`feature/DENMS-1234-filtros`), en los repositorios de tus sesiones y en la
@@ -519,6 +521,7 @@ base_url = "http://localhost:11434/v1"
 model = "qwen2.5:7b"
 api_key_file = "~/.config/huella/llm-key"   # opcional; con chmod 600
 thinking = false                        # Qwen3 y similares: sin razonamiento (más rápido, sin JSON cortado)
+context_tokens = 65536                  # el --ctx-size del modelo: lo que cabe en una petición (por defecto, 32768)
 
 [embed]
 model = "bge-m3"
