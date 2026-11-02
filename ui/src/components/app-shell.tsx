@@ -1,6 +1,7 @@
 import {
   Activity,
   BookMarked,
+  ClipboardList,
   Command as CommandIcon,
   GitBranch,
   GitPullRequestArrow,
@@ -25,7 +26,8 @@ import { cn } from '@/lib/utils'
 const ALL = '__todos__'
 
 const nav = [
-  { to: '/sesiones', label: 'Por revisar', icon: GitPullRequestArrow, end: false },
+  { to: '/tareas', label: 'Tareas', icon: ClipboardList, end: false },
+  { to: '/sesiones', label: 'Sesiones', icon: GitPullRequestArrow, end: false },
   { to: '/rama', label: 'Rama', icon: GitBranch, end: false },
   { to: '/buscar', label: 'Buscar', icon: Search, end: false },
   { to: '/decisiones', label: 'Decisiones y ADRs', icon: BookMarked, end: false },

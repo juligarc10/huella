@@ -38,7 +38,7 @@ export function SessionsPage() {
   return (
     <>
       <PageHeader
-        title="Por revisar"
+        title="Sesiones"
         description="Cada sesión del agente con ediciones, según en qué punto de la revisión está. Ábrela para revisarla paso a paso."
         actions={
           <ToggleGroup
