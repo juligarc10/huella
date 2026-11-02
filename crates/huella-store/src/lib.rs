@@ -372,6 +372,23 @@ const MIGRATIONS: &[&str] = &[
         created_at      TEXT NOT NULL
     );
 ",
+    // 21: el guion que declara el agente que hizo el cambio
+    // (huella.storyline/v1), con cada repositorio y rama que toca: una tarea lo
+    // encuentra desde cualquiera de ellos.
+    r"
+    CREATE TABLE declared_storyline (
+        id              INTEGER PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        storyline       TEXT NOT NULL
+    );
+    CREATE TABLE declared_storyline_repo (
+        storyline_id    INTEGER NOT NULL REFERENCES declared_storyline(id) ON DELETE CASCADE,
+        repo            TEXT NOT NULL,
+        branch          TEXT NOT NULL,
+        PRIMARY KEY (storyline_id, repo, branch)
+    );
+    CREATE INDEX declared_storyline_by_repo ON declared_storyline_repo(repo, branch);
+",
 ];
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -712,6 +729,14 @@ pub struct StoredStoryline {
     pub input_hash: String,
     pub model: String,
     /// JSON tal como lo devolvió el modelo.
+    pub storyline: String,
+}
+
+/// Un guion declarado por el agente, tal como se guardó (JSON).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredStoryline {
+    pub id: i64,
+    pub recorded_at: String,
     pub storyline: String,
 }
 
@@ -1909,6 +1934,44 @@ impl Store {
             params![review_id, stored.input_hash, stored.model, stored.storyline],
         )?;
         Ok(())
+    }
+
+    /// Guarda un guion declarado (redactado) con los repositorios y ramas que toca.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_declared_storyline(&mut self, storyline: &str, repos: &[(String, String)]) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO declared_storyline (recorded_at, storyline) VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?1)",
+            [redact(storyline)],
+        )?;
+        let id = tx.last_insert_rowid();
+        for (repo, branch) in repos {
+            tx.execute(
+                "INSERT OR IGNORE INTO declared_storyline_repo (storyline_id, repo, branch) VALUES (?1, ?2, ?3)",
+                params![id, repo, branch],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// El guion declarado más reciente de un repositorio y rama.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn latest_declared_storyline(&self, repo: &str, branch: &str) -> Result<Option<DeclaredStoryline>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT s.id, s.recorded_at, s.storyline FROM declared_storyline s
+                 JOIN declared_storyline_repo r ON r.storyline_id = s.id
+                 WHERE r.repo = ?1 AND r.branch = ?2 ORDER BY s.recorded_at DESC, s.id DESC LIMIT 1",
+                [repo, branch],
+                |row| Ok(DeclaredStoryline { id: row.get(0)?, recorded_at: row.get(1)?, storyline: row.get(2)? }),
+            )
+            .optional()?)
     }
 
     /// Último punto de control de una sesión.
@@ -3438,6 +3501,21 @@ mod tests {
         assert!(store.delete_task("DENMS-1").unwrap());
         assert_eq!(store.task_repos("DENMS-1").unwrap(), Vec::new());
         assert_eq!(store.task("DENMS-1").unwrap(), None);
+    }
+
+    #[test]
+    fn declared_storylines_are_found_from_any_repository_they_touch() {
+        let mut store = Store::open_in_memory().unwrap();
+        let both = vec![
+            ("/w/api/.git".to_owned(), "feature/A-1".to_owned()),
+            ("/w/billing/.git".to_owned(), "feature/A-1".to_owned()),
+        ];
+        let first = store.add_declared_storyline(r#"{"summary":"uno"}"#, &both).unwrap();
+        assert_eq!(store.latest_declared_storyline("/w/billing/.git", "feature/A-1").unwrap().unwrap().id, first);
+        let second = store.add_declared_storyline(r#"{"summary":"dos"}"#, &both[..1]).unwrap();
+        assert_eq!(store.latest_declared_storyline("/w/api/.git", "feature/A-1").unwrap().unwrap().id, second);
+        assert_eq!(store.latest_declared_storyline("/w/billing/.git", "feature/A-1").unwrap().unwrap().id, first);
+        assert_eq!(store.latest_declared_storyline("/w/api/.git", "main").unwrap(), None);
     }
 
     #[test]

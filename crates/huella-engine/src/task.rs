@@ -402,12 +402,16 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
 /// Rama que tiene la copia de trabajo (ninguna si está en un commit suelto).
 #[must_use]
 pub fn checked_out(repo: &Path) -> Option<String> {
-    git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).ok().map(|b| b.trim().to_owned()).filter(|b| b != "HEAD")
+    // `symbolic-ref` también vale en una rama aún sin commits; en un commit suelto falla.
+    git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_owned())
+        .filter(|b| !b.is_empty())
 }
 
 /// Identidad de un repositorio: su directorio git común, que comparten sus
 /// worktrees con la copia principal.
-fn repo_identity(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn repo_identity(dir: &Path) -> Option<PathBuf> {
     let common = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
     std::fs::canonicalize(common.trim()).ok()
 }
