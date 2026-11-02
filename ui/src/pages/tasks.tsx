@@ -110,12 +110,13 @@ function NewTaskDialog() {
   const [key, setKey] = useState('')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [branch, setBranch] = useState('')
   const [repos, setRepos] = useState('')
   const create = useCreateTask()
   const navigate = useNavigate()
   const submit = () =>
     create.mutate(
-      { key, title, description, repos: repos.split('\n').map((line) => line.trim()).filter(Boolean) },
+      { key, title, description, branch, repos: repos.split('\n').map((line) => line.trim()).filter(Boolean) },
       { onSuccess: (created) => navigate(`/tareas/${encodeURIComponent(created.key)}`) },
     )
   return (
@@ -129,8 +130,8 @@ function NewTaskDialog() {
         <DialogHeader>
           <DialogTitle>Nueva tarea</DialogTitle>
           <DialogDescription>
-            Huella busca las ramas que llevan la clave en el nombre en los repositorios de tus sesiones. La descripción es lo que pide la
-            tarea: con ella se comprobará si el cambio hace eso y nada más.
+            Huella busca en los repositorios de tus sesiones las ramas que llevan la clave en el nombre o, si la indicas, la rama con ese
+            nombre. La descripción es lo que pide la tarea: con ella se comprobará si el cambio hace eso y nada más.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -155,6 +156,15 @@ function NewTaskDialog() {
               onChange={(event) => setDescription(event.target.value)}
               placeholder="Pega aquí la descripción y los criterios de aceptación"
               className="min-h-40"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            Rama <span className="font-normal text-muted-foreground">(solo si su nombre no lleva la clave)</span>
+            <Input
+              value={branch}
+              onChange={(event) => setBranch(event.target.value)}
+              placeholder="feature/registro-declarado"
+              className="font-mono"
             />
           </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -219,6 +229,7 @@ function TaskSetup({ task, onDone }: { task: TaskDetail; onDone?: () => void }) 
   const add = useAddTaskRepo(task.key)
   const remove = useRemoveTaskRepo(task.key)
   const [newRepo, setNewRepo] = useState('')
+  const [newBranch, setNewBranch] = useState(task.branch ?? '')
   const title = task.title || firstLine(task.description)
 
   return (
@@ -243,8 +254,8 @@ function TaskSetup({ task, onDone }: { task: TaskDetail; onDone?: () => void }) 
         <Panel className="max-h-60 overflow-auto text-sm leading-relaxed whitespace-pre-line">{task.description}</Panel>
       )}
       {shown.repos.length === 0 && (
-        <EmptyState icon={<FolderPlus className="size-8" />} title="No se encontró ninguna rama con esa clave">
-          Añade el repositorio a mano (con la rama de la tarea en su copia de trabajo), o crea la rama y vuelve aquí.
+        <EmptyState icon={<FolderPlus className="size-8" />} title="No se encontró ninguna rama de la tarea">
+          Añade el repositorio abajo con su rama (si no pones rama, la que tenga su copia de trabajo), o crea la rama y vuelve aquí.
         </EmptyState>
       )}
       <ul className="flex flex-col gap-3">
@@ -289,14 +300,21 @@ function TaskSetup({ task, onDone }: { task: TaskDetail; onDone?: () => void }) 
         className="flex flex-wrap items-center gap-2"
         onSubmit={(event) => {
           event.preventDefault()
-          add.mutate({ repo: newRepo }, { onSuccess: () => setNewRepo('') })
+          add.mutate({ repo: newRepo, branch: newBranch.trim() || undefined }, { onSuccess: () => setNewRepo('') })
         }}
       >
         <Input
           value={newRepo}
           onChange={(event) => setNewRepo(event.target.value)}
-          placeholder="Ruta de otro repositorio (con la rama de la tarea en su copia de trabajo)"
+          placeholder="Ruta de otro repositorio"
           className="min-w-0 flex-1"
+        />
+        <Input
+          value={newBranch}
+          onChange={(event) => setNewBranch(event.target.value)}
+          placeholder="rama (por defecto, la de su copia de trabajo)"
+          className="min-w-0 flex-1 font-mono"
+          aria-label="Rama de la tarea en ese repositorio"
         />
         <Button type="submit" variant="outline" disabled={!newRepo.trim() || add.isPending}>
           <FolderPlus aria-hidden="true" /> Añadir

@@ -130,7 +130,7 @@ export function useTask(key: string, fetch: boolean) {
 export function useCreateTask() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (task: { key: string; title: string; description: string; repos: string[] }) =>
+    mutationFn: (task: { key: string; title: string; description: string; branch: string; repos: string[] }) =>
       api.post<{ key: string; added: number }>('tasks', task),
     onSuccess: () => client.invalidateQueries({ queryKey: ['tasks'] }),
     onError: (error) => toast.error(error.message),
