@@ -181,7 +181,7 @@ against the diff, flagged when the code changed afterwards.
 branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.
 **Tasks** go further: `huella task new DENMS-1234` finds the branch with that key
-in every repository it touches, suggests the branch each one merges into (a
+(or the one named with `--branch`) in every repository it touches, suggests the branch each one merges into (a
 sprint branch, `develop`…) and reviews exactly what will be merged: against the
 freshly fetched remote target, committed changes only, with warnings for
 unpushed or unpulled commits and uncommitted changes. In the app, **Tasks** is

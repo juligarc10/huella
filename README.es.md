@@ -452,7 +452,10 @@ rehacerla con lo último.
 
 - **Las ramas se encuentran solas**: las que llevan la clave en el nombre
   (`feature/DENMS-1234-filtros`), en los repositorios de tus sesiones y en la
-  carpeta actual (`--repo` añade más; `huella task add` y `remove`, a mano).
+  carpeta actual (`--repo` añade más; `huella task add` y `remove`, a mano). Si
+  la rama no lleva clave, `--branch feature/registro-declarado` la busca por su
+  nombre. Los worktrees de un mismo repositorio cuentan una vez: se queda la
+  copia principal.
 - **El destino se propone**: la rama del remoto de la que se separó más
   recientemente; si otro repositorio de la tarea ya tiene uno, ese primero. Se
   fija con `huella task target`, para todos o para uno (`--repo`).
