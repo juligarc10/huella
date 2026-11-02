@@ -64,6 +64,8 @@ pub(crate) struct App {
     activity: Vec<huella_core::Activity>,
     /// Impacto de la sesión cargada, que recorre el proyecto: se calcula una vez.
     impact: Option<Value>,
+    /// Si la revisión cargada es de una tarea, cómo está cada repositorio.
+    task_repos: Option<Vec<huella_engine::task::RepoSync>>,
     /// Cobertura en curso por sesión: `None` mientras se calcula, o el error.
     covering: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Guías en curso por sesión.
@@ -142,6 +144,7 @@ impl App {
             review: None,
             activity: Vec::new(),
             impact: None,
+            task_repos: None,
             covering: Arc::new(Mutex::new(HashMap::new())),
             guiding: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
@@ -287,6 +290,20 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["symbol"]) => symbol(app, params)?,
         ("GET", ["sessions"]) => sessions(app, params)?,
         ("GET", ["inbox"]) => inbox(app)?,
+        ("GET", ["tasks"]) => tasks(app)?,
+        ("POST", ["tasks"]) => create_task(app, body)?,
+        ("GET", ["tasks", key]) => task_detail(app, key, params)?,
+        ("POST", ["tasks", key, "target"]) => set_task_target(app, key, body)?,
+        ("POST", ["tasks", key, "repos"]) => add_task_repo(app, key, body)?,
+        ("POST", ["tasks", key, "repos", "remove"]) => remove_task_repo(app, key, body)?,
+        ("POST", ["tasks", key, "delete"]) => json!({"deleted": app.store.delete_task(key)?}),
+        ("POST", ["review", session, "refresh"]) => {
+            // Se vuelve a traer el remoto y a construir la revisión al pedirla.
+            if app.review.as_ref().is_some_and(|(review, _)| review.session_id.starts_with(session)) {
+                app.review = None;
+            }
+            json!({})
+        }
         ("GET", ["branch"]) => branch(app, params)?,
         ("GET", ["review", session]) => review(app, session)?,
         ("POST", ["review", session, "mark"]) => mark(app, session, body)?,
@@ -519,7 +536,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     let narrations = huella_engine::narration::narrations(&app.store, review, plan, &points)?;
     let mut value = crate::web::payload(review, plan, &app.store.review_marks(&review.session_id)?, app.editor);
     value["narrations"] = serde_json::to_value(&narrations)?;
-    let project = huella_engine::session_project(&app.store, &review.session_id)?;
+    let project = review_project(app, &review.session_id)?;
     value["project"] = json!(project);
     let Assessment { coverage, evidence, policy, policy_error, triage } =
         assess(&app.store, review, plan, &points, &app.activity, project.as_deref())?;
@@ -548,6 +565,20 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
         "checkpoints": policy.checkpoints, "error": policy_error,
     });
     value["guiding"] = json!(app.guiding.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
+    if let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) {
+        let task = app.store.task(key)?;
+        value["task"] = json!({
+            "key": key,
+            "title": task.as_ref().and_then(|task| task.title.clone()),
+            "description": task.as_ref().map(|task| task.description.clone()).unwrap_or_default(),
+            "repos": repos.iter().map(repo_json).collect::<Vec<_>>(),
+        });
+        if let Some(steps) = value["steps"].as_array_mut() {
+            for (step, flow) in steps.iter_mut().zip(plan) {
+                step["repo"] = json!(repo_of(repos, &review.files[flow.file].path).map(|repo| &repo.repo));
+            }
+        }
+    }
     value["comprehension"] = serde_json::to_value(comprehension)?;
     app.store.record_review_steps(&review.session_id, plan.len())?;
     let states = app.store.review_states()?;
@@ -675,6 +706,137 @@ fn update_comment(app: &App, id: &str, body: &str) -> Result<Value> {
     Ok(json!({}))
 }
 
+fn repo_json(state: &huella_engine::task::RepoSync) -> Value {
+    let mut value = serde_json::to_value(state).unwrap_or_default();
+    value["name"] = json!(Path::new(&state.repo).file_name().map(|name| name.to_string_lossy().into_owned()));
+    value["warnings"] = json!(state.warnings());
+    value
+}
+
+/// Tareas con su estado de revisión.
+fn tasks(app: &App) -> Result<Value> {
+    let states = app.store.review_states()?;
+    let tasks = app
+        .store
+        .tasks()?
+        .into_iter()
+        .map(|task| {
+            let repos = app.store.task_repos(&task.key)?;
+            let state = states.get(&huella_engine::task::review_id(&task.key));
+            Ok(json!({
+                "key": task.key,
+                "title": task.title,
+                "description": task.description,
+                "updated_at": task.updated_at,
+                "repos": repos.iter().map(|repo| json!({
+                    "repo": repo.repo,
+                    "name": Path::new(&repo.repo).file_name().map(|name| name.to_string_lossy().into_owned()),
+                    "branch": repo.branch,
+                    "target": repo.target,
+                })).collect::<Vec<_>>(),
+                "status": state.map_or("pending", |state| state.status.as_str()),
+                "steps": state.and_then(|state| state.steps),
+                "reviewed": state.map_or(0, |state| state.reviewed),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({"tasks": tasks}))
+}
+
+/// Crea la tarea (o cambia su descripción) y busca sus ramas.
+fn create_task(app: &mut App, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let key = request["key"].as_str().map(str::trim).filter(|key| !key.is_empty()).context("falta la clave")?;
+    let key = key.to_ascii_uppercase();
+    let title = request["title"].as_str().map(str::trim).filter(|title| !title.is_empty());
+    let description = request["description"].as_str().unwrap_or_default();
+    app.store.save_task(&key, title, description)?;
+    let extra: Vec<PathBuf> = request["repos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repo| repo.as_str().map(str::trim).filter(|repo| !repo.is_empty()).map(PathBuf::from))
+        .collect();
+    let added = huella_engine::task::discover(&app.store, &key, &extra)?;
+    Ok(json!({"key": key, "added": added.len()}))
+}
+
+/// Repositorios de la tarea, cómo están y destinos probables de los que no tienen.
+fn task_detail(app: &App, key: &str, params: &HashMap<String, String>) -> Result<Value> {
+    let task = app.store.task(key)?.with_context(|| format!("no hay ninguna tarea {key}"))?;
+    let fetch = params.get("fetch").is_some_and(|value| value == "1");
+    let repos = app.store.task_repos(key)?;
+    let preferred = repos.iter().find_map(|repo| repo.target.clone());
+    let repos: Vec<Value> = repos
+        .iter()
+        .map(|repo| {
+            let state = huella_engine::task::sync(Path::new(&repo.repo), &repo.branch, repo.target.as_deref(), fetch);
+            let mut value = repo_json(&state);
+            value["candidates"] = json!(
+                huella_engine::task::suggest_targets(Path::new(&repo.repo), &repo.branch, preferred.as_deref())
+                    .unwrap_or_default()
+            );
+            value
+        })
+        .collect();
+    Ok(json!({
+        "key": task.key,
+        "title": task.title,
+        "description": task.description,
+        "review": huella_engine::task::review_id(key),
+        "repos": repos,
+    }))
+}
+
+/// Fija el destino de un repositorio de la tarea, o de todos.
+fn set_task_target(app: &mut App, key: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let target =
+        request["target"].as_str().map(str::trim).filter(|target| !target.is_empty()).context("falta el destino")?;
+    let only = request["repo"].as_str();
+    let mut changed = 0;
+    for repo in app.store.task_repos(key)? {
+        if only.is_none_or(|only| only == repo.repo) {
+            app.store.set_task_repo(key, &huella_store::TaskRepo { target: Some(target.to_owned()), ..repo })?;
+            changed += 1;
+        }
+    }
+    forget_task_review(app, key);
+    Ok(json!({"changed": changed}))
+}
+
+/// Añade a la tarea un repositorio con su rama (por defecto, la de la copia de trabajo).
+fn add_task_repo(app: &mut App, key: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let dir = request["repo"].as_str().map(str::trim).filter(|dir| !dir.is_empty()).context("falta el repositorio")?;
+    let root =
+        huella_engine::task::repo_root(Path::new(dir)).with_context(|| format!("{dir} no es un repositorio de git"))?;
+    let branch = match request["branch"].as_str().map(str::trim).filter(|branch| !branch.is_empty()) {
+        Some(branch) => branch.to_owned(),
+        None => huella_engine::task::checked_out(&root).context("indica la rama")?,
+    };
+    let target = request["target"].as_str().map(str::trim).filter(|target| !target.is_empty()).map(str::to_owned);
+    app.store.set_task_repo(key, &huella_store::TaskRepo { repo: root.display().to_string(), branch, target })?;
+    forget_task_review(app, key);
+    Ok(json!({}))
+}
+
+fn remove_task_repo(app: &mut App, key: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let repo = request["repo"].as_str().context("falta el repositorio")?;
+    let removed = app.store.remove_task_repo(key, repo)?;
+    forget_task_review(app, key);
+    Ok(json!({"removed": removed}))
+}
+
+/// Tras cambiar los repositorios o los destinos, la revisión se rehace.
+fn forget_task_review(app: &mut App, key: &str) {
+    let id = huella_engine::task::review_id(key);
+    if app.review.as_ref().is_some_and(|(review, _)| review.session_id == id) {
+        app.review = None;
+    }
+}
+
 /// Cobertura de la petición de cada turno: la calcula un hilo con el modelo
 /// configurado; la revisión la muestra en curso mientras tanto.
 fn start_coverage(app: &mut App, session: &str) -> Result<(u16, Value)> {
@@ -732,7 +894,7 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let session_id = review.session_id.clone();
-    let project = huella_engine::session_project(&app.store, &session_id)?;
+    let project = review_project(app, &session_id)?;
     let points = huella_review::attention::attention(&review, &plan);
     let Assessment { evidence, triage, .. } =
         assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
@@ -824,6 +986,28 @@ fn impact(app: &mut App, session: &str) -> Result<Value> {
         return Ok(cached.clone());
     }
     let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    // En una tarea, cada paso se busca en su propio repositorio.
+    if let Some(repos) = &app.task_repos {
+        let by_repo: Vec<(String, Vec<huella_engine::impact::StepImpact>)> = repos
+            .iter()
+            .map(|repo| (repo.repo.clone(), huella_engine::impact::impact(Path::new(&repo.repo), review, plan)))
+            .collect();
+        let steps: Vec<Value> = plan
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let path = &review.files[step.file].path;
+                by_repo
+                    .iter()
+                    .find(|(repo, _)| path.starts_with(&format!("{repo}/")))
+                    .and_then(|(_, found)| serde_json::to_value(&found[index]).ok())
+                    .unwrap_or_else(|| json!({"name": null, "uses": [], "total": 0, "generic": false}))
+            })
+            .collect();
+        let value = json!({"project": repos.first().map(|repo| &repo.repo), "steps": steps});
+        app.impact = Some(value.clone());
+        return Ok(value);
+    }
     let project = huella_engine::session_project(&app.store, &review.session_id)?;
     let value = match project.as_deref().map(Path::new).filter(|path| path.is_dir()) {
         Some(project) => {
@@ -991,16 +1175,46 @@ fn mark(app: &mut App, session: &str, body: &str) -> Result<Value> {
 }
 
 /// Carga la revisión de la sesión salvo que sea la última cargada.
+/// Carga la revisión de una sesión o, con `task:<CLAVE>`, la de una tarea
+/// (trayendo antes el remoto). Se queda en memoria hasta que se pide otra.
 fn load_review(app: &mut App, session: &str) -> Result<()> {
     let cached = app.review.as_ref().is_some_and(|(review, _)| review.session_id.starts_with(session));
-    if !cached {
-        let review = huella_engine::session_review(&app.sources, session)?;
-        let plan = huella_review::flow::plan(&review);
-        app.activity = huella_engine::evidence::session_activity(&app.sources, &review.session_id)?;
-        app.impact = None;
-        app.review = Some((review, plan));
+    if cached {
+        return Ok(());
     }
+    let review = if let Some(key) = session.strip_prefix("task:") {
+        let task = huella_engine::task::task_review(&app.store, &app.sources, key, true)?;
+        let mut activity = Vec::new();
+        for session_id in &task.sessions {
+            activity.extend(huella_engine::evidence::session_activity(&app.sources, session_id)?);
+        }
+        app.activity = activity;
+        app.task_repos = Some(task.repos);
+        task.review
+    } else {
+        let review = huella_engine::session_review(&app.sources, session)?;
+        app.activity = huella_engine::evidence::session_activity(&app.sources, &review.session_id)?;
+        app.task_repos = None;
+        review
+    };
+    let plan = huella_review::flow::plan(&review);
+    app.impact = None;
+    app.review = Some((review, plan));
     Ok(())
+}
+
+/// Proyecto de la revisión cargada, para su política: el repositorio de la
+/// sesión o el primero de la tarea.
+fn review_project(app: &App, session_id: &str) -> Result<Option<String>> {
+    match &app.task_repos {
+        Some(repos) if session_id.starts_with("task:") => Ok(repos.first().map(|repo| repo.repo.clone())),
+        _ => Ok(huella_engine::session_project(&app.store, session_id)?),
+    }
+}
+
+/// Repositorio de la tarea al que pertenece un fichero.
+fn repo_of<'a>(repos: &'a [huella_engine::task::RepoSync], path: &str) -> Option<&'a huella_engine::task::RepoSync> {
+    repos.iter().find(|repo| path.starts_with(&format!("{}/", repo.repo)))
 }
 
 fn status(app: &App) -> Result<Value> {
