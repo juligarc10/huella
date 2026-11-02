@@ -7,6 +7,7 @@ pub mod checkpoint;
 pub mod code_ask;
 pub mod coverage;
 mod decisions;
+pub mod declared;
 pub mod embeddings;
 pub mod evidence;
 pub mod guide;
@@ -51,6 +52,8 @@ pub enum EngineError {
     Model(String),
     #[error("política de revisión: {0}")]
     Policy(String),
+    #[error("{0}")]
+    Invalid(String),
     #[error("ninguna sesión empieza por «{0}»")]
     SessionNotFound(String),
     #[error("«{prefix}» coincide con varias sesiones: {}", candidates.join(", "))]
