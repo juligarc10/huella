@@ -857,22 +857,23 @@ fn guide_command(
             .as_ref()
             .map_or_else(|| review.files[plan[index].file].path.clone(), |s| s.qualified_name.clone())
     };
+    let declared = huella_engine::declared::for_steps(&store, &review, &plan)?;
+    let context: Vec<huella_engine::guide::StepContext<'_>> = (0..plan.len())
+        .map(|index| huella_engine::guide::StepContext {
+            evidence: &assessment.evidence[index],
+            triage: &assessment.triage[index],
+            declared: declared.get(&index).map_or(&[], Vec::as_slice),
+        })
+        .collect();
     println!("Guiando {} pasos con {}…", chosen.len(), model.model_id());
     for &index in &chosen {
         println!("  · paso {} {}", index + 1, name(index));
-        if let Err(error) = huella_engine::guide::guide_step(
-            &store,
-            &review,
-            &plan,
-            index,
-            &assessment.evidence[index],
-            &assessment.triage[index],
-            model.as_ref(),
-        ) {
+        if let Err(error) =
+            huella_engine::guide::guide_step(&store, &review, &plan, index, context[index], model.as_ref())
+        {
             eprintln!("aviso: paso {}: {error}", index + 1);
         }
     }
-    let context: Vec<_> = assessment.evidence.iter().zip(&assessment.triage).collect();
     let guides = huella_engine::guide::guides(&store, &review, &plan, &context)?;
     for index in chosen {
         let Some(guide) = guides.get(&index) else { continue };

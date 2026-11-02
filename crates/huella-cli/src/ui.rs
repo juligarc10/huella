@@ -540,8 +540,16 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     value["project"] = json!(project);
     let Assessment { coverage, evidence, policy, policy_error, triage } =
         assess(&app.store, review, plan, &points, &app.activity, project.as_deref())?;
-    let context: Vec<_> = evidence.iter().zip(&triage).collect();
+    let mut declared = huella_engine::declared::for_steps(&app.store, review, plan)?;
+    let context: Vec<huella_engine::guide::StepContext<'_>> = (0..plan.len())
+        .map(|index| huella_engine::guide::StepContext {
+            evidence: &evidence[index],
+            triage: &triage[index],
+            declared: declared.get(&index).map_or(&[], Vec::as_slice),
+        })
+        .collect();
     let mut guides = huella_engine::guide::guides(&app.store, review, plan, &context)?;
+    drop(context);
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
@@ -558,6 +566,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
             step["evidence"] = serde_json::to_value(found)?;
             step["triage"] = serde_json::to_value(triaged)?;
             step["guide"] = serde_json::to_value(guides.remove(&index))?;
+            step["declared"] = serde_json::to_value(declared.remove(&index).unwrap_or_default())?;
         }
     }
     value["policy"] = json!({
@@ -898,6 +907,7 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
     let points = huella_review::attention::attention(&review, &plan);
     let Assessment { evidence, triage, .. } =
         assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
+    let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
     let wanted: Vec<String> = plan
         .iter()
         .zip(&triage)
@@ -940,16 +950,13 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
                     .position(|flow| flow.key(&review) == key)
                     .context("el paso ya no está en la revisión")
                     .and_then(|index| {
-                        huella_engine::guide::guide_step(
-                            store,
-                            &review,
-                            &plan,
-                            index,
-                            &evidence[index],
-                            &triage[index],
-                            llm.as_ref(),
-                        )
-                        .map_err(anyhow::Error::from)
+                        let context = huella_engine::guide::StepContext {
+                            evidence: &evidence[index],
+                            triage: &triage[index],
+                            declared: declared.get(&index).map_or(&[], Vec::as_slice),
+                        };
+                        huella_engine::guide::guide_step(store, &review, &plan, index, context, llm.as_ref())
+                            .map_err(anyhow::Error::from)
                     }),
                 Err(error) => Err(anyhow::anyhow!("{error:#}")),
             };

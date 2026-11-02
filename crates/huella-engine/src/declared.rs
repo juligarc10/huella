@@ -185,7 +185,7 @@ pub fn for_steps(
                 }
                 .map(|slice| slice.join("\n"))
                 .unwrap_or_default();
-                DeclaredView { stale: squash(&now) != squash(&declaration.snapshot), declaration: declaration.clone() }
+                view(declaration.clone(), &now)
             })
             .collect();
         if !found.is_empty() {
@@ -193,6 +193,13 @@ pub fn for_steps(
         }
     }
     Ok(result)
+}
+
+/// Una declaración junto al texto que tiene ahora su código: desactualizada si
+/// cambió algo más que espacios.
+#[must_use]
+pub fn view(declaration: Declaration, current: &str) -> DeclaredView {
+    DeclaredView { stale: squash(current) != squash(&declaration.snapshot), declaration }
 }
 
 /// El texto sin espacios: reformatear no desactualiza una declaración.

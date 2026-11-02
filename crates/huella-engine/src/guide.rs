@@ -13,6 +13,7 @@ use huella_store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::declared::DeclaredView;
 use crate::evidence::StepEvidence;
 use crate::triage::{Level, StepTriage};
 use crate::{EngineError, Result};
@@ -112,15 +113,19 @@ pub fn wanted(triage: &StepTriage) -> bool {
     triage.level != Level::Skip
 }
 
+/// Lo que se sabe de un paso además de su diff.
+#[derive(Debug, Clone, Copy)]
+pub struct StepContext<'a> {
+    pub evidence: &'a StepEvidence,
+    pub triage: &'a StepTriage,
+    /// Lo que declaró el agente sobre su código.
+    pub declared: &'a [DeclaredView],
+}
+
 /// Lo que se envía al modelo para un paso.
 #[must_use]
-pub fn step_request(
-    review: &SessionReview,
-    plan: &[FlowStep],
-    index: usize,
-    evidence: &StepEvidence,
-    triage: &StepTriage,
-) -> String {
+pub fn step_request(review: &SessionReview, plan: &[FlowStep], index: usize, context: StepContext<'_>) -> String {
+    let StepContext { evidence, triage, declared } = context;
     let step = &plan[index];
     let mut out = String::new();
     let prompt = step.turn.and_then(|turn| review.turns.get(turn)).and_then(|turn| turn.prompt.as_deref());
@@ -140,6 +145,13 @@ pub fn step_request(
         for text in thoughts.iter().map(String::as_str).chain(rationales.iter().copied()) {
             let _ = writeln!(out, "- {}", clip(&one_line(text), 1500));
         }
+        out.push('\n');
+    }
+
+    if !declared.is_empty() {
+        // Lo declarado es una pista: el modelo debe contrastarlo con el diff.
+        out.push_str("Lo que declaró el agente sobre este código (contrástalo con el diff):\n");
+        out.push_str(&crate::declared::render(declared));
         out.push('\n');
     }
 
@@ -201,13 +213,12 @@ pub fn guide_step(
     review: &SessionReview,
     plan: &[FlowStep],
     index: usize,
-    evidence: &StepEvidence,
-    triage: &StepTriage,
+    context: StepContext<'_>,
     model: &(impl JsonModel + ?Sized),
 ) -> Result<bool> {
     let key = plan[index].key(review);
     let model_id = model.model_id();
-    let request = step_request(review, plan, index, evidence, triage);
+    let request = step_request(review, plan, index, context);
     let hash = input_hash(&model_id, &request);
     if store.guides(&review.session_id)?.get(&key).is_some_and(|stored| stored.input_hash == hash) {
         return Ok(false);
@@ -231,7 +242,7 @@ fn validate(text: String) -> std::result::Result<String, ExtractError> {
 }
 
 /// Guías guardadas de la sesión, por índice en el plan. `context` da, para
-/// cada paso, su evidencia y su triaje, con los que se sabe si sigue vigente.
+/// cada paso, lo que se sabe de él, con lo que se sabe si sigue vigente.
 ///
 /// # Errors
 /// Si falla la base de datos.
@@ -239,14 +250,14 @@ pub fn guides(
     store: &Store,
     review: &SessionReview,
     plan: &[FlowStep],
-    context: &[(&StepEvidence, &StepTriage)],
+    context: &[StepContext<'_>],
 ) -> Result<BTreeMap<usize, Guide>> {
     let stored = store.guides(&review.session_id)?;
     let mut result = BTreeMap::new();
-    for (index, (step, (evidence, triage))) in plan.iter().zip(context).enumerate() {
+    for (index, (step, step_context)) in plan.iter().zip(context).enumerate() {
         let Some(found) = stored.get(&step.key(review)) else { continue };
         let Ok(output) = serde_json::from_str::<ModelOutput>(&found.guide) else { continue };
-        let current = input_hash(&found.model, &step_request(review, plan, index, evidence, triage));
+        let current = input_hash(&found.model, &step_request(review, plan, index, *step_context));
         let range = |from: u32, to: u32| lines_of(from, to, step.lines.len());
         result.insert(
             index,
@@ -347,7 +358,12 @@ mod tests {
         let (review, plan) =
             review_of("export function login(password: string) {\n  return bcrypt.compare(password, hash);\n}\n");
         let triaged = triage(&review, &plan, &Policy::default(), &BTreeSet::new(), &BTreeSet::new());
-        let request = step_request(&review, &plan, 0, &StepEvidence::default(), &triaged[0]);
+        let request = step_request(
+            &review,
+            &plan,
+            0,
+            StepContext { evidence: &StepEvidence::default(), triage: &triaged[0], declared: &[] },
+        );
         assert!(request.contains("L1 +export function login"), "{request}");
         assert!(request.contains("toca seguridad"), "{request}");
         assert!(request.contains("comparo la contraseña con bcrypt"), "{request}");
@@ -362,12 +378,34 @@ mod tests {
         let evidence = StepEvidence::default();
         let model = Fake { calls: RefCell::new(Vec::new()), answer: ANSWER.into() };
 
-        assert!(guide_step(&store, &review, &plan, 0, &evidence, &triaged[0], &model).unwrap());
-        assert!(!guide_step(&store, &review, &plan, 0, &evidence, &triaged[0], &model).unwrap());
+        assert!(
+            guide_step(
+                &store,
+                &review,
+                &plan,
+                0,
+                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+                &model
+            )
+            .unwrap()
+        );
+        assert!(
+            !guide_step(
+                &store,
+                &review,
+                &plan,
+                0,
+                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+                &model
+            )
+            .unwrap()
+        );
         assert_eq!(model.calls.borrow().len(), 1);
 
         store.set_guide_check("s", &plan[0].key(&review), 1, true).unwrap();
-        let guides = guides(&store, &review, &plan, &[(&evidence, &triaged[0])]).unwrap();
+        let guides =
+            guides(&store, &review, &plan, &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] }])
+                .unwrap();
         let guide = &guides[&0];
         assert!(!guide.stale);
         // La parada fuera del diff se descarta; la comprobación del paso entero queda sin líneas.
@@ -384,12 +422,26 @@ mod tests {
         let triaged = triage(&review, &plan, &Policy::default(), &BTreeSet::new(), &BTreeSet::new());
         let evidence = StepEvidence::default();
         let model = Fake { calls: RefCell::new(Vec::new()), answer: ANSWER.into() };
-        guide_step(&store, &review, &plan, 0, &evidence, &triaged[0], &model).unwrap();
+        guide_step(
+            &store,
+            &review,
+            &plan,
+            0,
+            StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+            &model,
+        )
+        .unwrap();
 
         let (changed, changed_plan) =
             review_of("export function login(password: string) {\n  return check(password.trim());\n}\n");
         let triaged = triage(&changed, &changed_plan, &Policy::default(), &BTreeSet::new(), &BTreeSet::new());
-        let guides = guides(&store, &changed, &changed_plan, &[(&evidence, &triaged[0])]).unwrap();
+        let guides = guides(
+            &store,
+            &changed,
+            &changed_plan,
+            &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] }],
+        )
+        .unwrap();
         assert!(guides[&0].stale);
     }
 
