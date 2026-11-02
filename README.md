@@ -186,8 +186,11 @@ sprint branch, `develop`…) and reviews exactly what will be merged: against th
 freshly fetched remote target, committed changes only, with warnings for
 unpushed or unpulled commits and uncommitted changes. In the app, **Tasks** is
 the home page: create one by pasting what it asks for, pick each repository's
-target among the likely ones, and review it like a session, with the steps
-grouped by repository.
+target among the likely ones, and review it either as a **presentation** (the
+requirements with what fulfils them, then the change chapter by chapter in the
+order it works, across repositories, one slide per step) or as the usual list of
+steps grouped by those chapters; both keep your place. The model writes the
+storyline; without one, there is a chapter per repository.
 Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
 benchmark) in the background. `⌘K` jumps anywhere.
