@@ -361,6 +361,17 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE task ADD COLUMN branch TEXT;
 ",
+    // 20: el guion de una revisión: requisitos, capítulos en el orden en que
+    // funciona lo añadido y lo que queda fuera, generado por un modelo.
+    r"
+    CREATE TABLE review_storyline (
+        review_id       TEXT PRIMARY KEY,
+        input_hash      TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        storyline       TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+",
 ];
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -693,6 +704,15 @@ pub struct TaskRepo {
     pub branch: String,
     /// Rama a la que se va a mergear; `None` hasta que se elige.
     pub target: Option<String>,
+}
+
+/// Guion de una revisión tal como lo devolvió el modelo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredStoryline {
+    pub input_hash: String,
+    pub model: String,
+    /// JSON tal como lo devolvió el modelo.
+    pub storyline: String,
 }
 
 /// Recuento de lo obligatorio de una sesión en su último punto de control.
@@ -1861,6 +1881,34 @@ impl Store {
         let rows = statement
             .query_map([key], |row| Ok(TaskRepo { repo: row.get(0)?, branch: row.get(1)?, target: row.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn storyline(&self, review_id: &str) -> Result<Option<StoredStoryline>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT input_hash, model, storyline FROM review_storyline WHERE review_id = ?1",
+                [review_id],
+                |row| Ok(StoredStoryline { input_hash: row.get(0)?, model: row.get(1)?, storyline: row.get(2)? }),
+            )
+            .optional()?)
+    }
+
+    /// Guarda (o sustituye) el guion de una revisión.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_storyline(&self, review_id: &str, stored: &StoredStoryline) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_storyline (review_id, input_hash, model, storyline, created_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(review_id) DO UPDATE SET input_hash = excluded.input_hash, model = excluded.model,
+                 storyline = excluded.storyline, created_at = excluded.created_at",
+            params![review_id, stored.input_hash, stored.model, stored.storyline],
+        )?;
+        Ok(())
     }
 
     /// Último punto de control de una sesión.
@@ -3390,6 +3438,16 @@ mod tests {
         assert!(store.delete_task("DENMS-1").unwrap());
         assert_eq!(store.task_repos("DENMS-1").unwrap(), Vec::new());
         assert_eq!(store.task("DENMS-1").unwrap(), None);
+    }
+
+    #[test]
+    fn storylines_are_replaced_per_review() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.storyline("task:A-1").unwrap(), None);
+        let first = StoredStoryline { input_hash: "h1".into(), model: "m".into(), storyline: "{}".into() };
+        store.save_storyline("task:A-1", &first).unwrap();
+        store.save_storyline("task:A-1", &StoredStoryline { input_hash: "h2".into(), ..first }).unwrap();
+        assert_eq!(store.storyline("task:A-1").unwrap().unwrap().input_hash, "h2");
     }
 
     #[test]

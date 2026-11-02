@@ -573,4 +573,30 @@ export interface ReviewResult {
   guiding: { pending: string[]; errors: string[] } | null
   /** Si es la revisión de una tarea: lo que pide y cómo está cada repositorio. */
   task?: { key: string; title: string | null; description: string; repos: RepoSync[] }
+  /** En una tarea: el guion de su presentación (del modelo o automático). */
+  storyline?: Storyline
+  storylining?: { running: boolean; error?: string } | null
+}
+
+export interface StoryChapter {
+  title: string
+  intent: string
+  narration: string
+  /** Índices en `requirements`. */
+  requirements: number[]
+  /** Índices de los pasos, en orden de lectura. */
+  steps: number[]
+}
+
+/** El cambio contado como una presentación. */
+export interface Storyline {
+  /** Modelo que lo escribió; `null` en el guion automático (un capítulo por repositorio). */
+  model: string | null
+  summary: string
+  requirements: { text: string; status: 'done' | 'partial' | 'missing'; steps: number[]; note: string | null }[]
+  chapters: StoryChapter[]
+  /** Pasos fuera de lo que pide la tarea, con qué hacen. */
+  outside: [number, string][]
+  risks: string[]
+  stale: boolean
 }

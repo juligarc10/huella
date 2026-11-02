@@ -70,6 +70,8 @@ pub(crate) struct App {
     covering: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Guías en curso por sesión.
     guiding: Arc<Mutex<HashMap<String, Guiding>>>,
+    /// Guiones en curso por revisión: `None` mientras se escribe, o el error.
+    storylining: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
@@ -147,6 +149,7 @@ impl App {
             task_repos: None,
             covering: Arc::new(Mutex::new(HashMap::new())),
             guiding: Arc::new(Mutex::new(HashMap::new())),
+            storylining: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
         }
@@ -313,6 +316,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["review", session, "impact"]) => impact(app, session)?,
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
         ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
+        ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
         ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["comments", id]) => update_comment(app, id, body)?,
@@ -550,6 +554,9 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
         .collect();
     let mut guides = huella_engine::guide::guides(&app.store, review, plan, &context)?;
     drop(context);
+    // El guion, solo en las tareas: el del modelo si lo hay; si no, el automático.
+    // En una tarea: lo que pide, cómo está cada repositorio, el repositorio de cada paso y el guion.
+    add_task(app, review, plan, &triage, &declared, &mut value)?;
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
@@ -574,20 +581,6 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
         "checkpoints": policy.checkpoints, "error": policy_error,
     });
     value["guiding"] = json!(app.guiding.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
-    if let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) {
-        let task = app.store.task(key)?;
-        value["task"] = json!({
-            "key": key,
-            "title": task.as_ref().and_then(|task| task.title.clone()),
-            "description": task.as_ref().map(|task| task.description.clone()).unwrap_or_default(),
-            "repos": repos.iter().map(repo_json).collect::<Vec<_>>(),
-        });
-        if let Some(steps) = value["steps"].as_array_mut() {
-            for (step, flow) in steps.iter_mut().zip(plan) {
-                step["repo"] = json!(repo_of(repos, &review.files[flow.file].path).map(|repo| &repo.repo));
-            }
-        }
-    }
     value["comprehension"] = serde_json::to_value(comprehension)?;
     app.store.record_review_steps(&review.session_id, plan.len())?;
     let states = app.store.review_states()?;
@@ -970,6 +963,105 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
             state.pending.retain(|pending| *pending != key);
             if let Err(error) = outcome {
                 state.errors.push(format!("{key}: {error:#}"));
+            }
+        }
+    });
+    Ok((202, json!({"running": true})))
+}
+
+/// Lo que la revisión de una tarea lleva además de la de una sesión. No hace
+/// nada si la revisión es de una sesión.
+fn add_task(
+    app: &App,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    triage: &[huella_engine::triage::StepTriage],
+    declared: &BTreeMap<usize, Vec<huella_engine::declared::DeclaredView>>,
+    value: &mut Value,
+) -> Result<()> {
+    let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) else {
+        return Ok(());
+    };
+    let task = app.store.task(key)?;
+    value["task"] = json!({
+        "key": key,
+        "title": task.as_ref().and_then(|task| task.title.clone()),
+        "description": task.as_ref().map(|task| task.description.clone()).unwrap_or_default(),
+        "repos": repos.iter().map(repo_json).collect::<Vec<_>>(),
+    });
+    if let Some(steps) = value["steps"].as_array_mut() {
+        for (step, flow) in steps.iter_mut().zip(plan) {
+            step["repo"] = json!(repo_of(repos, &review.files[flow.file].path).map(|repo| &repo.repo));
+        }
+    }
+    // El guion del modelo si lo hay; si no, el automático.
+    let roots: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
+    let input = huella_engine::storyline::StoryInput {
+        title: task.as_ref().and_then(|task| task.title.as_deref()),
+        description: task.as_ref().map_or("", |task| task.description.as_str()),
+        repos: &roots,
+        triage,
+        declared,
+    };
+    let story = match huella_engine::storyline::storyline(&app.store, review, plan, input)? {
+        Some(story) => story,
+        None => huella_engine::storyline::fallback(review, plan, &roots),
+    };
+    value["storyline"] = serde_json::to_value(story)?;
+    value["storylining"] = match app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id)
+    {
+        Some(None) => json!({"running": true}),
+        Some(Some(error)) => json!({"running": false, "error": error}),
+        None => Value::Null,
+    };
+    Ok(())
+}
+
+/// Guion de la tarea: lo escribe un hilo con el modelo configurado; la revisión
+/// muestra mientras tanto el guion automático.
+fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let key = review.session_id.strip_prefix("task:").context("el guion es de las tareas")?.to_owned();
+    let repos: Vec<String> = app.task_repos.iter().flatten().map(|repo| repo.repo.clone()).collect();
+    let project = review_project(app, &review.session_id)?;
+    let points = huella_review::attention::attention(&review, &plan);
+    let Assessment { triage, .. } = assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
+    let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
+    let task = app.store.task(&key)?.with_context(|| format!("no hay ninguna tarea {key}"))?;
+    let review_id = review.session_id.clone();
+    {
+        let mut running = app.storylining.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(running.get(&review_id), Some(None)) {
+            return Ok((202, json!({"running": true})));
+        }
+        running.insert(review_id.clone(), None);
+    }
+    let (storylining, db, model) = (Arc::clone(&app.storylining), app.db.clone(), app.model.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model(&model)?;
+            let input = huella_engine::storyline::StoryInput {
+                title: task.title.as_deref(),
+                description: &task.description,
+                repos: &repos,
+                triage: &triage,
+                declared: &declared,
+            };
+            huella_engine::storyline::generate(&store, &review, &plan, input, llm.as_ref())?;
+            Ok(())
+        })();
+        let mut all = storylining.lock().unwrap_or_else(PoisonError::into_inner);
+        match outcome {
+            Ok(()) => {
+                all.remove(&review_id);
+            }
+            Err(error) => {
+                all.insert(review_id, Some(format!("{error:#}")));
             }
         }
     });

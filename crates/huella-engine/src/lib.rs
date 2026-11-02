@@ -22,6 +22,7 @@ mod render;
 mod review;
 pub mod review_loop;
 mod sources;
+pub mod storyline;
 pub mod task;
 pub mod triage;
 pub mod workspace;

@@ -446,9 +446,22 @@ huella task review DENMS-1234                     # lo que se va a revisar
 En la aplicación, **Tareas** es la página de inicio: «Nueva tarea» pide la clave
 y lo que pide la tarea (pegado), busca sus ramas y deja elegir el destino de
 cada repositorio entre los probables. La revisión es la misma que la de una
-sesión (triaje, guía, preguntas, veredictos y comentarios), con los pasos
-agrupados por repositorio, los avisos arriba y «Traer el remoto» para
-rehacerla con lo último.
+sesión (triaje, guía, preguntas, veredictos y comentarios), con los avisos
+arriba y «Traer el remoto» para rehacerla con lo último, y se puede hacer de dos
+formas que comparten el paso en el que estás:
+
+- **Presentación** (por defecto): una portada con lo que pide la tarea troceado
+  en requisitos (hecho, a medias o sin hacer, con los pasos que lo cumplen), el
+  mapa de capítulos, lo que queda fuera de la tarea y los riesgos; después el
+  cambio por capítulos, en el orden en que funciona lo añadido (de la entrada a
+  la lógica, la persistencia y los efectos, cruzando repositorios), y una
+  diapositiva por paso con lo declarado y la guía a un lado y el código al otro.
+  Se avanza con ← y →; «Ver en detalle» lleva al paso en la otra vista.
+- **Pasos**: la lista de siempre, agrupada por los capítulos del guion.
+
+El guion lo escribe el modelo con «Escribir el guion» y se marca como desfasado
+si la tarea cambia; sin modelo, hay un capítulo por repositorio en el orden del
+flujo.
 
 - **Las ramas se encuentran solas**: las que llevan la clave en el nombre
   (`feature/DENMS-1234-filtros`), en los repositorios de tus sesiones y en la
