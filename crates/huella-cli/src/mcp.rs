@@ -17,7 +17,9 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Huella guarda la memoria de las sesiones con agentes de IA anclada al código: qué se pidió \
 y por qué se escribió cada función, las decisiones de proyecto y la revisión guiada de cada sesión. Consulta \
 huella_symbol_history antes de cambiar código que no conoces, huella_decisions antes de proponer cambios de \
-arquitectura o tecnología, y huella_review para explicar o revisar lo que hizo una sesión.";
+arquitectura o tecnología, y huella_review para explicar o revisar lo que hizo una sesión. Mientras escribes \
+código, registra con huella_record cada decisión entre alternativas, lo que das por hecho, lo que no has \
+comprobado y cómo funciona lo que no es obvio: es lo que verá quien revise.";
 
 pub struct Context {
     pub store: Store,
@@ -75,7 +77,7 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
 }
 
 fn tools() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "huella_symbol_history",
             "description": "Qué se pidió y qué explicó el agente en cada sesión que tocó la función, clase o método \
@@ -144,10 +146,57 @@ fn tools() -> Value {
             "description": "Sesiones recientes con ediciones, con su proyecto.",
             "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}
         }
-    ])
+    ]);
+    // Antes de huella_sessions, que cierra la lista.
+    if let Some(list) = tools.as_array_mut() {
+        let at = list.len().saturating_sub(1);
+        list.insert(at, record_tool());
+    }
+    tools
+}
+
+/// `huella_record`: el agente declara lo que decidió sobre el código que acaba de escribir.
+fn record_tool() -> Value {
+    json!({
+        "name": "huella_record",
+        "description": "Registra, justo después de escribir un trozo de código, una decisión que tomaste, algo \
+                        que diste por hecho, algo que no comprobaste o un riesgo, y cómo funciona si no es \
+                        obvio. Quien revise lo verá junto a ese código. Una entrada por decisión; no registres \
+                        lo trivial (renombrados, formato, código que se explica solo). Sé concreto y honesto: \
+                        lo que no probaste va en unverified, no se adorna.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Ruta absoluta del fichero ya escrito"},
+                "symbol": {"type": "string", "description": "Función, método o clase (Clase.metodo o su nombre)"},
+                "lines": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2,
+                          "description": "[inicio, fin], 1-based, si no hay símbolo o es una parte de él"},
+                "kind": {"type": "string", "enum": ["decision", "assumption", "unverified", "risk"],
+                         "description": "decision: elegiste entre alternativas; assumption: das algo por hecho \
+                                         que la tarea no dice; unverified: dejas algo sin comprobar; risk: \
+                                         tocas algo sensible (seguridad, datos, API pública)"},
+                "summary": {"type": "string", "description": "Qué hiciste y por qué, en 1 a 3 frases"},
+                "how": {"type": "string", "description": "Cómo funciona el código, si no es obvio al leerlo"},
+                "alternatives": {"type": "array", "items": {"type": "object", "properties": {
+                    "option": {"type": "string"}, "why_not": {"type": "string"}},
+                    "required": ["option", "why_not"]},
+                    "description": "Opciones que descartaste y por qué"},
+                "assumptions": {"type": "array", "items": {"type": "string"}},
+                "unverified": {"type": "array", "items": {"type": "string"},
+                               "description": "Lo que no has probado ni comprobado"},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "review_hint": {"type": "string", "description": "Qué debería mirar quien revise"}
+            },
+            "required": ["file", "kind", "summary"]
+        }
+    })
 }
 
 fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> {
+    // Registrar no necesita la memoria: que no espere al indexado.
+    if name == "huella_record" {
+        return record(&context.store, arguments);
+    }
     // Lo nuevo de las transcripciones se indexa antes de responder.
     huella_engine::index(&mut context.store, &context.sources)?;
     match name {
@@ -181,6 +230,58 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
         }
         other => anyhow::bail!("herramienta desconocida: {other}"),
     }
+}
+
+/// `huella_record`: guarda lo que el agente declara sobre el código que acaba de escribir.
+fn record(store: &Store, arguments: &Value) -> Result<String> {
+    let text = |key: &str| arguments[key].as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+    let list = |key: &str| -> Vec<String> {
+        arguments[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.as_str().map(str::trim).filter(|item| !item.is_empty()).map(str::to_owned))
+            .collect()
+    };
+    let lines = arguments["lines"].as_array().and_then(|range| {
+        let line = |index: usize| range.get(index)?.as_u64().and_then(|n| usize::try_from(n).ok());
+        Some((line(0)?, line(1)?))
+    });
+    let new = huella_engine::declared::NewDeclaration {
+        file: text("file").ok_or_else(|| anyhow::anyhow!("falta `file`"))?.into(),
+        symbol: text("symbol"),
+        lines,
+        kind: text("kind").ok_or_else(|| anyhow::anyhow!("falta `kind`"))?,
+        summary: text("summary").unwrap_or_default(),
+        how: text("how"),
+        alternatives: arguments["alternatives"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some(huella_store::Alternative {
+                    option: item["option"].as_str()?.trim().to_owned(),
+                    why_not: item["why_not"].as_str().unwrap_or_default().trim().to_owned(),
+                })
+            })
+            .collect(),
+        assumptions: list("assumptions"),
+        unverified: list("unverified"),
+        confidence: text("confidence"),
+        review_hint: text("review_hint"),
+    };
+    let recorded = huella_engine::declared::record(store, &new)?;
+    let place = match &recorded.symbol {
+        Some(symbol) => format!("`{symbol}`"),
+        None => "sus líneas (no encontré un símbolo)".to_owned(),
+    };
+    Ok(format!(
+        "Registrado #{} en {place}, líneas {}–{} de {}.",
+        recorded.id,
+        recorded.lines.0,
+        recorded.lines.1,
+        new.file.display()
+    ))
 }
 
 fn review_feedback(context: &Context, arguments: &Value) -> Result<String> {
@@ -316,6 +417,7 @@ mod tests {
                 "huella_review",
                 "huella_search",
                 "huella_review_feedback",
+                "huella_record",
                 "huella_sessions"
             ]
         );
@@ -334,6 +436,41 @@ mod tests {
         assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("no se pudo leer"));
         let unknown = handle(&mut context, &json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})).unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn agents_record_what_they_decided_about_the_code() {
+        let mut context = context();
+        let dir = std::env::temp_dir().join(format!("huella-mcp-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("total.ts");
+        std::fs::write(&file, "export function total(items) {\n  return items.length;\n}\n").unwrap();
+        let call = |context: &mut Context, arguments: Value| {
+            let response = handle(
+                context,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "huella_record", "arguments": arguments}}),
+            )
+            .unwrap();
+            (
+                response["result"]["content"][0]["text"].as_str().unwrap().to_owned(),
+                response["result"]["isError"] == true,
+            )
+        };
+        let (text, error) = call(
+            &mut context,
+            json!({"file": file, "symbol": "total", "kind": "assumption", "summary": "Cuento los elementos, no sumo precios",
+                   "unverified": ["listas vacías"], "alternatives": [{"option": "sumar precios", "why_not": "la tarea no lo pide"}]}),
+        );
+        assert!(!error, "{text}");
+        assert!(text.contains("`total`, líneas 1–3"), "{text}");
+        let stored = context
+            .store
+            .declarations(&huella_engine::normalize_path(&std::fs::canonicalize(&file).unwrap(), None))
+            .unwrap();
+        assert_eq!(stored[0].alternatives[0].option, "sumar precios");
+        let (text, error) = call(&mut context, json!({"file": file, "kind": "opinion", "summary": "x"}));
+        assert!(error && text.contains("kind"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

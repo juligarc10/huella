@@ -203,6 +203,33 @@ fn context(
         );
     }
 
+    // Lo que declaró el agente sobre los símbolos de la selección, con si sigue vigente.
+    let normalized = crate::normalize_path(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()), None);
+    let current: Vec<&str> = source.lines().collect();
+    let declared: Vec<crate::declared::DeclaredView> = store
+        .declarations(&normalized)?
+        .into_iter()
+        .filter(|declaration| {
+            declaration.symbol.as_deref().map_or_else(
+                || declaration.start_line <= end && start <= declaration.end_line,
+                |symbol| containing.contains(&symbol),
+            )
+        })
+        .take(5)
+        .map(|declaration| {
+            let now = symbols
+                .iter()
+                .find(|symbol| declaration.symbol.as_deref() == Some(symbol.qualified_name.as_str()))
+                .map_or((declaration.start_line, declaration.end_line), |symbol| (symbol.start_line, symbol.end_line));
+            let text = current.get(now.0.saturating_sub(1)..now.1.min(current.len())).map(|lines| lines.join("\n"));
+            crate::declared::view(declaration, &text.unwrap_or_default())
+        })
+        .collect();
+    if !declared.is_empty() {
+        let _ =
+            writeln!(out, "## Lo que declaró el agente sobre este código\n\n{}", crate::declared::render(&declared));
+    }
+
     let commits = blame(path, start, end);
     if !commits.is_empty() {
         let _ = writeln!(out, "## Commits de estas líneas\n\n{}\n", commits.join("\n"));

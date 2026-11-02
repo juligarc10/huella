@@ -220,6 +220,9 @@ enum Command {
         #[command(subcommand)]
         action: task::TaskCommand,
     },
+    /// Texto para AGENTS.md: pide al agente registrar sus decisiones con
+    /// `huella_record` (para agentes sin skills; Claude Code usa la skill).
+    AgentsMd,
     /// Puntos de control para los hooks de Claude Code: lee el evento por
     /// stdin. `huella setup` los instala.
     Hook {
@@ -612,10 +615,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Review { action } => review_command(cli.db, action),
         Command::Task { action } => task::command(&open_store(cli.db)?, &sources(None)?, action),
         Command::Hook { event, projects } => hook::run(event, cli.db, projects),
-        Command::Mcp { projects } => {
-            let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
-            mcp::serve(&mut context)
-        }
+        Command::AgentsMd => agents_md_command(),
+        Command::Mcp { projects } => mcp_command(cli.db, projects),
         Command::Lsp { projects, index_every, model } => lsp(cli.db, projects, index_every, model),
     }
 }
@@ -856,22 +857,23 @@ fn guide_command(
             .as_ref()
             .map_or_else(|| review.files[plan[index].file].path.clone(), |s| s.qualified_name.clone())
     };
+    let declared = huella_engine::declared::for_steps(&store, &review, &plan)?;
+    let context: Vec<huella_engine::guide::StepContext<'_>> = (0..plan.len())
+        .map(|index| huella_engine::guide::StepContext {
+            evidence: &assessment.evidence[index],
+            triage: &assessment.triage[index],
+            declared: declared.get(&index).map_or(&[], Vec::as_slice),
+        })
+        .collect();
     println!("Guiando {} pasos con {}…", chosen.len(), model.model_id());
     for &index in &chosen {
         println!("  · paso {} {}", index + 1, name(index));
-        if let Err(error) = huella_engine::guide::guide_step(
-            &store,
-            &review,
-            &plan,
-            index,
-            &assessment.evidence[index],
-            &assessment.triage[index],
-            model.as_ref(),
-        ) {
+        if let Err(error) =
+            huella_engine::guide::guide_step(&store, &review, &plan, index, context[index], model.as_ref())
+        {
             eprintln!("aviso: paso {}: {error}", index + 1);
         }
     }
-    let context: Vec<_> = assessment.evidence.iter().zip(&assessment.triage).collect();
     let guides = huella_engine::guide::guides(&store, &review, &plan, &context)?;
     for index in chosen {
         let Some(guide) = guides.get(&index) else { continue };
@@ -996,6 +998,18 @@ fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()>
         }
         _ => unreachable!("solo comandos del bucle de corrección"),
     }
+}
+
+/// `huella mcp`: el servidor para los agentes.
+fn mcp_command(db: Option<PathBuf>, projects: Option<PathBuf>) -> Result<()> {
+    let mut context = mcp::Context { store: open_store(db)?, sources: sources(projects)? };
+    mcp::serve(&mut context)
+}
+
+#[allow(clippy::unnecessary_wraps, reason = "encaja con el resto de órdenes")]
+fn agents_md_command() -> Result<()> {
+    emit(&setup::agents_md());
+    Ok(())
 }
 
 /// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.

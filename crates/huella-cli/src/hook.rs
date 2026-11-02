@@ -44,8 +44,15 @@ fn respond(event: HookEvent, input: &Value, db: Option<PathBuf>, projects: Optio
             let mut store = crate::open_store(db)?;
             let sources = crate::sources(projects)?;
             huella_engine::index(&mut store, &sources)?;
-            let checkpoint = huella_engine::checkpoint::check(&store, &sources, session, cwd)?;
-            Ok(checkpoint.as_ref().and_then(huella_engine::checkpoint::notice).map(|notice| stop_output(&notice)))
+            let Some(checkpoint) = huella_engine::checkpoint::check(&store, &sources, session, cwd)? else {
+                return Ok(None);
+            };
+            // Una sola vez por turno: si ya sigue por un hook, termina.
+            let continuing = input["stop_hook_active"].as_bool().unwrap_or(false);
+            if !continuing && let Some(request) = huella_engine::checkpoint::declare_request(&checkpoint) {
+                return Ok(Some(continue_output(&request)));
+            }
+            Ok(huella_engine::checkpoint::notice(&checkpoint).map(|notice| stop_output(&notice)))
         }
         HookEvent::PreEdit => {
             // Sin límite en la política no hace falta ni abrir la base de datos.
@@ -64,6 +71,11 @@ fn respond(event: HookEvent, input: &Value, db: Option<PathBuf>, projects: Optio
 /// Mensaje para la persona al acabar el turno.
 fn stop_output(notice: &str) -> Value {
     json!({ "systemMessage": notice })
+}
+
+/// Que el agente no termine todavía: Claude Code le pasa el motivo.
+fn continue_output(reason: &str) -> Value {
+    json!({ "decision": "block", "reason": reason })
 }
 
 /// Rechazo de la edición, con el porqué para el agente.
@@ -100,6 +112,7 @@ mod tests {
     #[test]
     fn outputs_follow_the_claude_code_format() {
         assert_eq!(stop_output("hola"), json!({"systemMessage": "hola"}));
+        assert_eq!(continue_output("registra"), json!({"decision": "block", "reason": "registra"}));
         let deny = deny_output("para");
         assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(deny["hookSpecificOutput"]["permissionDecisionReason"], "para");

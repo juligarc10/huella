@@ -109,6 +109,8 @@ pub fn setup(
         println!("No se encontró ningún agente compatible (Claude Code, Codex, Copilot).");
     }
     if McpAgent::ClaudeCode.detected(dirs) {
+        step("Registro de decisiones (Claude Code)");
+        skill_step(&prompt, dirs)?;
         step("Puntos de control (Claude Code)");
         checkpoints_step(&prompt, dirs, &exe)?;
     }
@@ -320,6 +322,32 @@ fn register_agent(prompt: &Prompt, agent: McpAgent, dirs: &Dirs, exe: &Path) -> 
             }
         }
         Err(error) => println!("! {}: {error:#}\n  a mano: {}", agent.label(), agent.manual(dirs, exe)),
+    }
+    Ok(())
+}
+
+/// La skill que pide al agente registrar sus decisiones con `huella_record`.
+fn skill_step(prompt: &Prompt, dirs: &Dirs) -> Result<()> {
+    let question = match super::skill::state(dirs) {
+        super::skill::SkillState::Current => {
+            println!("✓ skill huella-registro instalada");
+            return Ok(());
+        }
+        super::skill::SkillState::Outdated => "¿Actualizar la skill huella-registro a esta versión?",
+        super::skill::SkillState::Missing => {
+            println!(
+                "Con la skill huella-registro, Claude Code registra mientras escribe sus decisiones, lo que da por \
+                 hecho, lo que no comprobó y cómo funciona lo que no es obvio; lo verás al revisar. Para otros \
+                 agentes: huella agents-md da el mismo texto para AGENTS.md."
+            );
+            "¿Instalar la skill en ~/.claude/skills?"
+        }
+    };
+    if prompt.confirm(question, true)? {
+        match super::skill::install(dirs) {
+            Ok(()) => println!("✓ skill instalada"),
+            Err(error) => println!("! {error:#}"),
+        }
     }
     Ok(())
 }

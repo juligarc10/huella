@@ -123,11 +123,14 @@ pub struct Checkpoints {
     /// Con tantos pasos obligatorios sin veredicto, el agente no puede seguir
     /// editando hasta que se revisen. `None`: nunca se le para.
     pub block_after: Option<usize>,
+    /// Al acabar el turno, pedir al agente que declare (con `huella_record`)
+    /// lo que decidió en los pasos obligatorios sin declaración.
+    pub require_declarations: bool,
 }
 
 impl Default for Checkpoints {
     fn default() -> Self {
-        Self { notify: true, block_after: None }
+        Self { notify: true, block_after: None, require_declarations: false }
     }
 }
 
@@ -614,13 +617,13 @@ mod tests {
         assert_eq!(policy.levels[&Tag::Unverified], Level::Skip);
         assert_eq!(policy.default, Level::Acknowledge);
         assert!(policy.source.is_some());
-        assert_eq!(policy.checkpoints, Checkpoints { notify: true, block_after: None });
+        assert_eq!(policy.checkpoints, Checkpoints::default());
 
         std::fs::write(dir.join(POLICY_FILE), "[checkpoints]\nnotify = false\nblock_after = 5\n").unwrap();
         let policy = load_policy(Some(&dir)).unwrap();
         assert_eq!(
             (policy.preset, policy.checkpoints),
-            (Preset::Balanced, Checkpoints { notify: false, block_after: Some(5) })
+            (Preset::Balanced, Checkpoints { notify: false, block_after: Some(5), require_declarations: false })
         );
 
         std::fs::write(dir.join(POLICY_FILE), "[review]\npreset = \"loose\"\n").unwrap();

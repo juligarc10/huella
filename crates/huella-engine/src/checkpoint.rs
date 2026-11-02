@@ -32,6 +32,8 @@ pub struct Checkpoint {
     pub pending: Vec<Pending>,
     /// Pendientes de más respecto al punto de control anterior.
     pub new_pending: usize,
+    /// Pendientes sobre los que el agente no ha declarado nada vigente.
+    pub undeclared: Vec<Pending>,
     pub policy: Policy,
 }
 
@@ -44,25 +46,34 @@ pub fn count<S: BuildHasher>(
     triage: &[StepTriage],
     verdicts: &HashMap<String, StepVerdict, S>,
 ) -> (usize, Vec<Pending>) {
-    let mut total = 0;
-    let mut pending = Vec::new();
-    for (step, triaged) in plan.iter().zip(triage) {
-        if triaged.level != Level::Must {
-            continue;
-        }
-        total += 1;
-        let decided =
-            verdicts.get(&step.key(review)).is_some_and(|verdict| verdict.content_hash == step.content_hash());
-        if !decided {
+    let total = triage.iter().filter(|triaged| triaged.level == Level::Must).count();
+    (total, pending_steps(review, plan, triage, verdicts).into_iter().map(|(_, pending)| pending).collect())
+}
+
+/// Los pasos obligatorios sin un veredicto que valga, con su índice en el plan.
+fn pending_steps<S: BuildHasher>(
+    review: &SessionReview,
+    plan: &[FlowStep],
+    triage: &[StepTriage],
+    verdicts: &HashMap<String, StepVerdict, S>,
+) -> Vec<(usize, Pending)> {
+    plan.iter()
+        .zip(triage)
+        .enumerate()
+        .filter(|(_, (step, triaged))| {
+            triaged.level == Level::Must
+                && verdicts.get(&step.key(review)).is_none_or(|verdict| verdict.content_hash != step.content_hash())
+        })
+        .map(|(index, (step, triaged))| {
             let path = &review.files[step.file].path;
-            pending.push(Pending {
+            let pending = Pending {
                 name: step.symbol.as_ref().map_or_else(|| file_name(path), |symbol| symbol.qualified_name.clone()),
                 file: file_name(path),
                 tag: triaged.findings.first().map(|finding| finding.tag),
-            });
-        }
-    }
-    (total, pending)
+            };
+            (index, pending)
+        })
+        .collect()
 }
 
 /// Punto de control de la sesión: lo cuenta y lo guarda para la próxima vez.
@@ -90,6 +101,12 @@ pub fn check(
     let assessment = crate::triage::assess(store, &review, &plan, &points, &activity, project.as_deref())?;
     let verdicts = store.review_verdicts(&review.session_id)?;
     let (must_total, pending) = count(&review, &plan, &assessment.triage, &verdicts);
+    let declared = crate::declared::for_steps(store, &review, &plan)?;
+    let undeclared = pending_steps(&review, &plan, &assessment.triage, &verdicts)
+        .into_iter()
+        .filter(|(index, _)| !declared.get(index).is_some_and(|entries| entries.iter().any(|entry| !entry.stale)))
+        .map(|(_, pending)| pending)
+        .collect();
     let previous = store.checkpoint(&review.session_id)?.map_or(0, |stored| stored.must_pending);
     store.save_checkpoint(&review.session_id, StoredCheckpoint { must_total, must_pending: pending.len() })?;
     Ok(Some(Checkpoint {
@@ -97,6 +114,7 @@ pub fn check(
         session_id: review.session_id,
         must_total,
         pending,
+        undeclared,
         policy: assessment.policy,
     }))
 }
@@ -155,6 +173,32 @@ pub fn notice(checkpoint: &Checkpoint) -> Option<String> {
         "Huella: {steps} sin revisar{new}: {}{more}. Revísalos en Huella (`huella ui`, sesión {}).",
         named.join(", "),
         short(&checkpoint.session_id)
+    ))
+}
+
+/// Lo que se le pide al agente antes de terminar el turno, si la política lo
+/// exige y hay pasos obligatorios sin declarar.
+#[must_use]
+pub fn declare_request(checkpoint: &Checkpoint) -> Option<String> {
+    if !checkpoint.policy.checkpoints.require_declarations || checkpoint.undeclared.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = checkpoint
+        .undeclared
+        .iter()
+        .take(6)
+        .map(|step| match step.tag {
+            Some(tag) => format!("{} en {} ({})", step.name, step.file, tag.label()),
+            None => format!("{} en {}", step.name, step.file),
+        })
+        .collect();
+    let more = checkpoint.undeclared.len().saturating_sub(named.len());
+    let more = if more > 0 { format!(" y {more} más") } else { String::new() };
+    Some(format!(
+        "Huella: antes de terminar, registra con huella_record lo que decidiste, diste por hecho o no comprobaste \
+         en estos pasos obligatorios: {}{more}. Una entrada por decisión, anclada a su símbolo; si en alguno no \
+         hay nada que declarar, dilo en una frase y termina.",
+        named.join("; ")
     ))
 }
 
@@ -249,8 +293,21 @@ mod tests {
                 .map(|n| Pending { name: format!("paso{n}"), file: "a.ts".into(), tag: Some(Tag::Security) })
                 .collect(),
             new_pending,
+            undeclared: Vec::new(),
             policy: Policy::default(),
         }
+    }
+
+    #[test]
+    fn undeclared_must_steps_are_requested_only_when_the_policy_asks() {
+        let mut state = checkpoint(2, 0);
+        state.undeclared = state.pending.clone();
+        assert_eq!(declare_request(&state), None, "por defecto no se pide");
+        state.policy.checkpoints.require_declarations = true;
+        let text = declare_request(&state).unwrap();
+        assert!(text.contains("paso0 en a.ts (seguridad); paso1 en a.ts (seguridad)"), "{text}");
+        state.undeclared.clear();
+        assert_eq!(declare_request(&state), None);
     }
 
     #[test]

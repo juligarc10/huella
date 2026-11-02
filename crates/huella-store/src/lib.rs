@@ -331,6 +331,31 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (task_key, repo)
     );
 ",
+    // 18: lo que el agente declara mientras escribe (decisiones, suposiciones,
+    // lo que no comprobó, cómo funciona), anclado al símbolo con su texto de
+    // entonces para saber si sigue vigente.
+    r"
+    CREATE TABLE declaration (
+        id              INTEGER PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        symbol          TEXT,
+        start_line      INTEGER NOT NULL,
+        end_line        INTEGER NOT NULL,
+        snapshot        TEXT NOT NULL,
+        repo            TEXT,
+        branch          TEXT,
+        kind            TEXT NOT NULL,
+        summary         TEXT NOT NULL,
+        how             TEXT,
+        alternatives    TEXT NOT NULL DEFAULT '[]',
+        assumptions     TEXT NOT NULL DEFAULT '[]',
+        unverified      TEXT NOT NULL DEFAULT '[]',
+        confidence      TEXT,
+        review_hint     TEXT
+    );
+    CREATE INDEX declaration_by_path ON declaration(path);
+",
 ];
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -603,6 +628,43 @@ pub struct StoredGuide {
     pub guide: String,
     /// Índices de las comprobaciones que la persona dio por hechas.
     pub checked: Vec<usize>,
+}
+
+/// Una alternativa que el agente descartó.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Alternative {
+    pub option: String,
+    pub why_not: String,
+}
+
+/// Lo que el agente declaró sobre un trozo de código al escribirlo.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Declaration {
+    pub id: i64,
+    pub recorded_at: String,
+    /// Ruta normalizada del fichero.
+    pub path: String,
+    /// Símbolo al que se ancla, si se encontró.
+    pub symbol: Option<String>,
+    pub start_line: usize,
+    pub end_line: usize,
+    /// El texto anclado cuando se declaró.
+    pub snapshot: String,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    /// `decision`, `assumption`, `unverified` o `risk`.
+    pub kind: String,
+    /// Qué se hizo y por qué.
+    pub summary: String,
+    /// Cómo funciona el código, si no es obvio.
+    pub how: Option<String>,
+    pub alternatives: Vec<Alternative>,
+    pub assumptions: Vec<String>,
+    pub unverified: Vec<String>,
+    /// `high`, `medium` o `low`.
+    pub confidence: Option<String>,
+    /// Qué debería mirar quien revise.
+    pub review_hint: Option<String>,
 }
 
 /// Una tarea: lo que se pidió (pegado de JIRA o de donde sea).
@@ -1616,6 +1678,88 @@ impl Store {
             params![session_id, step_key, serde_json::to_string(&checked).unwrap_or_else(|_| "[]".into())],
         )?;
         Ok(true)
+    }
+
+    /// Guarda una declaración (redactada) y devuelve su id. `id` y
+    /// `recorded_at` de la entrada se ignoran.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_declaration(&self, entry: &Declaration) -> Result<i64> {
+        let list = |items: &[String]| {
+            serde_json::to_string(&items.iter().map(|item| redact(item).into_owned()).collect::<Vec<_>>())
+                .unwrap_or_else(|_| "[]".into())
+        };
+        let alternatives: Vec<Alternative> = entry
+            .alternatives
+            .iter()
+            .map(|alt| Alternative {
+                option: redact(&alt.option).into_owned(),
+                why_not: redact(&alt.why_not).into_owned(),
+            })
+            .collect();
+        let optional = |text: &Option<String>| text.as_deref().map(|text| redact(text).into_owned());
+        self.conn.execute(
+            "INSERT INTO declaration (recorded_at, path, symbol, start_line, end_line, snapshot, repo, branch, kind,
+                 summary, how, alternatives, assumptions, unverified, confidence, review_hint)
+             VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                entry.path,
+                entry.symbol,
+                i64::try_from(entry.start_line).unwrap_or(i64::MAX),
+                i64::try_from(entry.end_line).unwrap_or(i64::MAX),
+                redact(&entry.snapshot),
+                entry.repo,
+                entry.branch,
+                entry.kind,
+                redact(&entry.summary),
+                optional(&entry.how),
+                serde_json::to_string(&alternatives).unwrap_or_else(|_| "[]".into()),
+                list(&entry.assumptions),
+                list(&entry.unverified),
+                entry.confidence,
+                optional(&entry.review_hint),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Declaraciones sobre un fichero, la más reciente primero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn declarations(&self, path: &str) -> Result<Vec<Declaration>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id, recorded_at, path, symbol, start_line, end_line, snapshot, repo, branch, kind, summary, how,
+                    alternatives, assumptions, unverified, confidence, review_hint
+             FROM declaration WHERE path = ?1 ORDER BY recorded_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([path], |row| {
+            let line = |index: usize| -> rusqlite::Result<usize> {
+                Ok(usize::try_from(row.get::<_, i64>(index)?).unwrap_or_default())
+            };
+            let json = |index: usize| -> rusqlite::Result<String> { row.get(index) };
+            Ok(Declaration {
+                id: row.get(0)?,
+                recorded_at: row.get(1)?,
+                path: row.get(2)?,
+                symbol: row.get(3)?,
+                start_line: line(4)?,
+                end_line: line(5)?,
+                snapshot: row.get(6)?,
+                repo: row.get(7)?,
+                branch: row.get(8)?,
+                kind: row.get(9)?,
+                summary: row.get(10)?,
+                how: row.get(11)?,
+                alternatives: serde_json::from_str(&json(12)?).unwrap_or_default(),
+                assumptions: serde_json::from_str(&json(13)?).unwrap_or_default(),
+                unverified: serde_json::from_str(&json(14)?).unwrap_or_default(),
+                confidence: row.get(15)?,
+                review_hint: row.get(16)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Crea la tarea o actualiza su título y su descripción.
@@ -3169,6 +3313,38 @@ mod tests {
         store.save_narration("s1", 3, &first).unwrap();
         let stored = store.narrations("s1").unwrap();
         assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
+    }
+
+    #[test]
+    fn declarations_are_kept_per_file_and_redacted() {
+        let store = Store::open_in_memory().unwrap();
+        let entry = Declaration {
+            id: 0,
+            recorded_at: String::new(),
+            path: "/r/a.ts".into(),
+            symbol: Some("login".into()),
+            start_line: 3,
+            end_line: 9,
+            snapshot: "function login() {}".into(),
+            repo: Some("/r".into()),
+            branch: Some("feature/DENMS-1".into()),
+            kind: "decision".into(),
+            summary: "Comparo con bcrypt; la clave sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 no va aquí".into(),
+            how: Some("Lee el hash y lo compara".into()),
+            alternatives: vec![Alternative { option: "argon2".into(), why_not: "no está en el proyecto".into() }],
+            assumptions: vec!["el hash ya existe".into()],
+            unverified: vec!["con contraseñas vacías".into()],
+            confidence: Some("medium".into()),
+            review_hint: Some("Mira el caso sin usuario".into()),
+        };
+        let first = store.add_declaration(&entry).unwrap();
+        let second = store.add_declaration(&Declaration { kind: "risk".into(), ..entry.clone() }).unwrap();
+        store.add_declaration(&Declaration { path: "/r/b.ts".into(), ..entry.clone() }).unwrap();
+        let found = store.declarations("/r/a.ts").unwrap();
+        assert_eq!(found.iter().map(|d| d.id).collect::<Vec<_>>(), vec![second, first]);
+        assert!(!found[0].summary.contains("sk-ant-api03"), "{}", found[0].summary);
+        assert_eq!(found[1].alternatives[0].option, "argon2");
+        assert_eq!(found[1].unverified, vec!["con contraseñas vacías".to_owned()]);
     }
 
     #[test]
