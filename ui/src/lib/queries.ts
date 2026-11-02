@@ -109,7 +109,12 @@ export function useReview(session: string | undefined) {
     // Mientras el modelo responde una pregunta, se consulta a menudo.
     refetchInterval: (state) => {
       const data = state.state.data
-      return data?.asking.some((ask) => !ask.error) || data?.covering?.running || data?.guiding?.pending.length ? 1500 : false
+      return data?.asking.some((ask) => !ask.error) ||
+        data?.covering?.running ||
+        data?.guiding?.pending.length ||
+        data?.storylining?.running
+        ? 1500
+        : false
     },
   })
 }
@@ -301,6 +306,16 @@ export function useCoverage(session: string) {
   const client = useQueryClient()
   return useMutation({
     mutationFn: () => api.post(`review/${session}/coverage`, {}),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Pide al modelo el guion de la tarea; se escribe en segundo plano. */
+export function useStoryline(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post(`review/${session}/storyline`, {}),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
