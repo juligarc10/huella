@@ -169,7 +169,7 @@ fn context(
     out.push_str("```\n");
     for number in start.saturating_sub(AROUND).max(1)..=(end + AROUND).min(lines.len()) {
         let mark = if (start..=end).contains(&number) { '>' } else { ' ' };
-        let _ = writeln!(out, "{mark}{number:>5}  {}", lines[number - 1]);
+        let _ = writeln!(out, "{mark}{number:>5}  {}", crate::storyline::clip_line(lines[number - 1]));
     }
     out.push_str("```\n\n");
 
