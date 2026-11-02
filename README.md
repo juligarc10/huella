@@ -172,6 +172,11 @@ block_after = 5   # stop the agent at 5 unreviewed must-review steps (default: n
 **Branch** reviews what you are about to ship: the diff against the base
 branch, every line attributed to the agent session that wrote it, to a session
 that changed it from the terminal, or to the person who changed it by hand.
+**Tasks** go further: `huella task new DENMS-1234` finds the branch with that key
+in every repository it touches, suggests the branch each one merges into (a
+sprint branch, `develop`…) and reviews exactly what will be merged: against the
+freshly fetched remote target, committed changes only, with warnings for
+unpushed or unpulled commits and uncommitted changes.
 Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
 benchmark) in the background. `⌘K` jumps anywhere.

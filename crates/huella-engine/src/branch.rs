@@ -306,10 +306,10 @@ fn attribute(
 /// real y los agentes la que usaron. Se resuelve la carpeta, que existe aunque
 /// el fichero se haya borrado, y se guarda para no repetirlo en cada edición.
 #[derive(Default)]
-struct RealPaths(HashMap<PathBuf, PathBuf>);
+pub(crate) struct RealPaths(HashMap<PathBuf, PathBuf>);
 
 impl RealPaths {
-    fn of(&mut self, path: &Path) -> PathBuf {
+    pub(crate) fn of(&mut self, path: &Path) -> PathBuf {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return path.to_owned() };
         let parent = self
             .0
@@ -460,7 +460,7 @@ fn default_base(repo: &Path) -> Result<String> {
 
 /// Segundos Unix de una fecha RFC 3339 (`2026-10-27T10:00:00.123Z` o con
 /// desfase `+02:00`), sin depender de una biblioteca de fechas.
-fn unix_seconds(text: &str) -> Option<i64> {
+pub(crate) fn unix_seconds(text: &str) -> Option<i64> {
     let (date, time) = text.split_once('T')?;
     let mut ymd = date.split('-').map(|part| part.parse::<i64>().ok());
     let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
