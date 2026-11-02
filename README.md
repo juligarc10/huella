@@ -167,7 +167,15 @@ Huella never stops the agent.
 [checkpoints]
 notify = true     # tell you at the end of each turn (default)
 block_after = 5   # stop the agent at 5 unreviewed must-review steps (default: never)
+require_declarations = true  # ask it to declare must-review steps before ending a turn (default: no)
 ```
+
+**Declarations**: with the `huella_record` MCP tool and the `huella-registro`
+skill that `huella setup` installs in Claude Code (`huella agents-md` prints the
+same text for `AGENTS.md`), the agent records as it writes what it chose among
+alternatives, what it assumed, what it left untested and how non-obvious code
+works. Each step shows that next to its code, as the agent's version to check
+against the diff, flagged when the code changed afterwards.
 
 **Branch** reviews what you are about to ship: the diff against the base
 branch, every line attributed to the agent session that wrote it, to a session

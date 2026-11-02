@@ -347,6 +347,24 @@ huella review guide 84e33d8e --all    # también los de vistazo
 huella review guide 84e33d8e --step 3
 ```
 
+#### Lo que el agente declara mientras escribe
+
+Huella deduce el porqué de lo que el agente pensó en su transcripción, pero lo
+más útil al revisar es que lo diga a propósito: qué alternativas descartó, qué
+da por hecho, qué no comprobó y cómo funciona lo que no es obvio. Para eso el
+servidor MCP tiene `huella_record`, y `huella setup` instala en Claude Code la
+skill `huella-registro`, que le dice cuándo registrar (al elegir entre
+alternativas, al suponer algo que la tarea no dice, al dejar algo sin probar y al
+tocar algo sensible) y cuándo no (renombrados, formato, lo que se explica solo).
+Para agentes sin skills, `huella agents-md` da el mismo texto para `AGENTS.md`.
+
+Cada declaración se ancla al símbolo con el texto que tenía. En la revisión, el
+paso la muestra como **lo que declaró el agente**, su versión, que hay que
+contrastar con el código, y avisa si el código cambió después. La guía y las
+preguntas sobre el código también la usan. Con `require_declarations` (abajo), si
+el agente termina el turno con pasos obligatorios sin declarar, el hook le pide
+que los registre antes de terminar; solo una vez por turno.
+
 #### Puntos de control mientras el agente trabaja
 
 Para que la revisión vaya al paso del agente y no se acumule para el final,
@@ -365,6 +383,7 @@ junto a los que ya tengas):
 [checkpoints]
 notify = true     # el aviso al acabar cada turno (por defecto, sí)
 block_after = 5   # parar al agente con 5 obligatorios sin revisar (por defecto, nunca)
+require_declarations = true  # pedirle que declare lo obligatorio antes de terminar (por defecto, no)
 ```
 
 Si algo falla en Huella, el hook sale sin decir nada: nunca para al agente por
