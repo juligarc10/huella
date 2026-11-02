@@ -132,9 +132,9 @@ pub(crate) fn turn_request(review: &SessionReview, plan: &[FlowStep], points: &[
         out.push_str("\n```diff\n");
         for line in step.lines.iter().take(DIFF_LINES_PER_STEP) {
             let _ = match line {
-                DiffLine::Context(text) => writeln!(out, " {text}"),
-                DiffLine::Added { text, .. } => writeln!(out, "+{text}"),
-                DiffLine::Removed(text) => writeln!(out, "-{text}"),
+                DiffLine::Context(text) => writeln!(out, " {}", crate::storyline::clip_line(text)),
+                DiffLine::Added { text, .. } => writeln!(out, "+{}", crate::storyline::clip_line(text)),
+                DiffLine::Removed(text) => writeln!(out, "-{}", crate::storyline::clip_line(text)),
             };
         }
         if step.lines.len() > DIFF_LINES_PER_STEP {

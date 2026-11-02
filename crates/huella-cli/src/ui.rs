@@ -71,7 +71,7 @@ pub(crate) struct App {
     /// Guías en curso por sesión.
     guiding: Arc<Mutex<HashMap<String, Guiding>>>,
     /// Guiones en curso por revisión: `None` mientras se escribe, o el error.
-    storylining: Arc<Mutex<HashMap<String, Option<String>>>>,
+    storylining: Arc<Mutex<HashMap<String, Storylining>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
@@ -98,6 +98,15 @@ struct PendingAsk {
 }
 
 type Asking = Arc<Mutex<HashMap<String, Vec<PendingAsk>>>>;
+
+/// Un guion que un hilo está escribiendo (por partes si no cabe de una vez), o su error.
+#[derive(Debug, Clone, Default, Serialize)]
+struct Storylining {
+    running: bool,
+    /// Parte en curso y cuántas hay (la última junta las anteriores).
+    part: Option<(usize, usize)>,
+    error: Option<String>,
+}
 
 /// Guías de una sesión que un hilo está generando, una a una.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1014,12 +1023,8 @@ fn add_task(
         },
     };
     value["storyline"] = serde_json::to_value(story)?;
-    value["storylining"] = match app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id)
-    {
-        Some(None) => json!({"running": true}),
-        Some(Some(error)) => json!({"running": false, "error": error}),
-        None => Value::Null,
-    };
+    value["storylining"] =
+        json!(app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     Ok(())
 }
 
@@ -1042,10 +1047,10 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
     let review_id = review.session_id.clone();
     {
         let mut running = app.storylining.lock().unwrap_or_else(PoisonError::into_inner);
-        if matches!(running.get(&review_id), Some(None)) {
+        if running.get(&review_id).is_some_and(|state| state.running) {
             return Ok((202, json!({"running": true})));
         }
-        running.insert(review_id.clone(), None);
+        running.insert(review_id.clone(), Storylining { running: true, ..Storylining::default() });
     }
     let (storylining, db, model) = (Arc::clone(&app.storylining), app.db.clone(), app.model.clone());
     std::thread::spawn(move || {
@@ -1059,7 +1064,11 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
                 triage: &triage,
                 declared: &declared,
             };
-            huella_engine::storyline::generate(&store, &review, &plan, input, llm.as_ref())?;
+            huella_engine::storyline::generate(&store, &review, &plan, input, llm.as_ref(), |part, total| {
+                if let Some(state) = storylining.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&review_id) {
+                    state.part = Some((part, total));
+                }
+            })?;
             Ok(())
         })();
         let mut all = storylining.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1068,7 +1077,7 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
                 all.remove(&review_id);
             }
             Err(error) => {
-                all.insert(review_id, Some(format!("{error:#}")));
+                all.insert(review_id, Storylining { running: false, part: None, error: Some(format!("{error:#}")) });
             }
         }
     });

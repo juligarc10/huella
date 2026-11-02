@@ -183,9 +183,9 @@ pub fn step_request(review: &SessionReview, plan: &[FlowStep], index: usize, con
     out.push_str("```diff\n");
     for (number, line) in step.lines.iter().take(MAX_DIFF_LINES).enumerate() {
         let _ = match line {
-            DiffLine::Context(text) => writeln!(out, "L{}  {text}", number + 1),
-            DiffLine::Added { text, .. } => writeln!(out, "L{} +{text}", number + 1),
-            DiffLine::Removed(text) => writeln!(out, "L{} -{text}", number + 1),
+            DiffLine::Context(text) => writeln!(out, "L{}  {}", number + 1, crate::storyline::clip_line(text)),
+            DiffLine::Added { text, .. } => writeln!(out, "L{} +{}", number + 1, crate::storyline::clip_line(text)),
+            DiffLine::Removed(text) => writeln!(out, "L{} -{}", number + 1, crate::storyline::clip_line(text)),
         };
     }
     if step.lines.len() > MAX_DIFF_LINES {
