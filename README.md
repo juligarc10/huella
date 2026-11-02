@@ -190,7 +190,11 @@ target among the likely ones, and review it either as a **presentation** (the
 requirements with what fulfils them, then the change chapter by chapter in the
 order it works, across repositories, one slide per step) or as the usual list of
 steps grouped by those chapters; both keep your place. The model writes the
-storyline; without one, there is a chapter per repository.
+storyline in a common format, [`huella.storyline/v1`](docs/guion.md): preferably
+the agent that made the change tells it when done (`huella_storyline` MCP tool),
+and whatever it leaves out shows up as "not told by the agent"; otherwise a
+reviewer model writes it in the same format, and without one there is a chapter
+per repository.
 Also search the memory, browse and correct decisions, export ADRs, see a symbol's history and
 run the long tasks (indexing, embeddings, decision extraction, refactor
 benchmark) in the background. `⌘K` jumps anywhere.
