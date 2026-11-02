@@ -242,6 +242,7 @@ base_url = "http://localhost:11434/v1"
 model = "qwen2.5:7b"
 api_key_file = "~/.config/huella/llm-key"   # optional; must be chmod 600
 thinking = false                        # Qwen3 & co.: skip reasoning (faster, no truncated JSON)
+context_tokens = 65536                  # the model's --ctx-size: what fits in one request (default 32768)
 
 [embed]
 model = "bge-m3"

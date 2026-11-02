@@ -1053,6 +1053,7 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
         running.insert(review_id.clone(), Storylining { running: true, ..Storylining::default() });
     }
     let (storylining, db, model) = (Arc::clone(&app.storylining), app.db.clone(), app.model.clone());
+    let context_tokens = crate::config::get().llm.context_tokens;
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
@@ -1064,11 +1065,20 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
                 triage: &triage,
                 declared: &declared,
             };
-            huella_engine::storyline::generate(&store, &review, &plan, input, llm.as_ref(), |part, total| {
-                if let Some(state) = storylining.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&review_id) {
-                    state.part = Some((part, total));
-                }
-            })?;
+            huella_engine::storyline::generate(
+                &store,
+                &review,
+                &plan,
+                input,
+                llm.as_ref(),
+                context_tokens,
+                |part, total| {
+                    if let Some(state) = storylining.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&review_id)
+                    {
+                        state.part = Some((part, total));
+                    }
+                },
+            )?;
             Ok(())
         })();
         let mut all = storylining.lock().unwrap_or_else(PoisonError::into_inner);

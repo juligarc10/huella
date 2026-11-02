@@ -665,9 +665,20 @@ fn output_schema() -> Value {
 /// Caracteres que se envían de cada línea de diff: las de un fichero
 /// minificado o generado pueden tener cientos de miles.
 pub(crate) const LINE_CHARS: usize = 200;
-/// Caracteres por petición al modelo revisor: caben con holgura en un contexto
-/// de 32k tokens. Lo que no cabe se lee por partes.
-const REQUEST_CHARS: usize = 60_000;
+/// Contexto que se supone si no se configura: el de un modelo local habitual.
+pub const DEFAULT_CONTEXT_TOKENS: usize = 32_768;
+/// Tokens que se reservan para las instrucciones y para la respuesta (el guion entero).
+const RESERVED_TOKENS: usize = 10_000;
+/// Caracteres por token, a la baja: el código y el español cuentan más tokens que la prosa en inglés.
+const CHARS_PER_TOKEN: usize = 3;
+
+/// Caracteres que caben en una petición con un contexto de `context_tokens`
+/// (o el de por defecto): lo que no cabe se lee por partes.
+#[must_use]
+pub fn request_chars(context_tokens: Option<usize>) -> usize {
+    let context = context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS);
+    context.saturating_sub(RESERVED_TOKENS).max(4_000) * CHARS_PER_TOKEN
+}
 
 pub const MERGE_PROMPT: &str = "\
 Juntas en un único guion (huella.storyline/v1) los guiones parciales de un cambio que, por su tamaño, se leyó en \
@@ -797,7 +808,8 @@ fn input_hash(model: &str, request: &str) -> String {
 }
 
 /// El modelo revisor escribe el guion si no hay uno vigente. Devuelve `false`
-/// si ya lo había. Si el cambio no cabe en una petición, lo lee por partes y
+/// si ya lo había. Si el cambio no cabe en el contexto del modelo
+/// (`context_tokens`; sin él, [`DEFAULT_CONTEXT_TOKENS`]), lo lee por partes y
 /// después las junta; `progress` recibe la parte (1, 2…) y cuántas hay.
 ///
 /// # Errors
@@ -808,9 +820,10 @@ pub fn generate(
     plan: &[FlowStep],
     input: StoryInput<'_>,
     model: &(impl JsonModel + ?Sized),
+    context_tokens: Option<usize>,
     progress: impl FnMut(usize, usize),
 ) -> Result<bool> {
-    generate_within(store, review, plan, input, model, REQUEST_CHARS, progress)
+    generate_within(store, review, plan, input, model, request_chars(context_tokens), progress)
 }
 
 fn generate_within(
@@ -1085,8 +1098,8 @@ mod tests {
         assert!(request(&review, &plan, input).contains("billing · total.ts · total"));
         let (total, other) = (position(&plan, "total"), position(&plan, "other"));
         let model = Fake { calls: RefCell::new(0), answer: answer(total + 1, other + 1) };
-        assert!(generate(&store, &review, &plan, input, &model, |_, _| {}).unwrap());
-        assert!(!generate(&store, &review, &plan, input, &model, |_, _| {}).unwrap());
+        assert!(generate(&store, &review, &plan, input, &model, None, |_, _| {}).unwrap());
+        assert!(!generate(&store, &review, &plan, input, &model, None, |_, _| {}).unwrap());
         assert_eq!(*model.calls.borrow(), 1);
 
         let found = storyline(&store, &review, &plan, input).unwrap().unwrap();
@@ -1170,6 +1183,14 @@ mod tests {
         let found = storyline(&store, &review, &plan, input).unwrap().unwrap();
         assert_eq!(found.chapters[0].steps.len(), plan.len(), "al juntar, todos los pasos siguen ahí");
         assert!(!found.stale);
+    }
+
+    #[test]
+    fn the_request_size_follows_the_context_of_the_model() {
+        assert_eq!(request_chars(None), (DEFAULT_CONTEXT_TOKENS - 10_000) * 3);
+        assert_eq!(request_chars(Some(65_536)), (65_536 - 10_000) * 3);
+        assert!(request_chars(Some(131_072)) > request_chars(Some(65_536)));
+        assert_eq!(request_chars(Some(2_000)), 4_000 * 3, "un contexto mínimo no deja peticiones vacías");
     }
 
     #[test]

@@ -34,6 +34,9 @@ pub struct Llm {
     /// Razonamiento del modelo (`false` lo desactiva en Qwen3 y similares);
     /// sin definir, el servidor decide.
     pub thinking: Option<bool>,
+    /// Contexto del modelo en tokens (el `--ctx-size` de llama.cpp): lo que
+    /// cabe en una petición; lo que no, se envía por partes. Sin definir, 32768.
+    pub context_tokens: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -216,13 +219,14 @@ mod tests {
         std::fs::write(
             &path,
             "[llm]\nprovider = \"openai-compatible\"\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"qwen2.5:7b\"\n\
-             api_key_file = \"~/.config/huella/key\"\nthinking = false\n\n[embed]\nmodel = \"bge-m3\"\n\n[ui]\neditor = \"vscode\"\n",
+             api_key_file = \"~/.config/huella/key\"\nthinking = false\ncontext_tokens = 65536\n\n[embed]\nmodel = \"bge-m3\"\n\n[ui]\neditor = \"vscode\"\n",
         )
         .unwrap();
         let config = load(&path).unwrap();
         assert!(matches!(config.llm.provider, Some(Provider::OpenaiCompatible)));
         assert_eq!(config.llm.model.as_deref(), Some("qwen2.5:7b"));
         assert_eq!(config.llm.thinking, Some(false));
+        assert_eq!(config.llm.context_tokens, Some(65_536));
         assert_eq!(config.embed.model.as_deref(), Some("bge-m3"));
         assert!(matches!(config.ui.editor, Some(Editor::Vscode)));
     }
