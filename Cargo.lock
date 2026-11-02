@@ -671,6 +671,7 @@ dependencies = [
  "blake3",
  "huella-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror",
 ]
