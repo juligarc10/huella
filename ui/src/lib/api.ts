@@ -575,7 +575,8 @@ export interface ReviewResult {
   task?: { key: string; title: string | null; description: string; repos: RepoSync[] }
   /** En una tarea: el guion de su presentación (del modelo o automático). */
   storyline?: Storyline
-  storylining?: { running: boolean; error?: string } | null
+  /** El guion que se está escribiendo; `part` es [parte, de cuántas] si va por partes. */
+  storylining?: { running: boolean; part: [number, number] | null; error: string | null } | null
 }
 
 export interface StoryChapter {

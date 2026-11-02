@@ -260,7 +260,11 @@ function Cover({
           <Sparkles className="size-4 text-brand" aria-hidden="true" />
           <p className="min-w-0 flex-1 text-sm">
             {running
-              ? `${model} está escribiendo el guion: requisitos, capítulos en orden y lo que queda fuera…`
+              ? review.storylining?.part && review.storylining.part[1] > 1
+                ? review.storylining.part[0] === review.storylining.part[1]
+                  ? `${model} está juntando las ${review.storylining.part[1] - 1} partes en un solo guion…`
+                  : `${model} está leyendo el cambio por partes (${review.storylining.part[0]} de ${review.storylining.part[1] - 1}): es grande para su contexto…`
+                : `${model} está escribiendo el guion: requisitos, capítulos en orden y lo que queda fuera…`
               : story.stale
                 ? 'El cambio no es el mismo que cuando se escribió el guion.'
                 : 'Guion automático: un capítulo por repositorio. Con el modelo, el cambio se cuenta en el orden en que funciona y contra lo que pide la tarea. Si el agente lo cuenta al terminar (huella_storyline), se usa el suyo.'}

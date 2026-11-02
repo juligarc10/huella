@@ -662,9 +662,39 @@ fn output_schema() -> Value {
     })
 }
 
-/// Lo que se envía al modelo revisor.
-#[must_use]
-pub fn request(review: &SessionReview, plan: &[FlowStep], input: StoryInput<'_>) -> String {
+/// Caracteres que se envían de cada línea de diff: las de un fichero
+/// minificado o generado pueden tener cientos de miles.
+pub(crate) const LINE_CHARS: usize = 200;
+/// Caracteres por petición al modelo revisor: caben con holgura en un contexto
+/// de 32k tokens. Lo que no cabe se lee por partes.
+const REQUEST_CHARS: usize = 60_000;
+
+pub const MERGE_PROMPT: &str = "\
+Juntas en un único guion (huella.storyline/v1) los guiones parciales de un cambio que, por su tamaño, se leyó en \
+varias partes. Recibes lo que pide la tarea y, de cada parte, sus capítulos con los números de sus pasos, sus \
+requisitos, lo que queda fuera, lo no comprobado y los riesgos.
+
+Devuelve el guion completo, con { \"step\": número } donde se pide código:
+- chapters en el orden en que conviene entender el cambio: de la entrada (endpoint, pantalla, comando, evento) a la \
+lógica, los datos y los efectos, cruzando repositorios si uno llama a otro; tests y configuración al final. \
+Fusiona los capítulos que son la misma intención sumando sus pasos; mantén los números de paso tal cual, cada paso \
+en un solo capítulo. Conserva y mejora sus narraciones para que cada capítulo enlace con el anterior; conserva \
+look_at y questions.
+- requirements: une los repetidos; done si alguna parte lo cumple del todo, partial si a medias, missing si ninguna.
+- summary del conjunto, flow entre los capítulos finales, y outside, unverified y risks sin repetir.
+
+Escribe en el idioma de la descripción.";
+
+/// Una línea para el modelo, recortada.
+pub(crate) fn clip_line(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(LINE_CHARS) {
+        Some((cut, _)) => format!("{}… ({} caracteres más)", &text[..cut], text.chars().count() - LINE_CHARS).into(),
+        None => text.into(),
+    }
+}
+
+/// La tarea: su título y lo que pide.
+fn header(input: StoryInput<'_>) -> String {
     let mut out = String::new();
     let description = input.description.trim();
     if let Some(title) = input.title.filter(|title| !title.trim().is_empty()) {
@@ -675,58 +705,87 @@ pub fn request(review: &SessionReview, plan: &[FlowStep], input: StoryInput<'_>)
         "Lo que pide la tarea:\n{}\n",
         if description.is_empty() { "(sin descripción: deduce la intención del código)" } else { description }
     );
-    let per_step = (DIFF_BUDGET / plan.len().max(1)).clamp(STEP_LINES.1, STEP_LINES.0);
-    out.push_str("Pasos del cambio, en el orden del flujo dentro de cada repositorio:\n");
-    for (index, step) in plan.iter().enumerate() {
-        let (repo, path) = place(input.repos, &review.files[step.file].path);
-        let name = step.symbol.as_ref().map_or("(fuera de funciones)", |symbol| symbol.qualified_name.as_str());
-        let role = match step.role {
-            StepRole::Flow => "código",
-            StepRole::Test => "test",
-            StepRole::Other => "otros cambios",
-        };
-        let level = match input.triage.get(index).map(|triaged| triaged.level) {
-            Some(Level::Must) => "obligatorio",
-            Some(Level::Acknowledge) => "vistazo",
-            Some(Level::Skip) => "saltable",
-            None => "",
-        };
-        let tags: Vec<&str> = input
-            .triage
-            .get(index)
-            .map(|triaged| triaged.findings.iter().map(|finding| finding.tag.label()).collect())
-            .unwrap_or_default();
-        let _ = write!(out, "\n[{}] ", index + 1);
-        if let Some(repo) = repo {
-            let _ = write!(out, "{} · ", repo_name(repo));
-        }
-        let _ = write!(out, "{path} · {name} · {role} · +{} −{} · {level}", step.added(), step.removed());
-        if !tags.is_empty() {
-            let _ = write!(out, " ({})", tags.join(", "));
-        }
-        let calls: Vec<String> = step.calls.iter().map(|call| format!("[{}]", call + 1)).collect();
-        if !calls.is_empty() {
-            let _ = write!(out, " · llama a {}", calls.join(", "));
-        }
-        out.push('\n');
-        for entry in input.declared.get(&index).into_iter().flatten().take(2) {
-            let _ = writeln!(out, "  Declaró el agente: {}", entry.declaration.summary);
-        }
-        out.push_str("```diff\n");
-        let changed: Vec<&DiffLine> = step.lines.iter().filter(|line| !matches!(line, DiffLine::Context(_))).collect();
-        for line in changed.iter().take(per_step) {
-            let _ = match line {
-                DiffLine::Added { text, .. } => writeln!(out, "+{text}"),
-                DiffLine::Removed(text) => writeln!(out, "-{text}"),
-                DiffLine::Context(_) => Ok(()),
-            };
-        }
-        if changed.len() > per_step {
-            let _ = writeln!(out, "… ({} líneas más)", changed.len() - per_step);
-        }
-        out.push_str("```\n");
+    out
+}
+
+/// El bloque de un paso: su cabecera y su diff recortado. Lo saltable
+/// (generado, solo formato) va sin diff: no hay nada que entender ahí.
+fn step_block(
+    review: &SessionReview,
+    plan: &[FlowStep],
+    index: usize,
+    input: StoryInput<'_>,
+    per_step: usize,
+) -> String {
+    let step = &plan[index];
+    let mut out = String::new();
+    let (repo, path) = place(input.repos, &review.files[step.file].path);
+    let name = step.symbol.as_ref().map_or("(fuera de funciones)", |symbol| symbol.qualified_name.as_str());
+    let role = match step.role {
+        StepRole::Flow => "código",
+        StepRole::Test => "test",
+        StepRole::Other => "otros cambios",
+    };
+    let level = input.triage.get(index).map(|triaged| triaged.level);
+    let level_name = match level {
+        Some(Level::Must) => "obligatorio",
+        Some(Level::Acknowledge) => "vistazo",
+        Some(Level::Skip) => "saltable",
+        None => "",
+    };
+    let tags: Vec<&str> = input
+        .triage
+        .get(index)
+        .map(|triaged| triaged.findings.iter().map(|finding| finding.tag.label()).collect())
+        .unwrap_or_default();
+    let _ = write!(out, "\n[{}] ", index + 1);
+    if let Some(repo) = repo {
+        let _ = write!(out, "{} · ", repo_name(repo));
     }
-    huella_core::redact::redact(&out).into_owned()
+    let _ = write!(out, "{path} · {name} · {role} · +{} −{} · {level_name}", step.added(), step.removed());
+    if !tags.is_empty() {
+        let _ = write!(out, " ({})", tags.join(", "));
+    }
+    let calls: Vec<String> = step.calls.iter().map(|call| format!("[{}]", call + 1)).collect();
+    if !calls.is_empty() {
+        let _ = write!(out, " · llama a {}", calls.join(", "));
+    }
+    out.push('\n');
+    for entry in input.declared.get(&index).into_iter().flatten().take(2) {
+        let _ = writeln!(out, "  Declaró el agente: {}", clip_line(&entry.declaration.summary));
+    }
+    if level == Some(Level::Skip) {
+        return out;
+    }
+    out.push_str("```diff\n");
+    let changed: Vec<&DiffLine> = step.lines.iter().filter(|line| !matches!(line, DiffLine::Context(_))).collect();
+    for line in changed.iter().take(per_step) {
+        let _ = match line {
+            DiffLine::Added { text, .. } => writeln!(out, "+{}", clip_line(text)),
+            DiffLine::Removed(text) => writeln!(out, "-{}", clip_line(text)),
+            DiffLine::Context(_) => Ok(()),
+        };
+    }
+    if changed.len() > per_step {
+        let _ = writeln!(out, "… ({} líneas más)", changed.len() - per_step);
+    }
+    out.push_str("```\n");
+    out
+}
+
+fn blocks(review: &SessionReview, plan: &[FlowStep], input: StoryInput<'_>) -> Vec<String> {
+    let per_step = (DIFF_BUDGET / plan.len().max(1)).clamp(STEP_LINES.1, STEP_LINES.0);
+    (0..plan.len()).map(|index| step_block(review, plan, index, input, per_step)).collect()
+}
+
+const STEPS_INTRO: &str = "Pasos del cambio, en el orden del flujo dentro de cada repositorio:\n";
+
+/// Todo lo que se le cuenta al modelo revisor del cambio: si cambia, el guion
+/// está desfasado. Si no cabe en una petición, se envía por partes.
+#[must_use]
+pub fn request(review: &SessionReview, plan: &[FlowStep], input: StoryInput<'_>) -> String {
+    let text = format!("{}{STEPS_INTRO}{}", header(input), blocks(review, plan, input).concat());
+    huella_core::redact::redact(&text).into_owned()
 }
 
 fn input_hash(model: &str, request: &str) -> String {
@@ -737,7 +796,9 @@ fn input_hash(model: &str, request: &str) -> String {
     hasher.finalize().to_hex()[..16].to_owned()
 }
 
-/// El modelo revisor escribe el guion si no hay uno vigente. Devuelve `false` si ya lo había.
+/// El modelo revisor escribe el guion si no hay uno vigente. Devuelve `false`
+/// si ya lo había. Si el cambio no cabe en una petición, lo lee por partes y
+/// después las junta; `progress` recibe la parte (1, 2…) y cuántas hay.
 ///
 /// # Errors
 /// Si falla la base de datos o el modelo.
@@ -747,6 +808,19 @@ pub fn generate(
     plan: &[FlowStep],
     input: StoryInput<'_>,
     model: &(impl JsonModel + ?Sized),
+    progress: impl FnMut(usize, usize),
+) -> Result<bool> {
+    generate_within(store, review, plan, input, model, REQUEST_CHARS, progress)
+}
+
+fn generate_within(
+    store: &Store,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    input: StoryInput<'_>,
+    model: &(impl JsonModel + ?Sized),
+    budget: usize,
+    mut progress: impl FnMut(usize, usize),
 ) -> Result<bool> {
     let model_id = model.model_id();
     let request = request(review, plan, input);
@@ -754,13 +828,113 @@ pub fn generate(
     if store.storyline(&review.session_id)?.is_some_and(|stored| stored.input_hash == hash) {
         return Ok(false);
     }
-    let text = model
-        .complete_json(SYSTEM_PROMPT, &request, &output_schema())
-        .and_then(validate)
-        .map_err(|error| EngineError::Model(error.to_string()))?;
+    let ask = |system: &str, user: &str| {
+        model
+            .complete_json(system, user, &output_schema())
+            .and_then(validate)
+            .map_err(|error| EngineError::Model(error.to_string()))
+    };
+    let text = if request.len() <= budget {
+        progress(1, 1);
+        ask(SYSTEM_PROMPT, &request)?
+    } else {
+        let head = header(input);
+        let segments = segments(&blocks(review, plan, input), budget.saturating_sub(head.len() + STEPS_INTRO.len()));
+        let total = segments.len();
+        let mut parts = Vec::with_capacity(total);
+        for (number, segment) in segments.iter().enumerate() {
+            progress(number + 1, total + 1);
+            let user = format!(
+                "{head}Por su tamaño, el cambio se lee en {total} partes; esta es la {}. Cuenta solo estos pasos \
+                 (la numeración es la de todo el cambio); en requirements, solo lo que se vea en esta parte.\n{STEPS_INTRO}{}",
+                number + 1,
+                segment.concat()
+            );
+            let text = ask(SYSTEM_PROMPT, &huella_core::redact::redact(&user))?;
+            parts.push(serde_json::from_str::<Story>(&text).map_err(|error| EngineError::Model(error.to_string()))?);
+        }
+        progress(total + 1, total + 1);
+        ask(MERGE_PROMPT, &merge_request(&head, &parts))?
+    };
     store
         .save_storyline(&review.session_id, &StoredStoryline { input_hash: hash, model: model_id, storyline: text })?;
     Ok(true)
+}
+
+/// Los bloques de los pasos en partes que no pasan de `budget` caracteres, en
+/// orden. Un bloque que no cabe ni solo se recorta.
+fn segments(blocks: &[String], budget: usize) -> Vec<Vec<String>> {
+    let budget = budget.max(1000);
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut size = 0;
+    for block in blocks {
+        let block = match block.char_indices().nth(budget) {
+            Some((cut, _)) => format!("{}…\n```\n", &block[..cut]),
+            None => block.clone(),
+        };
+        if out.is_empty() || size + block.len() > budget {
+            out.push(Vec::new());
+            size = 0;
+        }
+        size += block.len();
+        if let Some(last) = out.last_mut() {
+            last.push(block);
+        }
+    }
+    out
+}
+
+/// Lo que se le pasa al modelo para juntar las partes: sus guiones, sin diffs.
+fn merge_request(head: &str, parts: &[Story]) -> String {
+    let steps = |anchors: &[Anchor]| -> String {
+        anchors.iter().filter_map(|anchor| anchor.step).map(|step| format!("[{step}]")).collect::<Vec<_>>().join(", ")
+    };
+    let mut out = format!("{head}El cambio se leyó en {} partes. Lo que salió de cada una:\n", parts.len());
+    for (number, part) in parts.iter().enumerate() {
+        let _ = writeln!(out, "\n## Parte {}\nResumen: {}", number + 1, part.summary);
+        for chapter in &part.chapters {
+            let _ = writeln!(
+                out,
+                "- Capítulo [{}] {} · pasos {} · {}\n  Narración: {}",
+                chapter.kind,
+                chapter.title,
+                steps(&chapter.anchors),
+                chapter.intent,
+                chapter.narration
+            );
+            if !chapter.look_at.is_empty() {
+                let _ = writeln!(out, "  Mirar: {}", chapter.look_at.join("; "));
+            }
+            if !chapter.questions.is_empty() {
+                let _ = writeln!(out, "  Preguntas: {}", chapter.questions.join("; "));
+            }
+        }
+        for requirement in &part.requirements {
+            let _ = writeln!(
+                out,
+                "- Requisito ({}) {} · pasos {} · {}",
+                requirement.status,
+                requirement.text,
+                steps(&requirement.places),
+                requirement.note
+            );
+        }
+        for outside in &part.outside {
+            let _ = writeln!(
+                out,
+                "- Fuera de la tarea: {} · {}",
+                steps(std::slice::from_ref(&outside.anchor)),
+                outside.why
+            );
+        }
+        if !part.unverified.is_empty() {
+            let _ = writeln!(out, "- Sin comprobar: {}", part.unverified.join("; "));
+        }
+        if !part.risks.is_empty() {
+            let _ = writeln!(out, "- Riesgos: {}", part.risks.join("; "));
+        }
+    }
+    huella_core::redact::redact(&out).into_owned()
 }
 
 /// Un guion sin capítulos no sirve.
@@ -911,8 +1085,8 @@ mod tests {
         assert!(request(&review, &plan, input).contains("billing · total.ts · total"));
         let (total, other) = (position(&plan, "total"), position(&plan, "other"));
         let model = Fake { calls: RefCell::new(0), answer: answer(total + 1, other + 1) };
-        assert!(generate(&store, &review, &plan, input, &model).unwrap());
-        assert!(!generate(&store, &review, &plan, input, &model).unwrap());
+        assert!(generate(&store, &review, &plan, input, &model, |_, _| {}).unwrap());
+        assert!(!generate(&store, &review, &plan, input, &model, |_, _| {}).unwrap());
         assert_eq!(*model.calls.borrow(), 1);
 
         let found = storyline(&store, &review, &plan, input).unwrap().unwrap();
@@ -927,6 +1101,75 @@ mod tests {
 
         let changed = StoryInput { description: "Sumar los precios con IVA", ..input };
         assert!(storyline(&store, &review, &plan, changed).unwrap().unwrap().stale);
+    }
+
+    /// Un revisor que responde a las partes con un capítulo por parte (sus pasos)
+    /// y, al juntarlas, un único capítulo con todos los pasos que se le pasan.
+    struct Parts {
+        systems: RefCell<Vec<String>>,
+        longest: RefCell<usize>,
+    }
+
+    impl JsonModel for Parts {
+        fn model_id(&self) -> String {
+            "fake:partes".into()
+        }
+
+        fn complete_json(&self, system: &str, user: &str, _: &Value) -> std::result::Result<String, ExtractError> {
+            self.systems.borrow_mut().push(system.to_owned());
+            let longest = user.lines().map(|line| line.chars().count()).max().unwrap_or(0);
+            let mut current = self.longest.borrow_mut();
+            *current = (*current).max(longest);
+            let numbers: BTreeSet<u32> =
+                user.split('[').skip(1).filter_map(|rest| rest.split(']').next()?.parse().ok()).collect();
+            let anchors: Vec<Value> = numbers.iter().map(|n| json!({"step": n})).collect();
+            Ok(json!({"summary": "parte", "requirements": [], "chapters": [{"id": "C1", "title": "Todo", "kind": "logic",
+                "intent": "i", "narration": "n", "anchors": anchors, "requirements": [], "look_at": [], "questions": []}],
+                "flow": [], "outside": [], "unverified": [], "risks": []})
+            .to_string())
+        }
+    }
+
+    #[test]
+    fn big_changes_are_read_in_parts_and_long_lines_are_clipped() {
+        let minified = format!("export const bundle = \"{}\";\n", "x".repeat(5000));
+        let files: Vec<(String, String)> = (0..6)
+            .map(|n| (format!("/w/api/f{n}.ts"), format!("export function f{n}() {{\n  return {n};\n}}\n{minified}")))
+            .collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(path, content)| (path.as_str(), content.as_str())).collect();
+        let (review, plan) = review_of(&refs);
+        let repos = plain_repos(&["/w/api"]);
+        let declared = BTreeMap::new();
+        let input = StoryInput {
+            title: None,
+            description: "Varias funciones",
+            repos: &repos,
+            triage: &[],
+            declared: &declared,
+        };
+        let text = request(&review, &plan, input);
+        assert!(
+            text.contains("caracteres más") && !text.contains(&"x".repeat(LINE_CHARS + 1)),
+            "las líneas largas se recortan"
+        );
+
+        let store = Store::open_in_memory().unwrap();
+        let model = Parts { systems: RefCell::new(Vec::new()), longest: RefCell::new(0) };
+        let mut seen = Vec::new();
+        assert!(
+            generate_within(&store, &review, &plan, input, &model, 1500, |part, total| seen.push((part, total)))
+                .unwrap()
+        );
+        let systems = model.systems.borrow();
+        assert!(systems.len() > 2, "varias partes y la que las junta: {}", systems.len());
+        assert_eq!(systems.last().unwrap(), MERGE_PROMPT);
+        assert!(systems[..systems.len() - 1].iter().all(|system| system == SYSTEM_PROMPT));
+        assert_eq!(seen.last(), Some(&(systems.len(), systems.len())));
+        assert!(*model.longest.borrow() < 400, "ninguna línea enorme llega al modelo");
+
+        let found = storyline(&store, &review, &plan, input).unwrap().unwrap();
+        assert_eq!(found.chapters[0].steps.len(), plan.len(), "al juntar, todos los pasos siguen ahí");
+        assert!(!found.stale);
     }
 
     #[test]
