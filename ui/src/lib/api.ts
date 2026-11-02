@@ -580,21 +580,36 @@ export interface ReviewResult {
 
 export interface StoryChapter {
   title: string
+  /** entry, logic, data, effect, integration, test, config u other. */
+  kind: string | null
   intent: string
   narration: string
   /** Índices en `requirements`. */
   requirements: number[]
   /** Índices de los pasos, en orden de lectura. */
   steps: number[]
+  /** Lo que no hay que pasar por alto. */
+  look_at: string[]
+  /** Lo que quien revisa debería saber responder al acabar el capítulo. */
+  questions: string[]
+  /** Código que el guion del agente no menciona. */
+  unnarrated: boolean
 }
 
 /** El cambio contado como una presentación. */
 export interface Storyline {
-  /** Modelo que lo escribió; `null` en el guion automático (un capítulo por repositorio). */
+  /** Quién lo escribió: el agente que hizo el cambio, un modelo revisor o nadie (un capítulo por repositorio). */
+  source: 'declared' | 'reviewer' | 'automatic'
+  /** Modelo revisor que lo escribió. */
   model: string | null
+  /** Cuándo lo contó el agente. */
+  recorded_at: string | null
   summary: string
-  requirements: { text: string; status: 'done' | 'partial' | 'missing'; steps: number[]; note: string | null }[]
+  requirements: { id: string; text: string; status: 'done' | 'partial' | 'missing'; steps: number[]; note: string | null }[]
   chapters: StoryChapter[]
+  /** Cómo pasa la ejecución de un capítulo a otro (índices en `chapters`). */
+  flow: { from: number; to: number; label: string }[]
+  unverified: string[]
   /** Pasos fuera de lo que pide la tarea, con qué hacen. */
   outside: [number, string][]
   risks: string[]

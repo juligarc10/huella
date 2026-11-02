@@ -7,6 +7,8 @@ import {
   CircleX,
   Loader2,
   Maximize2,
+  Megaphone,
+  Eye,
   RotateCcw,
   Sparkles,
 } from 'lucide-react'
@@ -20,7 +22,7 @@ import { LevelMark, TriageChips } from '@/components/review/triage'
 import { verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
-import { baseName } from '@/lib/format'
+import { baseName, dateTime } from '@/lib/format'
 import { useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
@@ -178,7 +180,12 @@ function ChapterStrip({
               type="button"
               onClick={() => onJump(index)}
               aria-current={active === index}
-              className={cn(pill, active === index && 'border-brand bg-brand-soft', done === chapter.steps.length && 'text-muted-foreground')}
+              className={cn(
+                pill,
+                chapter.unnarrated && 'border-warn/60 text-warn',
+                active === index && 'border-brand bg-brand-soft',
+                done === chapter.steps.length && 'text-muted-foreground',
+              )}
             >
               {chapter.title} <span className="text-muted-foreground">{done}/{chapter.steps.length}</span>
             </button>
@@ -238,7 +245,17 @@ function Cover({
   const model = review.ask_model.replace(/^[^:]+:/, '')
   return (
     <div className="flex flex-col gap-4">
-      {(!story.model || story.stale || running || review.storylining?.error) && (
+      {story.source === 'declared' && (
+        <Panel className={cn('flex flex-wrap items-center gap-3', story.stale && 'border-warn/50')}>
+          <Megaphone className="size-4 text-brand" aria-hidden="true" />
+          <p className="min-w-0 flex-1 text-sm">
+            <span className="font-semibold">Contado por el agente</span> que hizo el cambio
+            {story.recorded_at && <> el {dateTime(story.recorded_at)}</>}: es su versión, contrástala con el código.
+            {story.stale && <span className="text-warn"> El código cambió después de contarlo.</span>}
+          </p>
+        </Panel>
+      )}
+      {story.source !== 'declared' && (!story.model || story.stale || running || review.storylining?.error) && (
         <Panel className="flex flex-wrap items-center gap-3">
           <Sparkles className="size-4 text-brand" aria-hidden="true" />
           <p className="min-w-0 flex-1 text-sm">
@@ -246,7 +263,7 @@ function Cover({
               ? `${model} está escribiendo el guion: requisitos, capítulos en orden y lo que queda fuera…`
               : story.stale
                 ? 'El cambio no es el mismo que cuando se escribió el guion.'
-                : 'Guion automático: un capítulo por repositorio. Con el modelo, el cambio se cuenta en el orden en que funciona y contra lo que pide la tarea.'}
+                : 'Guion automático: un capítulo por repositorio. Con el modelo, el cambio se cuenta en el orden en que funciona y contra lo que pide la tarea. Si el agente lo cuenta al terminar (huella_storyline), se usa el suyo.'}
           </p>
           {running ? (
             <Loader2 className="size-4 animate-spin text-brand" aria-hidden="true" />
@@ -262,7 +279,10 @@ function Cover({
       {story.summary && (
         <Panel className="flex flex-col gap-2 border-brand/30 bg-brand-soft/40">
           <h2 className="text-[13px] font-semibold text-accent-foreground">
-            El cambio {story.model && <span className="font-normal">· según {story.model.replace(/^[^:]+:/, '')}</span>}
+            El cambio{' '}
+            <span className="font-normal">
+              · {story.source === 'declared' ? 'contado por el agente' : `según ${story.model?.replace(/^[^:]+:/, '') ?? 'el revisor'}`}
+            </span>
           </h2>
           <p className="text-[15px] leading-relaxed">{story.summary}</p>
         </Panel>
@@ -329,6 +349,19 @@ function Cover({
         </Panel>
       )}
 
+      {story.unverified.length > 0 && (
+        <Panel className="flex flex-col gap-2">
+          <h2 className="text-[13px] font-semibold text-muted-foreground">Sin comprobar</h2>
+          <ul className="flex flex-col gap-1 text-sm">
+            {story.unverified.map((item) => (
+              <li key={item} className="flex gap-2 text-warn">
+                <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {item}
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       {story.risks.length > 0 && (
         <Panel className="flex flex-col gap-2">
           <h2 className="text-[13px] font-semibold text-muted-foreground">Riesgos</h2>
@@ -363,7 +396,7 @@ function ChapterSlide({
 }) {
   const current = story.chapters[chapter]
   return (
-    <Panel className="flex flex-col gap-4 py-8">
+    <Panel className={cn('flex flex-col gap-4 py-8', current.unnarrated && 'border-warn/50')}>
       <p className="text-[13px] font-semibold text-muted-foreground">
         Capítulo {chapter + 1} de {story.chapters.length}
       </p>
@@ -379,9 +412,31 @@ function ChapterSlide({
           ))}
         </ul>
       )}
+      {current.look_at.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-[13px] font-semibold text-muted-foreground">No pases por alto</h3>
+          <ul className="flex flex-col gap-1 text-sm">
+            {current.look_at.map((item) => (
+              <li key={item} className="flex gap-2">
+                <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {current.steps.map((step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
       </div>
+      {current.questions.length > 0 && (
+        <div className="flex flex-col gap-1 rounded-xl bg-muted px-4 py-3">
+          <h3 className="text-[13px] font-semibold text-muted-foreground">Al acabar el capítulo deberías poder responder</h3>
+          <ul className="flex flex-col gap-1 text-sm">
+            {current.questions.map((question) => (
+              <li key={question}>{question}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </Panel>
   )
 }
@@ -494,6 +549,12 @@ function Closing({ review, story, onStep }: { review: ReviewResult; story: Story
       )}
       {story.outside.length > 0 && (
         <p className="text-sm text-warn">{story.outside.length} pasos hacen algo que la tarea no pide: decide si se quedan.</p>
+      )}
+      {story.unverified.length > 0 && (
+        <p className="text-sm text-warn">Quedó sin comprobar: {story.unverified.join('; ')}.</p>
+      )}
+      {story.chapters.some((chapter) => chapter.unnarrated) && (
+        <p className="text-sm text-warn">Hay código que el agente no contó: está en «No lo contó el agente».</p>
       )}
       <p className="text-sm text-muted-foreground">Arriba: «Pedir cambios» o «Aprobar».</p>
     </Panel>

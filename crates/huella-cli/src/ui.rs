@@ -994,18 +994,24 @@ fn add_task(
             step["repo"] = json!(repo_of(repos, &review.files[flow.file].path).map(|repo| &repo.repo));
         }
     }
-    // El guion del modelo si lo hay; si no, el automático.
-    let roots: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
+    // El guion: el que contó el agente; si no, el del modelo revisor; si no, el automático.
+    let refs: Vec<huella_engine::storyline::RepoRef> =
+        repos.iter().map(|repo| huella_engine::storyline::RepoRef::new(&repo.repo)).collect();
+    let with_branch: Vec<(huella_engine::storyline::RepoRef, String)> =
+        refs.iter().cloned().zip(repos.iter().map(|repo| repo.branch.clone())).collect();
     let input = huella_engine::storyline::StoryInput {
         title: task.as_ref().and_then(|task| task.title.as_deref()),
         description: task.as_ref().map_or("", |task| task.description.as_str()),
-        repos: &roots,
+        repos: &refs,
         triage,
         declared,
     };
-    let story = match huella_engine::storyline::storyline(&app.store, review, plan, input)? {
+    let story = match huella_engine::storyline::declared(&app.store, review, plan, &with_branch)? {
         Some(story) => story,
-        None => huella_engine::storyline::fallback(review, plan, &roots),
+        None => match huella_engine::storyline::storyline(&app.store, review, plan, input)? {
+            Some(story) => story,
+            None => huella_engine::storyline::fallback(review, plan, &refs),
+        },
     };
     value["storyline"] = serde_json::to_value(story)?;
     value["storylining"] = match app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id)
@@ -1026,7 +1032,8 @@ fn start_storyline(app: &mut App, session: &str) -> Result<(u16, Value)> {
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let key = review.session_id.strip_prefix("task:").context("el guion es de las tareas")?.to_owned();
-    let repos: Vec<String> = app.task_repos.iter().flatten().map(|repo| repo.repo.clone()).collect();
+    let repos: Vec<huella_engine::storyline::RepoRef> =
+        app.task_repos.iter().flatten().map(|repo| huella_engine::storyline::RepoRef::new(&repo.repo)).collect();
     let project = review_project(app, &review.session_id)?;
     let points = huella_review::attention::attention(&review, &plan);
     let Assessment { triage, .. } = assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;

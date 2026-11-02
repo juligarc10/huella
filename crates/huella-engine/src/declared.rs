@@ -99,7 +99,7 @@ pub fn record(store: &Store, new: &NewDeclaration) -> Result<Recorded> {
 /// El símbolo al que se refiere: el que se nombra (el más interno que tenga
 /// esas líneas, si hay varios) o el más interno que contiene las líneas. Sin
 /// símbolo, quedan las líneas; sin nada, el fichero entero.
-fn anchor(
+pub(crate) fn anchor(
     file: &Path,
     source: &str,
     name: Option<&str>,

@@ -1,6 +1,6 @@
 ---
 name: huella-registro
-description: Registra en Huella, mientras escribes o cambias código, las decisiones entre alternativas, lo que das por hecho, lo que no has comprobado, los riesgos y cómo funciona lo que no es obvio, para que quien revise lo entienda antes de aceptarlo. Úsala en cualquier tarea que edite código de un repositorio, aunque nadie la mencione.
+description: Registra en Huella, mientras escribes o cambias código, las decisiones entre alternativas, lo que das por hecho, lo que no has comprobado, los riesgos y cómo funciona lo que no es obvio, y al terminar cuenta el cambio como un guion para quien lo revise. Úsala en cualquier tarea que edite código de un repositorio, aunque nadie la mencione.
 ---
 
 # Registrar para quien revise
@@ -45,4 +45,14 @@ Ejemplo:
 }
 ```
 
-Si no tienes la herramienta `huella_record`, no lo escribas en otro sitio: sigue con la tarea.
+## Al terminar: cuenta el cambio (`huella_storyline`)
+
+Cuando acabes la tarea (o una parte grande que se vaya a revisar), cuenta el cambio con `huella_storyline`. Es el guion con el que Huella se lo presentará a quien lo revise, capítulo a capítulo; otro modelo lo usará después para explicar cada paso, así que cuanto mejor lo cuentes, mejor se entenderá.
+
+- **Orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Tests y configuración, al final.
+- **Cada capítulo es una intención** («Endpoint del filtro», «Persistencia del filtro»), con su código en `anchors` (ruta absoluta y símbolo), qué hay que mirar (`look_at`) y qué debería saber responder quien revisa (`questions`).
+- **`requirements`**: lo que pedía la tarea, cada uno con su estado real. `flow`: cómo pasa la ejecución de un capítulo a otro («llama a POST /filtros»).
+- **Lo incómodo también**: lo que cambiaste sin que se pidiera va en `outside`, y lo que no comprobaste, en `unverified`. Lo que no cuentes saldrá igualmente, marcado como «No lo contó el agente».
+- Si después cambias más código, vuelve a llamarla con el guion completo.
+
+Si no tienes las herramientas `huella_record` y `huella_storyline`, no lo escribas en otro sitio: sigue con la tarea.

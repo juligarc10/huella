@@ -459,8 +459,13 @@ formas que comparten el paso en el que estás:
   Se avanza con ← y →; «Ver en detalle» lleva al paso en la otra vista.
 - **Pasos**: la lista de siempre, agrupada por los capítulos del guion.
 
-El guion lo escribe el modelo con «Escribir el guion» y se marca como desfasado
-si la tarea cambia; sin modelo, hay un capítulo por repositorio en el orden del
+El guion sigue un formato común, [`huella.storyline/v1`](docs/guion.md). Lo
+cuenta preferiblemente **el agente que hizo el cambio**, al terminar, con la
+herramienta MCP `huella_storyline` (la skill `huella-registro` le dice cómo): es
+quien mejor sabe el porqué y el orden. Lo que no cuente sale igualmente en «No lo
+contó el agente», y si el código cambia después, el guion se marca como
+desfasado. Si no lo contó, lo escribe el modelo revisor con «Escribir el guion»,
+en el mismo formato; sin modelo, hay un capítulo por repositorio en el orden del
 flujo.
 
 - **Las ramas se encuentran solas**: las que llevan la clave en el nombre
