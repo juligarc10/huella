@@ -23,6 +23,7 @@ import { CoveragePanel } from '@/components/review/coverage'
 import { ImpactPanel } from '@/components/review/impact'
 import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { StepDiff } from '@/components/review/diff'
+import { TaskOverview, taskTitle } from '@/components/review/task'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { GuidePanel } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
@@ -63,7 +64,16 @@ export function ReviewPage() {
   return <Review review={data} session={session} />
 }
 
-function Review({ review, session }: { review: ReviewResult; session: string }) {
+export function Review({
+  review,
+  session,
+  onTaskSetup,
+}: {
+  review: ReviewResult
+  session: string
+  /** En una tarea: volver a sus repositorios y destinos. */
+  onTaskSetup?: () => void
+}) {
   const steps = review.steps
   // Por defecto se esconde lo que la política deja saltar.
   const [filter, setFilter] = useState<TriageFilter>('focus')
@@ -94,14 +104,31 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
     return groups
   }, [review.comments])
 
-  const byTurn = useMemo(() => {
-    const groups = new Map<number, ReviewStep[]>()
+  // Los pasos se agrupan por turno en una sesión y por repositorio en una tarea.
+  const groups = useMemo(() => {
+    const found = new Map<string, { title: string; subtitle?: string; steps: ReviewStep[] }>()
     for (const s of steps.filter(shownBy(filter))) {
-      const turn = s.turn ?? -1
-      groups.set(turn, [...(groups.get(turn) ?? []), s])
+      let id: string
+      let title: string
+      let subtitle: string | undefined
+      if (review.task) {
+        const repo = review.task.repos.find((r) => r.repo === s.repo)
+        id = s.repo ?? ''
+        title = repo?.name ?? 'Fuera de los repositorios'
+        subtitle = repo ? `${repo.branch} → ${repo.target ?? '¿?'}` : undefined
+      } else {
+        const turn = s.turn ?? -1
+        const prompt = review.turns.find((t) => t.index === turn)?.prompt
+        id = String(turn)
+        title = turn < 0 ? 'Fuera de los turnos' : `Turno ${turn + 1}`
+        subtitle = prompt ? `«${clip(cleanPrompt(prompt), 90)}»` : undefined
+      }
+      const group = found.get(id) ?? { title, subtitle, steps: [] }
+      group.steps.push(s)
+      found.set(id, group)
     }
-    return [...groups.entries()]
-  }, [steps, filter])
+    return [...found.entries()]
+  }, [steps, filter, review.task, review.turns])
 
   const go = (index: number) => {
     setCurrent(Math.min(Math.max(index, 0), steps.length - 1))
@@ -160,10 +187,15 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
   return (
     <>
       <PageHeader
-        title={`${baseName(review.project) || 'Sesión'} · ${shortId(review.session)}`}
+        title={
+          review.task
+            ? `${review.task.key}${taskTitle(review.task) ? ` · ${taskTitle(review.task)}` : ''}`
+            : `${baseName(review.project) || 'Sesión'} · ${shortId(review.session)}`
+        }
         description={
           <>
-            {review.turns.length} turnos · {files} ficheros · {steps.length} pasos ·{' '}
+            {review.task ? `${review.task.repos.length} repositorios` : `${review.turns.length} turnos`} · {files} ficheros ·{' '}
+            {steps.length} pasos ·{' '}
             <span className={cn('font-semibold', review.status === 'approved' && 'text-brand', review.status === 'changes_requested' && 'text-warn')}>
               {reviewStatusLabel[review.status]}
             </span>
@@ -185,6 +217,8 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
           </div>
         }
       />
+
+      {review.task && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
 
       {review.follow_ups.length > 0 && (
         <Panel className="flex flex-col gap-2 border-brand/40 bg-brand-soft/50">
@@ -238,16 +272,15 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
         <nav aria-label="Turnos y pasos" className="min-w-0 flex-[1_1_300px] lg:sticky lg:top-6">
           <ScrollArea className="rounded-2xl border bg-card lg:h-[calc(100svh-15rem)] [&_[data-radix-scroll-area-viewport]>div]:!block">
             <div className="flex flex-col gap-4 p-2">
-              {byTurn.map(([turn, turnSteps]) => {
-                const info = review.turns.find((t) => t.index === turn)
+              {groups.map(([id, group]) => {
                 return (
-                  <section key={turn} className="flex flex-col gap-1">
+                  <section key={id} className="flex flex-col gap-1">
                     <h2 className="px-2.5 pt-2 text-[13px] leading-snug font-semibold text-muted-foreground">
-                      {turn < 0 ? 'Fuera de los turnos' : `Turno ${turn + 1}`}
-                      {info?.prompt && <span className="block font-normal">«{clip(cleanPrompt(info.prompt), 90)}»</span>}
+                      {group.title}
+                      {group.subtitle && <span className="block font-normal">{group.subtitle}</span>}
                     </h2>
                     <ol className="flex flex-col">
-                      {turnSteps.map((s) => {
+                      {group.steps.map((s) => {
                         const count = commentsByStep.get(s.key) ?? 0
                         return (
                           <li key={s.key}>
@@ -302,7 +335,7 @@ function Review({ review, session }: { review: ReviewResult; session: string }) 
         </nav>
 
         <article aria-label="Paso seleccionado" className="flex min-w-0 flex-[999_1_520px] flex-col gap-4">
-          {step.turn !== null && <CoveragePanel review={review} session={session} turn={step.turn} onStep={go} />}
+          {!review.task && step.turn !== null && <CoveragePanel review={review} session={session} turn={step.turn} onStep={go} />}
           {narration?.summary && (
             <Panel className="flex flex-col gap-2 border-brand/30 bg-brand-soft/50">
               <h2 className="flex items-center gap-2 text-[13px] font-semibold text-accent-foreground">

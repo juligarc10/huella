@@ -20,6 +20,7 @@ import { SearchPage } from '@/pages/search'
 import { SessionsPage } from '@/pages/sessions'
 import { StatusPage } from '@/pages/status'
 import { SymbolPage } from '@/pages/symbol'
+import { TaskPage, TasksPage } from '@/pages/tasks'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -38,8 +39,10 @@ const router = createHashRouter([
     element: <AppShell />,
     errorElement: <RouteError />,
     children: [
-      // Lo primero es lo que queda por revisar.
-      { index: true, element: <Navigate to="/sesiones" replace /> },
+      // Lo primero es lo que queda por revisar: las tareas que se van a mergear.
+      { index: true, element: <Navigate to="/tareas" replace /> },
+      { path: 'tareas', element: <TasksPage /> },
+      { path: 'tareas/:key', element: <TaskPage /> },
       { path: 'buscar', element: <SearchPage /> },
       { path: 'decisiones', element: <DecisionsPage /> },
       { path: 'simbolo', element: <SymbolPage /> },

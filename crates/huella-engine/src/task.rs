@@ -275,6 +275,8 @@ pub struct TaskReview {
     pub repos: Vec<RepoSync>,
     /// Ficheros que no se revisan (binarios o demasiado grandes), con su ruta absoluta.
     pub skipped: Vec<String>,
+    /// Sesiones de agentes con ediciones en la tarea: de su actividad sale la evidencia.
+    pub sessions: Vec<String>,
 }
 
 /// Revisión de la tarea: en cada repositorio con destino, del `merge-base`
@@ -308,7 +310,9 @@ pub fn task_review(store: &Store, sources: &crate::Sources, key: &str, fetch: bo
         |edit| edit.path.display().to_string(),
         |path| after.get(path).cloned(),
     );
-    Ok(TaskReview { review, repos: states, skipped })
+    let sessions: BTreeSet<String> =
+        edits.iter().map(|edit| edit.origin.session_id.clone()).filter(|session| !session.is_empty()).collect();
+    Ok(TaskReview { review, repos: states, skipped, sessions: sessions.into_iter().collect() })
 }
 
 /// Ediciones de todos los agentes, por la ruta real del fichero.

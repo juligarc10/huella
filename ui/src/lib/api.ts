@@ -270,6 +270,56 @@ export interface ReviewStep {
   evidence: StepEvidence
   triage: StepTriage
   guide: StepGuide | null
+  /** En una tarea, el repositorio del paso. */
+  repo?: string | null
+}
+
+/** Cómo está un repositorio de la tarea respecto al remoto. */
+export interface RepoSync {
+  repo: string
+  name: string | null
+  branch: string
+  target: string | null
+  fetched: boolean
+  fetch_error: string | null
+  branch_ref: string | null
+  target_ref: string | null
+  unpushed: number
+  unpulled: number
+  not_pushed: boolean
+  checked_out: string | null
+  uncommitted: string[]
+  commits: number
+  target_ahead: number
+  /** Lo que impide revisarlo (falta el destino, no existe la rama…). */
+  error: string | null
+  warnings: string[]
+}
+
+export interface TargetCandidate {
+  name: string
+  forked_at: number
+  commits: number
+}
+
+export interface TaskSummary {
+  key: string
+  title: string | null
+  description: string
+  updated_at: string
+  repos: { repo: string; name: string | null; branch: string; target: string | null }[]
+  status: ReviewStatus
+  steps: number | null
+  reviewed: number
+}
+
+export interface TaskDetail {
+  key: string
+  title: string | null
+  description: string
+  /** Id de su revisión (`task:<CLAVE>`). */
+  review: string
+  repos: (RepoSync & { candidates: TargetCandidate[] })[]
 }
 
 /** Rango de líneas del diff del paso: índices en `lines`, inclusive. */
@@ -498,4 +548,6 @@ export interface ReviewResult {
   comprehension: Comprehension
   /** Guías en cola (la primera, en curso) y las que fallaron. */
   guiding: { pending: string[]; errors: string[] } | null
+  /** Si es la revisión de una tarea: lo que pide y cómo está cada repositorio. */
+  task?: { key: string; title: string | null; description: string; repos: RepoSync[] }
 }

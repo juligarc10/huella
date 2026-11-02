@@ -17,6 +17,8 @@ import {
   type Overview,
   type CodeFile,
   type ReviewResult,
+  type TaskDetail,
+  type TaskSummary,
   type SearchResult,
   type SessionInfo,
   type StatusResult,
@@ -109,6 +111,69 @@ export function useReview(session: string | undefined) {
       const data = state.state.data
       return data?.asking.some((ask) => !ask.error) || data?.covering?.running || data?.guiding?.pending.length ? 1500 : false
     },
+  })
+}
+
+export function useTasks() {
+  return useQuery({ queryKey: ['tasks'], queryFn: () => api.get<{ tasks: TaskSummary[] }>('tasks') })
+}
+
+/** Una tarea y cómo está cada repositorio; `fetch` trae antes el remoto. */
+export function useTask(key: string, fetch: boolean) {
+  return useQuery({
+    queryKey: ['task', key, fetch],
+    queryFn: () => api.get<TaskDetail>(`tasks/${encodeURIComponent(key)}${query({ fetch: fetch ? '1' : null })}`),
+    retry: false,
+  })
+}
+
+export function useCreateTask() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (task: { key: string; title: string; description: string; repos: string[] }) =>
+      api.post<{ key: string; added: number }>('tasks', task),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['tasks'] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Cambios en los repositorios o destinos de una tarea: rehacen su revisión. */
+function useTaskChange<T>(key: string, path: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (body: T) => api.post(`tasks/${encodeURIComponent(key)}/${path}`, body),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['task', key] })
+      client.invalidateQueries({ queryKey: ['tasks'] })
+      client.invalidateQueries({ queryKey: ['review', `task:${key}`] })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export const useSetTaskTarget = (key: string) => useTaskChange<{ target: string; repo?: string }>(key, 'target')
+export const useAddTaskRepo = (key: string) => useTaskChange<{ repo: string; branch?: string; target?: string }>(key, 'repos')
+export const useRemoveTaskRepo = (key: string) => useTaskChange<{ repo: string }>(key, 'repos/remove')
+
+export function useDeleteTask() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (key: string) => api.post(`tasks/${encodeURIComponent(key)}/delete`, {}),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['tasks'] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Vuelve a traer el remoto y a construir la revisión. */
+export function useRefreshReview(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post(`review/${session}/refresh`, {}),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['review', session] })
+      client.invalidateQueries({ queryKey: ['task'] })
+    },
+    onError: (error) => toast.error(error.message),
   })
 }
 
