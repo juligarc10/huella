@@ -410,6 +410,33 @@ Lo que se entrega es una rama, no una sesión. Huella toma el diff contra el
 En la aplicación, la página Rama deja elegir la copia de trabajo, porque los
 agentes suelen trabajar en worktrees.
 
+### Revisar una tarea
+
+Lo que se revisa debe ser exactamente lo que se va a mergear. Una tarea (de
+JIRA o de donde sea) suele tocar varios repositorios, con una rama del mismo
+nombre en cada uno, y cada rama se mergea en su destino (la rama del sprint,
+`develop`…):
+
+```sh
+huella task new DENMS-1234 --description-file -   # pega lo que pide la tarea
+huella task target DENMS-1234 sprint/42           # a qué rama se mergean
+huella task show DENMS-1234                       # estado y avisos de cada repositorio
+huella task review DENMS-1234                     # lo que se va a revisar
+```
+
+- **Las ramas se encuentran solas**: las que llevan la clave en el nombre
+  (`feature/DENMS-1234-filtros`), en los repositorios de tus sesiones y en la
+  carpeta actual (`--repo` añade más; `huella task add` y `remove`, a mano).
+- **El destino se propone**: la rama del remoto de la que se separó más
+  recientemente; si otro repositorio de la tarea ya tiene uno, ese primero. Se
+  fija con `huella task target`, para todos o para uno (`--repo`).
+- **Lo que se mergea, nada más**: antes de revisar se trae el remoto y se compara
+  contra el destino de `origin`, no contra una copia local que puede estar vieja
+  (lo que hacía aparecer cambios de otras tareas). Se revisa lo que hay en
+  commits en la rama; lo que no tiene commit no entra.
+- **Avisos** de lo que hace que no coincida con la PR: commits sin subir o sin
+  bajar, rama que no está en el remoto, cambios sin commit, remoto sin traer.
+
 ### Extraer decisiones
 
 Con la API de Claude (por defecto `claude-haiku-5-5`, `ANTHROPIC_API_KEY`):
