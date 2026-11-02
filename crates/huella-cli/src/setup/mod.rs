@@ -8,6 +8,7 @@ mod agents;
 mod editors;
 mod hooks;
 mod model;
+mod skill;
 mod wizard;
 
 use std::ffi::OsString;
@@ -17,6 +18,7 @@ use anyhow::{Context as _, Result};
 use huella_store::Store;
 
 pub use self::agents::McpAgent;
+pub use self::skill::agents_md;
 pub use self::wizard::{SetupOptions, setup};
 use crate::ModelArgs;
 
@@ -132,6 +134,7 @@ pub fn checks(context: &Context<'_>, online: bool) -> Vec<Check> {
     }
     if McpAgent::ClaudeCode.detected(context.dirs) {
         checks.push(hooks_check(context.dirs, &exe));
+        checks.push(skill_check(context.dirs));
     }
     checks.extend(editor_checks(context.dirs));
     checks
@@ -218,6 +221,18 @@ fn hooks_check(dirs: &Dirs, exe: &Path) -> Check {
         Ok(false) => Check::new(area, Status::Warn, "sin hooks: no avisa de lo obligatorio al acabar cada turno")
             .hint("huella setup los instala"),
         Err(error) => Check::new(area, Status::Warn, format!("{error:#}")).hint(hooks::manual(dirs, exe)),
+    }
+}
+
+fn skill_check(dirs: &Dirs) -> Check {
+    let area = "Registro de decisiones · Claude Code";
+    match skill::state(dirs) {
+        skill::SkillState::Current => Check::new(area, Status::Ok, "skill huella-registro instalada"),
+        skill::SkillState::Outdated => {
+            Check::new(area, Status::Warn, "la skill es de otra versión").hint("huella setup la actualiza")
+        }
+        skill::SkillState::Missing => Check::new(area, Status::Warn, "sin skill: el agente no registra sus decisiones")
+            .hint("huella setup la instala"),
     }
 }
 

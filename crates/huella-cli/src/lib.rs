@@ -220,6 +220,9 @@ enum Command {
         #[command(subcommand)]
         action: task::TaskCommand,
     },
+    /// Texto para AGENTS.md: pide al agente registrar sus decisiones con
+    /// `huella_record` (para agentes sin skills; Claude Code usa la skill).
+    AgentsMd,
     /// Puntos de control para los hooks de Claude Code: lee el evento por
     /// stdin. `huella setup` los instala.
     Hook {
@@ -612,10 +615,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Review { action } => review_command(cli.db, action),
         Command::Task { action } => task::command(&open_store(cli.db)?, &sources(None)?, action),
         Command::Hook { event, projects } => hook::run(event, cli.db, projects),
-        Command::Mcp { projects } => {
-            let mut context = mcp::Context { store: open_store(cli.db)?, sources: sources(projects)? };
-            mcp::serve(&mut context)
-        }
+        Command::AgentsMd => agents_md_command(),
+        Command::Mcp { projects } => mcp_command(cli.db, projects),
         Command::Lsp { projects, index_every, model } => lsp(cli.db, projects, index_every, model),
     }
 }
@@ -996,6 +997,18 @@ fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()>
         }
         _ => unreachable!("solo comandos del bucle de corrección"),
     }
+}
+
+/// `huella mcp`: el servidor para los agentes.
+fn mcp_command(db: Option<PathBuf>, projects: Option<PathBuf>) -> Result<()> {
+    let mut context = mcp::Context { store: open_store(db)?, sources: sources(projects)? };
+    mcp::serve(&mut context)
+}
+
+#[allow(clippy::unnecessary_wraps, reason = "encaja con el resto de órdenes")]
+fn agents_md_command() -> Result<()> {
+    emit(&setup::agents_md());
+    Ok(())
 }
 
 /// `huella lsp`: el servidor del editor; `index_every` 0 desactiva el indexado.
