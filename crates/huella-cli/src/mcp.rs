@@ -19,7 +19,8 @@ y por qué se escribió cada función, las decisiones de proyecto y la revisión
 huella_symbol_history antes de cambiar código que no conoces, huella_decisions antes de proponer cambios de \
 arquitectura o tecnología, y huella_review para explicar o revisar lo que hizo una sesión. Mientras escribes \
 código, registra con huella_record cada decisión entre alternativas, lo que das por hecho, lo que no has \
-comprobado y cómo funciona lo que no es obvio: es lo que verá quien revise.";
+comprobado y cómo funciona lo que no es obvio: es lo que verá quien revise. Al terminar una tarea, cuéntala con \
+huella_storyline: el guion con el que se presentará a quien la revise.";
 
 pub struct Context {
     pub store: Store,
@@ -151,8 +152,64 @@ fn tools() -> Value {
     if let Some(list) = tools.as_array_mut() {
         let at = list.len().saturating_sub(1);
         list.insert(at, record_tool());
+        list.insert(at + 1, storyline_tool());
     }
     tools
+}
+
+/// `huella_storyline`: el agente cuenta el cambio al terminar, en el formato
+/// común del guion. El esquema es el publicado, con las anclas en línea.
+fn storyline_tool() -> Value {
+    let mut schema: Value = serde_json::from_str(huella_engine::storyline::SCHEMA).unwrap_or_default();
+    let anchor = schema["$defs"]["anchor"].clone();
+    inline(&mut schema, &anchor);
+    if let Some(object) = schema.as_object_mut() {
+        for key in ["$schema", "$id", "$defs", "title"] {
+            object.remove(key);
+        }
+    }
+    json!({
+        "name": "huella_storyline",
+        "description": "Cuenta el cambio al terminar una tarea (o una parte grande): el guion con el que se le \
+                        presentará a quien lo revise. Capítulos en el orden en que conviene ENTENDERLO (de la entrada \
+                        a la lógica, los datos y los efectos, cruzando repositorios), no en el que lo escribiste; cada \
+                        uno con su código (anclas con ruta absoluta y símbolo), qué hay que mirar y qué debería saber \
+                        responder quien revisa. Incluye lo que hiciste fuera de la tarea y lo que no comprobaste: lo \
+                        que no cuentes aparecerá igualmente, marcado como no contado. Si el cambio sigue, vuelve a \
+                        llamarla con el guion completo.",
+        "inputSchema": schema
+    })
+}
+
+/// Sustituye las referencias al ancla por su definición.
+fn inline(value: &mut Value, anchor: &Value) {
+    match value {
+        Value::Object(object) if object.get("$ref").and_then(Value::as_str) == Some("#/$defs/anchor") => {
+            *value = anchor.clone();
+        }
+        Value::Object(object) => object.values_mut().for_each(|child| inline(child, anchor)),
+        Value::Array(items) => items.iter_mut().for_each(|child| inline(child, anchor)),
+        _ => {}
+    }
+}
+
+/// `huella_storyline`: guarda el guion del agente, anclado al código.
+fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
+    let told: huella_engine::storyline::Story = serde_json::from_value(arguments.clone())
+        .map_err(|error| anyhow::anyhow!("el guion no sigue el esquema: {error}"))?;
+    let recorded = huella_engine::storyline::record(store, told)?;
+    let mut text = format!(
+        "Guion registrado (#{}): {} capítulos, {} anclas resueltas. Se presentará así al revisar la tarea.",
+        recorded.id, recorded.chapters, recorded.anchors
+    );
+    if !recorded.unresolved.is_empty() {
+        let _ = write!(
+            text,
+            " No encontré: {}; usa rutas absolutas de ficheros que existan.",
+            recorded.unresolved.join(", ")
+        );
+    }
+    Ok(text)
 }
 
 /// `huella_record`: el agente declara lo que decidió sobre el código que acaba de escribir.
@@ -196,6 +253,9 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
     // Registrar no necesita la memoria: que no espere al indexado.
     if name == "huella_record" {
         return record(&context.store, arguments);
+    }
+    if name == "huella_storyline" {
+        return storyline(&mut context.store, arguments);
     }
     // Lo nuevo de las transcripciones se indexa antes de responder.
     huella_engine::index(&mut context.store, &context.sources)?;
@@ -418,6 +478,7 @@ mod tests {
                 "huella_search",
                 "huella_review_feedback",
                 "huella_record",
+                "huella_storyline",
                 "huella_sessions"
             ]
         );
@@ -436,6 +497,47 @@ mod tests {
         assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("no se pudo leer"));
         let unknown = handle(&mut context, &json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})).unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn agents_tell_the_storyline_of_their_change() {
+        let mut context = context();
+        let tools = handle(&mut context, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "huella_storyline")
+            .unwrap()
+            .clone();
+        let schema = tool["inputSchema"].to_string();
+        assert!(!schema.contains("$ref") && schema.contains("look_at"), "{schema}");
+
+        let dir = std::env::temp_dir().join(format!("huella-mcp-story-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["init", "-q", "-b", "feature/A-1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let file = dir.join("total.ts");
+        std::fs::write(&file, "export function total(items) {\n  return items.length;\n}\n").unwrap();
+        let response = handle(
+            &mut context,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "huella_storyline", "arguments": {
+                "summary": "Cuenta los elementos.",
+                "chapters": [{"id": "C1", "title": "El total", "intent": "Contar", "anchors": [{"file": file, "symbol": "total"}],
+                              "questions": ["¿Qué devuelve con una lista vacía?"]}]
+            }}}),
+        )
+        .unwrap();
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(response["result"]["isError"] == false && text.contains("1 capítulos, 1 anclas"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
