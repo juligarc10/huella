@@ -138,10 +138,11 @@ pub fn known_repos(store: &Store) -> Result<Vec<PathBuf>> {
     Ok(repos.into_iter().collect())
 }
 
-/// Ramas cuyo nombre lleva la clave de la tarea, una por repositorio (la local
-/// si la hay; si no, la del remoto).
+/// Ramas de la tarea, una por repositorio (la local si la hay; si no, la del
+/// remoto): las que llevan su clave en el nombre o, si la tarea tiene rama, las
+/// que se llaman así.
 #[must_use]
-pub fn find_branches(repos: &[PathBuf], key: &str) -> Vec<(PathBuf, String)> {
+pub fn find_branches(repos: &[PathBuf], key: &str, branch: Option<&str>) -> Vec<(PathBuf, String)> {
     let wanted = key.to_ascii_uppercase();
     let mut found = Vec::new();
     for repo in repos {
@@ -155,11 +156,14 @@ pub fn find_branches(repos: &[PathBuf], key: &str) -> Vec<(PathBuf, String)> {
                     .map(|branch| (true, branch.to_owned()))
                     .or_else(|| name.strip_prefix("refs/remotes/origin/").map(|branch| (false, branch.to_owned())))
             })
-            .filter(|(_, branch)| branch != "HEAD" && key_of(branch).as_deref() == Some(wanted.as_str()))
+            .filter(|(_, name)| {
+                name != "HEAD" && (Some(name.as_str()) == branch || key_of(name).as_deref() == Some(wanted.as_str()))
+            })
             .collect();
-        let local = names.iter().find(|(local, _)| *local).or_else(|| names.first());
-        if let Some((_, branch)) = local {
-            found.push((repo.clone(), branch.clone()));
+        // La rama con el nombre exacto antes que otras con la clave; la local antes que la del remoto.
+        let best = names.iter().min_by_key(|(local, name)| (Some(name.as_str()) != branch, !*local));
+        if let Some((_, name)) = best {
+            found.push((repo.clone(), name.clone()));
         }
     }
     found
@@ -401,6 +405,27 @@ pub fn checked_out(repo: &Path) -> Option<String> {
     git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).ok().map(|b| b.trim().to_owned()).filter(|b| b != "HEAD")
 }
 
+/// Identidad de un repositorio: su directorio git común, que comparten sus
+/// worktrees con la copia principal.
+fn repo_identity(dir: &Path) -> Option<PathBuf> {
+    let common = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    std::fs::canonicalize(common.trim()).ok()
+}
+
+/// Una copia de trabajo por repositorio: la principal si está entre ellas
+/// (los agentes suelen trabajar en worktrees del mismo repositorio).
+fn one_per_repository(repos: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut chosen: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    for repo in repos {
+        let Some(identity) = repo_identity(&repo) else { continue };
+        let main = std::fs::canonicalize(&repo).is_ok_and(|real| real.join(".git") == identity);
+        if main || !chosen.contains_key(&identity) {
+            chosen.insert(identity, repo);
+        }
+    }
+    chosen.into_values().collect()
+}
+
 /// Lo que se revisa de la rama: la local si existe; si no, la del remoto.
 fn branch_ref(repo: &Path, branch: &str) -> Option<String> {
     if exists(repo, &format!("refs/heads/{branch}")) {
@@ -442,16 +467,18 @@ pub fn discover(store: &Store, key: &str, extra: &[PathBuf]) -> Result<Vec<TaskR
             .filter_map(|dir| git(dir, &["rev-parse", "--show-toplevel"]).ok())
             .map(|root| PathBuf::from(root.trim())),
     );
-    repos.sort();
-    repos.dedup();
+    let repos = one_per_repository(repos);
     let current: BTreeMap<String, TaskRepo> =
         store.task_repos(key)?.into_iter().map(|repo| (repo.repo.clone(), repo)).collect();
+    // Un repositorio que ya está en la tarea, aunque sea por otra copia de trabajo, no se repite.
+    let present: BTreeSet<PathBuf> = current.keys().filter_map(|repo| repo_identity(Path::new(repo))).collect();
+    let task_branch = store.task(key)?.and_then(|task| task.branch);
     let mut added = Vec::new();
-    for (repo, branch) in find_branches(&repos, key) {
-        let repo = repo.display().to_string();
-        if current.contains_key(&repo) {
+    for (repo, branch) in find_branches(&repos, key, task_branch.as_deref()) {
+        if repo_identity(&repo).is_some_and(|identity| present.contains(&identity)) {
             continue;
         }
+        let repo = repo.display().to_string();
         let found = TaskRepo { repo, branch, target: None };
         store.set_task_repo(key, &found)?;
         added.push(found);
@@ -580,6 +607,25 @@ mod tests {
         let api = &fresh.repos[0];
         assert_eq!((api.error.as_deref(), api.uncommitted.len()), (None, 1));
         assert!(api.warnings().iter().any(|w| w.contains("sin commit")), "{:?}", api.warnings());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn branches_without_the_key_are_found_by_the_task_branch() {
+        let (root, work) = fixture("by-name");
+        run(&work, &["checkout", "-q", "-b", "feature/registro"]);
+        run(&work, &["push", "-q", "origin", "feature/registro"]);
+        let store = Store::open_in_memory().unwrap();
+        store.save_task("HUELLA-24", None, "").unwrap();
+        assert_eq!(discover(&store, "HUELLA-24", std::slice::from_ref(&work)).unwrap(), Vec::new());
+        store.set_task_branch("HUELLA-24", Some("feature/registro")).unwrap();
+        // Un worktree del mismo repositorio no lo duplica: se queda la copia principal.
+        let worktree = root.join("api-worktree");
+        run(&work, &["worktree", "add", "-q", worktree.to_str().unwrap(), "main"]);
+        let added = discover(&store, "HUELLA-24", &[worktree.clone(), work.clone()]).unwrap();
+        assert_eq!(added.iter().map(|repo| repo.branch.as_str()).collect::<Vec<_>>(), vec!["feature/registro"]);
+        assert_eq!(std::fs::canonicalize(&added[0].repo).unwrap(), std::fs::canonicalize(&work).unwrap());
+        assert_eq!(discover(&store, "HUELLA-24", &[worktree]).unwrap(), Vec::new(), "ya está por la copia principal");
         std::fs::remove_dir_all(root).unwrap();
     }
 

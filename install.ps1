@@ -49,6 +49,23 @@ function Get-LatestVersion {
     $version
 }
 
+# Descarga con reintentos: una conexión cortada o un servidor que aún no
+# responde no deberían impedir la instalación.
+function Save-Url($url, $path) {
+    $attempts = 3
+    foreach ($attempt in 1..$attempts) {
+        try {
+            Invoke-WebRequest -UseBasicParsing $url -OutFile $path
+            return
+        } catch {
+            # Un 404 no se arregla reintentando.
+            $status = $_.Exception.Response.StatusCode
+            if ($attempt -eq $attempts -or ($status -and [int]$status -ge 400 -and [int]$status -lt 500)) { throw }
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+}
+
 $target = Get-Target
 $version = if ($env:HUELLA_VERSION) { $env:HUELLA_VERSION } else { Get-LatestVersion }
 $base = if ($env:HUELLA_DOWNLOAD_URL) { $env:HUELLA_DOWNLOAD_URL } else { "$Repo/releases/download" }
@@ -60,10 +77,10 @@ New-Item -ItemType Directory $work | Out-Null
 try {
     Write-Host "Descargando Huella $version para $target…"
     try {
-        Invoke-WebRequest -UseBasicParsing "$base/$version/$archive" -OutFile (Join-Path $work $archive)
+        Save-Url "$base/$version/$archive" (Join-Path $work $archive)
     } catch { Fail "no se pudo descargar $base/$version/${archive}: $($_.Exception.Message)" }
     try {
-        Invoke-WebRequest -UseBasicParsing "$base/$version/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS')
+        Save-Url "$base/$version/SHA256SUMS" (Join-Path $work 'SHA256SUMS')
     } catch { Fail "la release $version no publica SHA256SUMS: no se instala sin comprobarla" }
 
     $expected = Get-Content (Join-Path $work 'SHA256SUMS') |

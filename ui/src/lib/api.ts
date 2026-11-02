@@ -326,6 +326,8 @@ export interface TaskSummary {
   key: string
   title: string | null
   description: string
+  /** Rama de la tarea, si su nombre no lleva la clave. */
+  branch: string | null
   updated_at: string
   repos: { repo: string; name: string | null; branch: string; target: string | null }[]
   status: ReviewStatus
@@ -337,6 +339,7 @@ export interface TaskDetail {
   key: string
   title: string | null
   description: string
+  branch: string | null
   /** Id de su revisión (`task:<CLAVE>`). */
   review: string
   repos: (RepoSync & { candidates: TargetCandidate[] })[]

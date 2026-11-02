@@ -736,6 +736,7 @@ fn tasks(app: &App) -> Result<Value> {
                 "key": task.key,
                 "title": task.title,
                 "description": task.description,
+                "branch": task.branch,
                 "updated_at": task.updated_at,
                 "repos": repos.iter().map(|repo| json!({
                     "repo": repo.repo,
@@ -760,6 +761,9 @@ fn create_task(app: &mut App, body: &str) -> Result<Value> {
     let title = request["title"].as_str().map(str::trim).filter(|title| !title.is_empty());
     let description = request["description"].as_str().unwrap_or_default();
     app.store.save_task(&key, title, description)?;
+    if let Some(branch) = request["branch"].as_str().map(str::trim).filter(|branch| !branch.is_empty()) {
+        app.store.set_task_branch(&key, Some(branch))?;
+    }
     let extra: Vec<PathBuf> = request["repos"]
         .as_array()
         .into_iter()
@@ -792,6 +796,7 @@ fn task_detail(app: &App, key: &str, params: &HashMap<String, String>) -> Result
         "key": task.key,
         "title": task.title,
         "description": task.description,
+        "branch": task.branch,
         "review": huella_engine::task::review_id(key),
         "repos": repos,
     }))

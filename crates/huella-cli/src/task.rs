@@ -27,6 +27,9 @@ pub enum TaskCommand {
         /// Rama a la que se mergean todas (p. ej. la del sprint).
         #[arg(long)]
         target: Option<String>,
+        /// Nombre de la rama de la tarea, si no lleva la clave (p. ej. feature/registro-declarado).
+        #[arg(long)]
+        branch: Option<String>,
         /// Repositorios donde buscar además de los conocidos.
         #[arg(long = "repo")]
         repos: Vec<PathBuf>,
@@ -76,7 +79,7 @@ pub enum TaskCommand {
 
 pub fn command(store: &Store, sources: &huella_engine::Sources, action: TaskCommand) -> Result<()> {
     match action {
-        TaskCommand::New { key, title, description, description_file, target, repos } => {
+        TaskCommand::New { key, title, description, description_file, target, branch, repos } => {
             let key = key.to_ascii_uppercase();
             let description = match (description, description_file) {
                 (Some(text), _) => text,
@@ -84,6 +87,9 @@ pub fn command(store: &Store, sources: &huella_engine::Sources, action: TaskComm
                 (None, None) => store.task(&key)?.map(|task| task.description).unwrap_or_default(),
             };
             store.save_task(&key, title.as_deref(), &description)?;
+            if let Some(branch) = branch.as_deref().map(str::trim).filter(|branch| !branch.is_empty()) {
+                store.set_task_branch(&key, Some(branch))?;
+            }
             let mut extra = repos;
             extra.push(std::env::current_dir()?);
             let added = task::discover(store, &key, &extra)?;
