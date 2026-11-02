@@ -424,6 +424,13 @@ huella task show DENMS-1234                       # estado y avisos de cada repo
 huella task review DENMS-1234                     # lo que se va a revisar
 ```
 
+En la aplicación, **Tareas** es la página de inicio: «Nueva tarea» pide la clave
+y lo que pide la tarea (pegado), busca sus ramas y deja elegir el destino de
+cada repositorio entre los probables. La revisión es la misma que la de una
+sesión (triaje, guía, preguntas, veredictos y comentarios), con los pasos
+agrupados por repositorio, los avisos arriba y «Traer el remoto» para
+rehacerla con lo último.
+
 - **Las ramas se encuentran solas**: las que llevan la clave en el nombre
   (`feature/DENMS-1234-filtros`), en los repositorios de tus sesiones y en la
   carpeta actual (`--repo` añade más; `huella task add` y `remove`, a mano).
