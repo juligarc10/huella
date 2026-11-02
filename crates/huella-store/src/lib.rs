@@ -313,7 +313,35 @@ const MIGRATIONS: &[&str] = &[
         checked_at      TEXT NOT NULL
     );
 ",
+    // 17: tareas (una petición de JIRA u otra) y la rama de cada repositorio
+    // que la implementa, con la rama a la que se va a mergear.
+    r"
+    CREATE TABLE task (
+        key             TEXT PRIMARY KEY,
+        title           TEXT,
+        description     TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE TABLE task_repo (
+        task_key        TEXT NOT NULL REFERENCES task(key) ON DELETE CASCADE,
+        repo            TEXT NOT NULL,
+        branch          TEXT NOT NULL,
+        target          TEXT,
+        PRIMARY KEY (task_key, repo)
+    );
+",
 ];
+
+fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+    Ok(Task {
+        key: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
 
 /// Edición ya anclada, lista para guardar.
 pub struct IndexedEdit<'a> {
@@ -575,6 +603,26 @@ pub struct StoredGuide {
     pub guide: String,
     /// Índices de las comprobaciones que la persona dio por hechas.
     pub checked: Vec<usize>,
+}
+
+/// Una tarea: lo que se pidió (pegado de JIRA o de donde sea).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub key: String,
+    pub title: Option<String>,
+    pub description: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// La rama de un repositorio que implementa una tarea.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRepo {
+    /// Raíz del repositorio.
+    pub repo: String,
+    pub branch: String,
+    /// Rama a la que se va a mergear; `None` hasta que se elige.
+    pub target: Option<String>,
 }
 
 /// Recuento de lo obligatorio de una sesión en su último punto de control.
@@ -1568,6 +1616,90 @@ impl Store {
             params![session_id, step_key, serde_json::to_string(&checked).unwrap_or_else(|_| "[]".into())],
         )?;
         Ok(true)
+    }
+
+    /// Crea la tarea o actualiza su título y su descripción.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_task(&self, key: &str, title: Option<&str>, description: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO task (key, title, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(key) DO UPDATE SET title = excluded.title, description = excluded.description,
+                 updated_at = excluded.updated_at",
+            params![key, title, redact(description)],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn task(&self, key: &str) -> Result<Option<Task>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT key, title, description, created_at, updated_at FROM task WHERE key = ?1",
+                [key],
+                task_row,
+            )
+            .optional()?)
+    }
+
+    /// Tareas, la más reciente primero.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn tasks(&self) -> Result<Vec<Task>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT key, title, description, created_at, updated_at FROM task ORDER BY updated_at DESC, key",
+        )?;
+        let rows = statement.query_map([], task_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Borra la tarea y sus repositorios. Devuelve si existía.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_task(&self, key: &str) -> Result<bool> {
+        self.conn.execute("DELETE FROM task_repo WHERE task_key = ?1", [key])?;
+        Ok(self.conn.execute("DELETE FROM task WHERE key = ?1", [key])? > 0)
+    }
+
+    /// Añade un repositorio a la tarea o cambia su rama y su destino.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn set_task_repo(&self, key: &str, repo: &TaskRepo) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO task_repo (task_key, repo, branch, target) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_key, repo) DO UPDATE SET branch = excluded.branch, target = excluded.target",
+            params![key, repo.repo, repo.branch, repo.target],
+        )?;
+        self.conn
+            .execute("UPDATE task SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
+    /// Quita un repositorio de la tarea. Devuelve si estaba.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn remove_task_repo(&self, key: &str, repo: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM task_repo WHERE task_key = ?1 AND repo = ?2", [key, repo])? > 0)
+    }
+
+    /// Repositorios de la tarea, por ruta.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn task_repos(&self, key: &str) -> Result<Vec<TaskRepo>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT repo, branch, target FROM task_repo WHERE task_key = ?1 ORDER BY repo")?;
+        let rows = statement
+            .query_map([key], |row| Ok(TaskRepo { repo: row.get(0)?, branch: row.get(1)?, target: row.get(2)? }))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Último punto de control de una sesión.
@@ -3037,6 +3169,32 @@ mod tests {
         store.save_narration("s1", 3, &first).unwrap();
         let stored = store.narrations("s1").unwrap();
         assert_eq!((stored.len(), stored[&0].input_hash.as_str()), (2, "h2"));
+    }
+
+    #[test]
+    fn tasks_keep_their_repositories_and_targets() {
+        let store = Store::open_in_memory().unwrap();
+        store.save_task("DENMS-1", Some("Filtros"), "Revisar los filtros de auditoría").unwrap();
+        let repo = |name: &str, target: Option<&str>| TaskRepo {
+            repo: format!("/w/{name}"),
+            branch: "feature/DENMS-1".into(),
+            target: target.map(str::to_owned),
+        };
+        store.set_task_repo("DENMS-1", &repo("api", None)).unwrap();
+        store.set_task_repo("DENMS-1", &repo("billing", Some("sprint/42"))).unwrap();
+        store.set_task_repo("DENMS-1", &repo("api", Some("sprint/42"))).unwrap();
+        assert_eq!(
+            store.task_repos("DENMS-1").unwrap(),
+            vec![repo("api", Some("sprint/42")), repo("billing", Some("sprint/42"))]
+        );
+        store.save_task("DENMS-1", Some("Filtros de auditoría"), "otra").unwrap();
+        let task = store.task("DENMS-1").unwrap().unwrap();
+        assert_eq!((task.title.as_deref(), task.description.as_str()), (Some("Filtros de auditoría"), "otra"));
+        assert!(store.remove_task_repo("DENMS-1", "/w/billing").unwrap());
+        assert_eq!(store.tasks().unwrap().len(), 1);
+        assert!(store.delete_task("DENMS-1").unwrap());
+        assert_eq!(store.task_repos("DENMS-1").unwrap(), Vec::new());
+        assert_eq!(store.task("DENMS-1").unwrap(), None);
     }
 
     #[test]
