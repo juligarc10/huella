@@ -25,6 +25,7 @@ import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } 
 import { StepDiff } from '@/components/review/diff'
 import { TaskOverview, taskTitle } from '@/components/review/task'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
+import { DeclaredPanel } from '@/components/review/declared'
 import { GuidePanel } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -402,6 +403,7 @@ export function Review({
             )}
           </Panel>
 
+          <DeclaredPanel entries={step.declared} />
           <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
 
           <StepDiff

@@ -272,6 +272,26 @@ export interface ReviewStep {
   guide: StepGuide | null
   /** En una tarea, el repositorio del paso. */
   repo?: string | null
+  /** Lo que el agente declaró sobre el código del paso, la más reciente primero. */
+  declared: Declared[]
+}
+
+/** Lo que el agente declaró con `huella_record` al escribir un trozo de código. */
+export interface Declared {
+  id: number
+  recorded_at: string
+  path: string
+  symbol: string | null
+  kind: 'decision' | 'assumption' | 'unverified' | 'risk'
+  summary: string
+  how: string | null
+  alternatives: { option: string; why_not: string }[]
+  assumptions: string[]
+  unverified: string[]
+  confidence: 'high' | 'medium' | 'low' | null
+  review_hint: string | null
+  /** El código cambió después de declararlo. */
+  stale: boolean
 }
 
 /** Cómo está un repositorio de la tarea respecto al remoto. */
