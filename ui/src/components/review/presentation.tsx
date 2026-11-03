@@ -15,6 +15,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { Mono, Panel } from '@/components/bits'
+import { SplitPane } from '@/components/resizable'
 import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
 import { StepDiff } from '@/components/review/diff'
@@ -204,7 +205,7 @@ export function Presentation({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
-      if (event.metaKey || event.ctrlKey || target.closest('input, textarea, select, [role="dialog"]')) return
+      if (event.metaKey || event.ctrlKey || target.closest('input, textarea, select, [role="dialog"], [role="separator"]')) return
       const verdict = verdicts.find((v) => v.key === event.key)
       if (event.key === 'ArrowRight') go(position + 1)
       else if (event.key === 'ArrowLeft') go(position - 1)
@@ -703,7 +704,7 @@ function IdeaSlide({
   const declared = [...new Map(steps.flatMap((step) => step.declared).map((entry) => [entry.id, entry])).values()]
   const terms = termsIn(story, idea.explanation)
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <SplitPane>
       <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
         <header className="flex flex-col gap-2">
           <p className="text-[13px] font-semibold text-muted-foreground">{chapter.title}</p>
@@ -734,7 +735,7 @@ function IdeaSlide({
           <IdeaCode key={step.key} review={review} session={session} step={step} peekHint={index === 0} />
         ))}
       </div>
-    </div>
+    </SplitPane>
   )
 }
 
@@ -763,7 +764,7 @@ function FileSlide({
   const pending = review.guiding?.pending ?? []
   const preparing = missing.some((key) => pending.includes(key))
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <SplitPane>
       <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
         <header className="flex flex-col gap-2">
           <p className="text-[13px] font-semibold text-muted-foreground">{chapter.title}</p>
@@ -795,7 +796,7 @@ function FileSlide({
           <IdeaCode key={step.key} review={review} session={session} step={step} peekHint={index === 0} explain />
         ))}
       </div>
-    </div>
+    </SplitPane>
   )
 }
 
@@ -858,7 +859,7 @@ function StepSlide({
   const [composing, setComposing] = useState<number | null>(null)
   const anchored = step.guide && !step.guide.stale ? step.guide : null
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <SplitPane>
       <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
         <header className="flex flex-col gap-1.5">
           <p className="text-[13px] text-muted-foreground">{story.chapters[chapter].intent || story.chapters[chapter].title}</p>
@@ -883,7 +884,7 @@ function StepSlide({
           focus={anchored ? focus : null}
         />
       </div>
-    </div>
+    </SplitPane>
   )
 }
 
