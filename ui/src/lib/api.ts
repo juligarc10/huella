@@ -627,6 +627,8 @@ export interface Storyline {
   example: { scenario: string; walk: { what: string; step: number | null }[] } | null
   /** Términos que hay que conocer. */
   concepts: { term: string; meaning: string }[]
+  /** Lo que se contó de código que no entra en esta revisión. */
+  context: { title: string; intent: string; narration: string }[]
   requirements: { id: string; text: string; status: 'done' | 'partial' | 'missing'; steps: number[]; note: string | null }[]
   chapters: StoryChapter[]
   /** Cómo pasa la ejecución de un capítulo a otro (índices en `chapters`). */

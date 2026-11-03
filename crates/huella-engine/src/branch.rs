@@ -447,7 +447,7 @@ fn commits_by_session(
 }
 
 /// Rama principal del remoto si la hay; si no, `main` o `master`.
-fn default_base(repo: &Path) -> Result<String> {
+pub(crate) fn default_base(repo: &Path) -> Result<String> {
     if let Ok(head) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
         return Ok(head.trim().to_owned());
     }

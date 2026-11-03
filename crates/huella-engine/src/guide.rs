@@ -206,6 +206,14 @@ pub fn render_story(review: &SessionReview, plan: &[FlowStep], place: &StepStory
 }
 
 fn write_concepts(out: &mut String, story: &Storyline) {
+    for context in &story.context {
+        let _ = writeln!(
+            out,
+            "- Contexto, ya en la rama de destino («{}»): {}",
+            context.title,
+            clip(&one_line(&context.narration), 800)
+        );
+    }
     for concept in story.concepts.iter().take(30) {
         let _ = writeln!(out, "- Término «{}»: {}", concept.term, clip(&one_line(&concept.meaning), 300));
     }

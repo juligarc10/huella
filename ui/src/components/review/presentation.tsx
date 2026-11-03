@@ -25,7 +25,7 @@ import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
 import { dateTime } from '@/lib/format'
-import { useStoryline } from '@/lib/queries'
+import { useGuide, useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 /** Qué tipo de capítulo es, en palabras. */
@@ -46,12 +46,12 @@ const statusView = {
 } as const
 
 /** Portada, cada capítulo con sus pasos visibles y el cierre, en orden. Un capítulo sin pasos visibles no sale. */
-function slidesOf(story: Storyline, visible: (step: number) => boolean): Slide[] {
+function slidesOf(story: Storyline, steps: ReviewStep[], visible: (step: number) => boolean): Slide[] {
   return [
     { kind: 'cover' },
     ...story.chapters.flatMap((chapter, index): Slide[] => {
-      const steps = chapter.steps.filter(visible)
-      if (steps.length === 0) return []
+      const shownSteps = chapter.steps.filter(visible)
+      if (shownSteps.length === 0) return []
       const inIdeas = new Set(chapter.ideas.flatMap((idea) => idea.steps))
       return [
         { kind: 'chapter', chapter: index },
@@ -59,21 +59,40 @@ function slidesOf(story: Storyline, visible: (step: number) => boolean): Slide[]
           const shown = idea.steps.filter(visible)
           return shown.length > 0 ? [{ kind: 'idea', chapter: index, idea: at, steps: shown }] : []
         }),
-        ...steps.filter((step) => !inIdeas.has(step)).map((step): Slide => ({ kind: 'step', chapter: index, step })),
+        ...filesOf(shownSteps.filter((step) => !inIdeas.has(step)), steps).map(
+          (group): Slide =>
+            group.steps.length === 1
+              ? { kind: 'step', chapter: index, step: group.steps[0] }
+              : { kind: 'file', chapter: index, path: group.path, steps: group.steps },
+        ),
       ]
     }),
     { kind: 'closing' },
   ]
 }
 
+/** Lo que no está en ninguna idea se presenta por fichero: nadie asimila un método por diapositiva. */
+function filesOf(indexes: number[], steps: ReviewStep[]) {
+  const groups: { path: string; steps: number[] }[] = []
+  for (const index of indexes) {
+    const path = steps[index]?.path ?? ''
+    const group = groups.find((candidate) => candidate.path === path)
+    if (group) group.steps.push(index)
+    else groups.push({ path, steps: [index] })
+  }
+  return groups
+}
+
 const sameSlide = (a: Slide, b: Slide) =>
   a.kind === b.kind &&
   (a.kind !== 'step' || a.step === (b as typeof a).step) &&
   (a.kind !== 'chapter' || a.chapter === (b as typeof a).chapter) &&
-  (a.kind !== 'idea' || (a.chapter === (b as typeof a).chapter && a.idea === (b as typeof a).idea))
+  (a.kind !== 'idea' || (a.chapter === (b as typeof a).chapter && a.idea === (b as typeof a).idea)) &&
+  (a.kind !== 'file' || (a.chapter === (b as typeof a).chapter && a.path === (b as typeof a).path))
 
 /** ¿Esta diapositiva muestra este paso? */
-const showsStep = (slide: Slide, step: number) => (slide.kind === 'step' && slide.step === step) || (slide.kind === 'idea' && slide.steps.includes(step))
+const showsStep = (slide: Slide, step: number) =>
+  (slide.kind === 'step' && slide.step === step) || ((slide.kind === 'idea' || slide.kind === 'file') && slide.steps.includes(step))
 
 /**
  * La revisión de una tarea como una presentación: qué pide y qué se hizo, y
@@ -111,11 +130,11 @@ export function Presentation({
   onDetail: () => void
 }) {
   const story = review.storyline
-  const everySlide = useMemo(() => (story ? slidesOf(story, () => true) : []), [story])
+  const everySlide = useMemo(() => (story ? slidesOf(story, review.steps, () => true) : []), [story, review.steps])
   const slides = useMemo(() => {
     if (!story) return []
     const shown = shownBy(filter)
-    return slidesOf(story, (step) => Boolean(review.steps[step]) && shown(review.steps[step]))
+    return slidesOf(story, review.steps, (step) => Boolean(review.steps[step]) && shown(review.steps[step]))
   }, [story, review.steps, filter])
   // Se empieza en la portada, salvo que se venga de un paso (desde la vista por pasos).
   const [place, setPlace] = useState<Slide>(() => {
@@ -138,6 +157,8 @@ export function Presentation({
       ? `s${slide.step}`
       : slide.kind === 'idea'
         ? `i${slide.chapter}-${slide.idea}`
+        : slide.kind === 'file'
+          ? `f${slide.chapter}-${slide.path}`
         : slide.kind === 'chapter'
           ? `c${slide.chapter}`
           : slide.kind
@@ -153,7 +174,7 @@ export function Presentation({
     if (!target) return
     setPlace(target)
     if (target.kind === 'step') onCurrent(target.step)
-    if (target.kind === 'idea') onCurrent(target.steps[0])
+    if (target.kind === 'idea' || target.kind === 'file') onCurrent(target.steps[0])
   }
   const goToStep = (step: number) => {
     const at = slides.findIndex((s) => showsStep(s, step))
@@ -177,7 +198,7 @@ export function Presentation({
     if (onDecide(steps, verdict) === 'ok') go(position + 1)
   }
   const stepsOf = (s: Slide | undefined) =>
-    !s ? [] : (s.kind === 'step' ? [s.step] : s.kind === 'idea' ? s.steps : []).flatMap((step) => review.steps[step] ?? [])
+    !s ? [] : (s.kind === 'step' ? [s.step] : s.kind === 'idea' || s.kind === 'file' ? s.steps : []).flatMap((step) => review.steps[step] ?? [])
 
   // ← y → para avanzar; r, c y d dan el veredicto en una diapositiva de paso; u lo quita.
   useEffect(() => {
@@ -214,12 +235,14 @@ export function Presentation({
   )
   const shownSteps = stepsOf(slide)
   const shownStep = slide.kind === 'step' ? review.steps[slide.step] : null
-  const siblings = slide.kind === 'step' || slide.kind === 'idea' ? slides.filter((s) => (s.kind === 'step' || s.kind === 'idea') && s.chapter === slide.chapter) : []
+  const inChapter = (s: Slide) => s.kind === 'step' || s.kind === 'idea' || s.kind === 'file'
+  const siblings = inChapter(slide) ? slides.filter((s) => inChapter(s) && 'chapter' in s && 'chapter' in slide && s.chapter === slide.chapter) : []
   const next = slides[position + 1]
   const nextName = (() => {
     if (!next) return null
     if (next.kind === 'chapter') return story.chapters[next.chapter].title
     if (next.kind === 'idea') return story.chapters[next.chapter].ideas[next.idea].title
+    if (next.kind === 'file') return next.path.split('/').pop() ?? next.path
     if (next.kind === 'step' && review.steps[next.step]) return stepName(review.steps[next.step])
     return 'Cierre'
   })()
@@ -246,6 +269,7 @@ export function Presentation({
           <StepSlide review={review} session={session} story={story} chapter={slide.chapter} step={shownStep} ask={ask(shownStep)} />
         )}
         {slide.kind === 'idea' && <IdeaSlide review={review} session={session} story={story} slide={slide} ask={ask()} />}
+        {slide.kind === 'file' && <FileSlide review={review} session={session} story={story} slide={slide} ask={ask()} />}
         {slide.kind === 'closing' && <Closing review={review} story={story} ask={ask()} onStep={goToStep} />}
       </div>
 
@@ -332,16 +356,17 @@ function Block({ title, tone, children }: { title: string; tone?: string; childr
 }
 
 /** Los capítulos como un recorrido, con lo que pasa de uno a otro al ejecutarse. */
-function Route({ review, story, onChapter }: { review: ReviewResult; story: Storyline; onChapter: (chapter: number) => void }) {
+function Route({ review, story, tests = false, onChapter }: { review: ReviewResult; story: Storyline; tests?: boolean; onChapter: (chapter: number) => void }) {
   return (
     <ol className="flex flex-col">
       {story.chapters.map((chapter, index) => {
         const repos = [...new Set(chapter.steps.map((step) => review.steps[step] && repoName(review, review.steps[step])).filter(Boolean))]
         const done = chapter.steps.filter((step) => review.steps[step]?.verdict).length
         const leaving = story.flow.filter((edge) => edge.from === index)
+        if (Boolean(chapter.kind === 'test') !== tests) return null
         return (
           <li key={index} className="relative flex gap-3 pb-4 last:pb-0">
-            {index < story.chapters.length - 1 && <span aria-hidden="true" className="absolute top-3 bottom-0 left-[5px] w-px bg-border" />}
+            {index < story.chapters.length - 1 && story.chapters[index + 1]?.kind === chapter.kind && <span aria-hidden="true" className="absolute top-3 bottom-0 left-[5px] w-px bg-border" />}
             <span
               aria-hidden="true"
               className={cn('z-10 mt-1.5 size-[11px] shrink-0 rounded-full border-2 bg-background', done === chapter.steps.length ? 'border-brand bg-brand' : chapter.unnarrated ? 'border-warn' : 'border-muted-foreground/60')}
@@ -471,10 +496,30 @@ function Cover({
       )}
 
       <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Block title="El recorrido">
-          <Route review={review} story={story} onChapter={onChapter} />
-        </Block>
         <div className="flex flex-col gap-8">
+          <Block title="El recorrido">
+            <Route review={review} story={story} onChapter={onChapter} />
+          </Block>
+          {story.chapters.some((chapter) => chapter.kind === 'test') && (
+            <Block title="Los tests">
+              <Route review={review} story={story} tests onChapter={onChapter} />
+            </Block>
+          )}
+        </div>
+        <div className="flex flex-col gap-8">
+          {story.context.length > 0 && (
+            <Block title="Para situarse: ya está en la rama de destino">
+              <p className="text-xs text-muted-foreground">Este código no entra en esta revisión, pero ayuda a entender el resto.</p>
+              <ul className="flex flex-col gap-3 text-sm">
+                {story.context.map((context) => (
+                  <li key={context.title} className="flex flex-col gap-0.5">
+                    <span className="font-semibold">{context.title}</span>
+                    <span className="leading-relaxed text-muted-foreground">{context.narration}</span>
+                  </li>
+                ))}
+              </ul>
+            </Block>
+          )}
           {story.concepts.length > 0 && (
             <Block title="Términos que conviene conocer">
               <Terms concepts={story.concepts} />
@@ -582,8 +627,10 @@ function ChapterSlide({
       <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <header className="flex flex-col gap-3">
           <p className={cn('text-[13px] font-semibold text-muted-foreground', current.unnarrated && 'text-warn')}>
-            Capítulo {chapter + 1} de {story.chapters.length}
-            {current.kind && kindLabel[current.kind] && ` · ${kindLabel[current.kind]}`}
+            {current.kind === 'test'
+              ? 'Tests'
+              : `Capítulo ${story.chapters.slice(0, chapter).filter((other) => other.kind !== 'test').length + 1} de ${story.chapters.filter((other) => other.kind !== 'test').length}`}
+            {current.kind !== 'test' && current.kind && kindLabel[current.kind] && ` · ${kindLabel[current.kind]}`}
           </p>
           <h2 className="text-4xl font-bold tracking-tight text-balance">{current.title}</h2>
           {current.intent && <p className="text-xl leading-snug font-medium tracking-tight">{current.intent}</p>}
@@ -691,8 +738,82 @@ function IdeaSlide({
   )
 }
 
+/**
+ * Un fichero del que el agente no explicó ideas: todos sus trozos juntos, y la
+ * explicación del modelo local si se pide.
+ */
+function FileSlide({
+  review,
+  session,
+  story,
+  slide,
+  ask,
+}: {
+  review: ReviewResult
+  session: string
+  story: Storyline
+  slide: Extract<Slide, { kind: 'file' }>
+  ask: ReactNode
+}) {
+  const chapter = story.chapters[slide.chapter]
+  const steps = slide.steps.flatMap((step) => review.steps[step] ?? [])
+  const guide = useGuide(session)
+  const declared = [...new Map(steps.flatMap((step) => step.declared).map((entry) => [entry.id, entry])).values()]
+  const missing = steps.filter((step) => !step.guide && step.triage.level !== 'skip').map((step) => step.key)
+  const pending = review.guiding?.pending ?? []
+  const preparing = missing.some((key) => pending.includes(key))
+  return (
+    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
+        <header className="flex flex-col gap-2">
+          <p className="text-[13px] font-semibold text-muted-foreground">{chapter.title}</p>
+          <h2 className="font-mono text-2xl font-semibold tracking-tight break-words">{slide.path.split('/').pop()}</h2>
+          <Mono className="text-xs break-all text-muted-foreground">{steps[0]?.display_path}</Mono>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            {chapter.narration || chapter.intent || 'El agente no explicó este fichero.'}
+          </p>
+        </header>
+        {missing.length > 0 && (
+          <Panel className="flex flex-col items-start gap-3">
+            <p className="text-sm">El agente no explicó estos {steps.length} trozos.</p>
+            {preparing ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" /> {review.ask_model.replace(/^[^:]+:/, '')} los está explicando…
+              </p>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => guide.mutate(missing)} disabled={Boolean(review.ask_problem) || guide.isPending} title={review.ask_problem ?? undefined}>
+                <Sparkles aria-hidden="true" /> Explicarlos con el modelo
+              </Button>
+            )}
+          </Panel>
+        )}
+        <DeclaredPanel entries={declared} />
+        {ask}
+      </div>
+      <div className="flex min-w-0 flex-col gap-5">
+        {steps.map((step, index) => (
+          <IdeaCode key={step.key} review={review} session={session} step={step} peekHint={index === 0} explain />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /** Un trozo de código de una idea, con su nombre y por qué se revisa. */
-function IdeaCode({ review, session, step, peekHint }: { review: ReviewResult; session: string; step: ReviewStep; peekHint: boolean }) {
+function IdeaCode({
+  review,
+  session,
+  step,
+  peekHint,
+  explain = false,
+}: {
+  review: ReviewResult
+  session: string
+  step: ReviewStep
+  peekHint: boolean
+  /** Muestra lo que explicó el modelo local de este trozo. */
+  explain?: boolean
+}) {
   const [composing, setComposing] = useState<number | null>(null)
   return (
     <section className="flex min-w-0 flex-col gap-2" aria-label={stepName(step)}>
@@ -702,6 +823,7 @@ function IdeaCode({ review, session, step, peekHint }: { review: ReviewResult; s
         <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
         <LevelMark level={step.triage.level} />
       </div>
+      {explain && step.guide && <p className="text-sm leading-relaxed">{step.guide.explanation}</p>}
       <StepDiff
         step={step}
         comments={review.comments.filter((comment) => comment.step_key === step.key)}

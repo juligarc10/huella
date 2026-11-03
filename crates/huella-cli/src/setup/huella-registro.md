@@ -54,15 +54,20 @@ Escribe para **alguien que llega de nuevas al código y al dominio**, y que debe
 - Di qué es cada pieza la primera vez que la nombres. Si usas un término, está en `concepts`.
 - Explica el porqué antes que el cómo, y no repitas el código línea a línea.
 - Enlaza: cada idea parte de lo que deja hecho la anterior.
+- Cada idea responde tres cosas, en frases enteras y no en telegrama: qué problema resuelve y por qué así, cómo funciona (mejor con los datos del caso) y qué se rompería sin ello.
+- No enumeres anotaciones ni métodos. Si nombras algo del lenguaje o del framework (`sealed interface`, `@Size`, `computeIfPresent`), di qué aporta aquí.
+- No uses los ids del guion (`C2`, `R1`) en los textos: quien lee ve títulos, nunca ids.
 
 Qué lleva:
 
 - **`summary`, `before` y `after`**: qué hace el cambio, y cómo se comportaba el sistema antes y cómo ahora. Comportamiento, no código.
 - **`example`**: un caso concreto con datos de verdad, de principio a fin («llega un alta con el correo ` A@B.com `, se normaliza aquí, se rechaza allí si…»), con el código donde ocurre cada cosa. Es el mapa para entender todo lo demás.
 - **`concepts`**: el glosario. Empieza por lo que registraste con `kind: "concept"`.
-- **`chapters`, en orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Tests y configuración, al final. Cada capítulo es una intención («Endpoint del filtro»), con su `narration` y qué debería saber responder quien revisa (`questions`).
-- **`ideas` de cada capítulo**: cada una es una diapositiva. Agrupa los trozos de código que se entienden juntos, aunque estén en varios ficheros, en vez de uno por función: nadie asimila cien diapositivas. Cada idea lleva `title`, `explanation` y `anchors` (ruta absoluta y símbolo). Todo el código con lógica debería estar en alguna idea; `anchors` del capítulo queda para configuración o tests sin nada que explicar.
-- **Menciona todos los ficheros que cambiaste.** Un ancla a una clase cubre sus métodos, y lo que no nombres de un fichero mencionado (imports, campos) va con esa idea.
+- **`chapters`, en orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Cada capítulo es una intención («Endpoint del filtro»), con su `narration` y qué debería saber responder quien revisa (`questions`).
+- **`ideas` de cada capítulo**: cada una es una diapositiva. Agrupa los trozos de código que se entienden juntos, aunque estén en varios ficheros, en vez de uno por función: nadie asimila cien diapositivas. Cada idea lleva `title`, `explanation` y `anchors` (ruta absoluta y símbolo). Todo el código debería estar en alguna idea; `anchors` del capítulo queda para configuración sin nada que explicar.
+- **Tests, en sus propios capítulos con `kind: "test"`**: Huella los presenta en una sección aparte, después de la implementación, y saca de los demás capítulos los tests que encuentre. Explícalos también por ideas: qué comportamiento protegen y qué fallaría sin ellos, no test a test.
+- **Código de apoyo que ya está en la rama de destino**: si ayuda a entender el cambio (el modelo de dominio que usa), cuéntalo en un capítulo con su `narration`. No entra en la revisión, pero se muestra como contexto.
+- **Menciona todos los ficheros que cambiaste**, también `pom.xml` o el `README`: la respuesta te dirá cuáles faltan. Un ancla a una clase cubre sus métodos, y lo que no nombres de un fichero mencionado (imports, campos) va con esa idea.
 - **`requirements`**: lo que pedía la tarea, cada uno con su estado real. `flow`: cómo pasa la ejecución de un capítulo a otro («llama a POST /filtros»).
 - **Lo incómodo también**: lo que cambiaste sin que se pidiera va en `outside`, y lo que no comprobaste, en `unverified`. Lo que no cuentes saldrá igualmente, marcado como «No lo contó el agente».
 

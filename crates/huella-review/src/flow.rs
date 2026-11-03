@@ -352,7 +352,7 @@ fn is_rust_test(qualified_name: &str) -> bool {
     qualified_name == "tests" || qualified_name.starts_with("tests::") || qualified_name.contains("::tests::")
 }
 
-fn is_test_path(path: &str) -> bool {
+pub fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     [
         "/test/",

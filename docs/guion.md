@@ -50,10 +50,15 @@ pasos numerados, usa `step`.
 - La guía de cada paso y las preguntas reciben el guion (el capítulo, el paso
   anterior y el siguiente, qué mirar), para que la explicación se lea seguida. Si
   el guion cambia, las guías quedan desfasadas.
-- Cada idea es una diapositiva con todo su código. Los pasos que no están en
-  ninguna salen sueltos, con la guía del modelo local.
+- Cada idea es una diapositiva con todo su código. Lo que no está en ninguna se
+  agrupa por fichero, con la guía del modelo local.
+- Los tests van en su propia sección, después de la implementación: los capítulos
+  con `kind: "test"` y los tests que aparezcan en otros capítulos.
+- Un capítulo cuyo código no entra en la revisión (ya está en la rama de destino)
+  se muestra como contexto si tiene `narration`, salvo tests y configuración.
 - Al guardarlo, `huella_storyline` le dice al agente lo que le falta para que lo
-  entienda alguien sin contexto, para que lo complete mientras aún lo sabe.
+  entienda alguien sin contexto, para que lo complete mientras aún lo sabe,
+  incluidos los ficheros que cambian y ningún capítulo menciona.
 - El orden de preferencia es: el guion del agente, el del modelo revisor y, sin
   ninguno, un capítulo por repositorio.
 
