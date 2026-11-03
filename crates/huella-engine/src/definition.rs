@@ -300,8 +300,8 @@ mod tests {
         commit(&dir, "dist/app.js", "function hidden() {}\n");
         let roots = [SearchRoot { root: dir.clone(), reference: None }];
         let review = review_of(&[]);
-        assert!(find(&review, &roots, "hidden", "/x.js").is_empty());
-        assert!(find(&review, &roots, "--output=x", "/x.js").is_empty());
+        assert_eq!(find(&review, &roots, "hidden", "/x.js").len(), 0);
+        assert_eq!(find(&review, &roots, "--output=x", "/x.js").len(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
