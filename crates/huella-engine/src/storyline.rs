@@ -418,8 +418,8 @@ fn steps_of(anchor: &Anchor, review: &SessionReview, plan: &[FlowStep], repos: &
                 return named;
             }
             // Un campo o una constante no son un símbolo: están donde cambia esa palabra.
-            let plain = plain_symbol(symbol);
-            let word = short(&plain);
+            let name = plain_symbol(symbol);
+            let word = short(&name);
             in_file.into_iter().filter(|&index| changes_word(&plan[index], word)).collect()
         }
         (None, Some((start, end))) => in_file
