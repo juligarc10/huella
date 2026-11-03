@@ -10,6 +10,8 @@ const kindView: Record<Declared['kind'], { label: string; tone: string }> = {
   assumption: { label: 'Suposición', tone: 'bg-muted text-foreground' },
   unverified: { label: 'Sin verificar', tone: 'bg-warn-soft text-warn' },
   risk: { label: 'Riesgo', tone: 'bg-destructive/10 text-destructive' },
+  explanation: { label: 'Explicación', tone: 'bg-brand-soft text-accent-foreground' },
+  concept: { label: 'Concepto', tone: 'bg-muted text-foreground' },
 }
 
 const confidenceLabel: Record<NonNullable<Declared['confidence']>, string> = {

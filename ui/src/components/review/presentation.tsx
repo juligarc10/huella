@@ -52,14 +52,28 @@ function slidesOf(story: Storyline, visible: (step: number) => boolean): Slide[]
     ...story.chapters.flatMap((chapter, index): Slide[] => {
       const steps = chapter.steps.filter(visible)
       if (steps.length === 0) return []
-      return [{ kind: 'chapter', chapter: index }, ...steps.map((step): Slide => ({ kind: 'step', chapter: index, step }))]
+      const inIdeas = new Set(chapter.ideas.flatMap((idea) => idea.steps))
+      return [
+        { kind: 'chapter', chapter: index },
+        ...chapter.ideas.flatMap((idea, at): Slide[] => {
+          const shown = idea.steps.filter(visible)
+          return shown.length > 0 ? [{ kind: 'idea', chapter: index, idea: at, steps: shown }] : []
+        }),
+        ...steps.filter((step) => !inIdeas.has(step)).map((step): Slide => ({ kind: 'step', chapter: index, step })),
+      ]
     }),
     { kind: 'closing' },
   ]
 }
 
 const sameSlide = (a: Slide, b: Slide) =>
-  a.kind === b.kind && (a.kind !== 'step' || a.step === (b as typeof a).step) && (a.kind !== 'chapter' || a.chapter === (b as typeof a).chapter)
+  a.kind === b.kind &&
+  (a.kind !== 'step' || a.step === (b as typeof a).step) &&
+  (a.kind !== 'chapter' || a.chapter === (b as typeof a).chapter) &&
+  (a.kind !== 'idea' || (a.chapter === (b as typeof a).chapter && a.idea === (b as typeof a).idea))
+
+/** ¿Esta diapositiva muestra este paso? */
+const showsStep = (slide: Slide, step: number) => (slide.kind === 'step' && slide.step === step) || (slide.kind === 'idea' && slide.steps.includes(step))
 
 /**
  * La revisión de una tarea como una presentación: qué pide y qué se hizo, y
@@ -90,8 +104,8 @@ export function Presentation({
   /** Repositorios y lo que pide la tarea, en la portada. */
   overview: ReactNode
   onCurrent: (index: number) => void
-  /** Da el veredicto (o lo quita si ya era ese) y devuelve cómo queda. */
-  onDecide: (step: ReviewStep, verdict: Verdict) => Verdict | null
+  /** Da el veredicto a esos pasos (o lo quita si ya era ese) y devuelve cómo quedan. */
+  onDecide: (steps: ReviewStep[], verdict: Verdict) => Verdict | null
   /** Quita el último veredicto y dice de qué paso era. */
   onUndo: () => number | null
   onDetail: () => void
@@ -105,7 +119,7 @@ export function Presentation({
   }, [story, review.steps, filter])
   // Se empieza en la portada, salvo que se venga de un paso (desde la vista por pasos).
   const [place, setPlace] = useState<Slide>(() => {
-    const from = slides.find((slide) => slide.kind === 'step' && slide.step === current)
+    const from = slides.find((slide) => showsStep(slide, current))
     return current > 0 && from ? from : { kind: 'cover' }
   })
   // Si el filtro esconde la diapositiva actual, se sigue en la siguiente que quede.
@@ -118,7 +132,15 @@ export function Presentation({
   }, [slides, everySlide, place])
   const slide = slides[position]
   // Cada diapositiva se empieza a leer por arriba, justo debajo del rastro.
-  const slideKey = !slide ? '' : slide.kind === 'step' ? `s${slide.step}` : slide.kind === 'chapter' ? `c${slide.chapter}` : slide.kind
+  const slideKey = !slide
+    ? ''
+    : slide.kind === 'step'
+      ? `s${slide.step}`
+      : slide.kind === 'idea'
+        ? `i${slide.chapter}-${slide.idea}`
+        : slide.kind === 'chapter'
+          ? `c${slide.chapter}`
+          : slide.kind
   const stage = useRef<HTMLDivElement>(null)
   const shownKey = useRef(slideKey)
   useEffect(() => {
@@ -131,12 +153,13 @@ export function Presentation({
     if (!target) return
     setPlace(target)
     if (target.kind === 'step') onCurrent(target.step)
+    if (target.kind === 'idea') onCurrent(target.steps[0])
   }
   const goToStep = (step: number) => {
-    const at = slides.findIndex((s) => s.kind === 'step' && s.step === step)
+    const at = slides.findIndex((s) => showsStep(s, step))
     if (at >= 0) return go(at)
     // Un enlace a un paso que el filtro esconde: se quita el filtro para poder verlo.
-    const target = everySlide.find((s) => s.kind === 'step' && s.step === step)
+    const target = everySlide.find((s) => showsStep(s, step))
     if (!target) return
     onFilter('all')
     setPlace(target)
@@ -150,9 +173,11 @@ export function Presentation({
     setPlace({ kind: 'chapter', chapter })
   }
   // «Bien» avanza a la siguiente diapositiva; `u` lo deshace y vuelve.
-  const decide = (step: ReviewStep, verdict: Verdict) => {
-    if (onDecide(step, verdict) === 'ok') go(position + 1)
+  const decide = (steps: ReviewStep[], verdict: Verdict) => {
+    if (onDecide(steps, verdict) === 'ok') go(position + 1)
   }
+  const stepsOf = (s: Slide | undefined) =>
+    !s ? [] : (s.kind === 'step' ? [s.step] : s.kind === 'idea' ? s.steps : []).flatMap((step) => review.steps[step] ?? [])
 
   // ← y → para avanzar; r, c y d dan el veredicto en una diapositiva de paso; u lo quita.
   useEffect(() => {
@@ -162,7 +187,7 @@ export function Presentation({
       const verdict = verdicts.find((v) => v.key === event.key)
       if (event.key === 'ArrowRight') go(position + 1)
       else if (event.key === 'ArrowLeft') go(position - 1)
-      else if (verdict && slide?.kind === 'step') decide(review.steps[slide.step], verdict.value)
+      else if (verdict && stepsOf(slide).length > 0) decide(stepsOf(slide), verdict.value)
       else if (event.key === undoKey) {
         const back = onUndo()
         if (back !== null) goToStep(back)
@@ -187,12 +212,14 @@ export function Presentation({
       />
     </AskToggle>
   )
+  const shownSteps = stepsOf(slide)
   const shownStep = slide.kind === 'step' ? review.steps[slide.step] : null
-  const siblings = slide.kind === 'step' ? slides.flatMap((s) => (s.kind === 'step' && s.chapter === slide.chapter ? [s.step] : [])) : []
+  const siblings = slide.kind === 'step' || slide.kind === 'idea' ? slides.filter((s) => (s.kind === 'step' || s.kind === 'idea') && s.chapter === slide.chapter) : []
   const next = slides[position + 1]
   const nextName = (() => {
     if (!next) return null
     if (next.kind === 'chapter') return story.chapters[next.chapter].title
+    if (next.kind === 'idea') return story.chapters[next.chapter].ideas[next.idea].title
     if (next.kind === 'step' && review.steps[next.step]) return stepName(review.steps[next.step])
     return 'Cierre'
   })()
@@ -204,7 +231,7 @@ export function Presentation({
         steps={review.steps}
         slide={slide}
         visible={(step) => Boolean(review.steps[step]) && shownBy(filter)(review.steps[step])}
-        position={shownStep ? `paso ${siblings.indexOf(slide.kind === 'step' ? slide.step : -1) + 1} de ${siblings.length}` : null}
+        position={siblings.length > 0 ? `parte ${siblings.findIndex((s) => sameSlide(s, slide)) + 1} de ${siblings.length}` : null}
         status={status}
         onCover={() => go(0)}
         onClosing={() => go(slides.length - 1)}
@@ -218,6 +245,7 @@ export function Presentation({
         {slide.kind === 'step' && shownStep && (
           <StepSlide review={review} session={session} story={story} chapter={slide.chapter} step={shownStep} ask={ask(shownStep)} />
         )}
+        {slide.kind === 'idea' && <IdeaSlide review={review} session={session} story={story} slide={slide} ask={ask()} />}
         {slide.kind === 'closing' && <Closing review={review} story={story} ask={ask()} onStep={goToStep} />}
       </div>
 
@@ -228,16 +256,16 @@ export function Presentation({
         <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(position - 1)} disabled={position === 0} aria-label="Anterior">
           <ArrowLeft aria-hidden="true" />
         </Button>
-        {shownStep && (
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto del paso">
+        {shownSteps.length > 0 && (
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto de lo que se muestra">
             {verdicts.map(({ value, label, icon: Icon, active, key }) => (
               <Button
                 key={value}
                 size="lg"
-                variant={shownStep.verdict === value ? 'default' : 'outline'}
-                className={cn('min-h-11', shownStep.verdict === value && active)}
-                aria-pressed={shownStep.verdict === value}
-                onClick={() => decide(shownStep, value)}
+                variant={shownSteps.every((step) => step.verdict === value) ? 'default' : 'outline'}
+                className={cn('min-h-11', shownSteps.every((step) => step.verdict === value) && active)}
+                aria-pressed={shownSteps.every((step) => step.verdict === value)}
+                onClick={() => decide(shownSteps, value)}
               >
                 <Icon aria-hidden="true" /> {label} <kbd className="font-mono text-xs opacity-60">{key}</kbd>
               </Button>
@@ -247,7 +275,7 @@ export function Presentation({
         <span className="min-w-0 flex-1 text-center text-xs text-muted-foreground max-lg:hidden">
           <kbd className="font-mono">←</kbd> <kbd className="font-mono">→</kbd> avanzar · <kbd className="font-mono">{undoKey}</kbd> quitar el último veredicto
         </span>
-        {shownStep && (
+        {shownSteps.length > 0 && (
           <Button variant="ghost" size="lg" className="min-h-11" onClick={onDetail}>
             <Maximize2 aria-hidden="true" /> En detalle
           </Button>
@@ -385,6 +413,38 @@ function Cover({
         {story.summary && <p className="max-w-[58ch] text-2xl leading-snug font-medium tracking-tight text-balance">{story.summary}</p>}
       </header>
 
+      {story.before && story.after && (
+        <div className="grid gap-px overflow-hidden rounded-2xl border bg-border sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5 bg-card p-5">
+            <h3 className="text-[13px] font-semibold text-muted-foreground">Antes</h3>
+            <p className="text-[15px] leading-relaxed">{story.before}</p>
+          </div>
+          <div className="flex flex-col gap-1.5 bg-brand-soft/50 p-5">
+            <h3 className="text-[13px] font-semibold text-accent-foreground">Ahora</h3>
+            <p className="text-[15px] leading-relaxed">{story.after}</p>
+          </div>
+        </div>
+      )}
+
+      {story.example && (
+        <Block title="Un caso, de principio a fin">
+          {story.example.scenario && <p className="max-w-[70ch] text-[17px] leading-relaxed">{story.example.scenario}</p>}
+          <ol className="flex flex-col gap-1.5 text-sm">
+            {story.example.walk.map((walk, index) => (
+              <li key={index} className="flex gap-2.5">
+                <span aria-hidden="true" className="w-5 shrink-0 text-right font-mono text-xs leading-5 text-muted-foreground">
+                  {index + 1}
+                </span>
+                <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 leading-relaxed">
+                  {walk.what}
+                  {walk.step !== null && review.steps[walk.step] && <StepLink review={review} step={review.steps[walk.step]} onStep={onStep} />}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </Block>
+      )}
+
       {!told && (!story.model || story.stale || running || review.storylining?.error) && (
         <Panel className="flex flex-wrap items-center gap-3">
           <Sparkles className="size-4 text-brand" aria-hidden="true" />
@@ -415,6 +475,11 @@ function Cover({
           <Route review={review} story={story} onChapter={onChapter} />
         </Block>
         <div className="flex flex-col gap-8">
+          {story.concepts.length > 0 && (
+            <Block title="Términos que conviene conocer">
+              <Terms concepts={story.concepts} />
+            </Block>
+          )}
           {story.requirements.length > 0 && (
             <Block title="Lo que pide la tarea">
               <ul className="flex flex-col gap-3">
@@ -465,6 +530,23 @@ function Cover({
     </div>
   )
 }
+
+/** Los términos, con lo que significan. */
+function Terms({ concepts }: { concepts: Storyline['concepts'] }) {
+  return (
+    <dl className="flex flex-col gap-2 text-sm">
+      {concepts.map((concept) => (
+        <div key={concept.term}>
+          <dt className="inline font-semibold">{concept.term}: </dt>
+          <dd className="inline text-muted-foreground">{concept.meaning}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** Los términos del glosario que aparecen en este texto. */
+const termsIn = (story: Storyline, text: string) => story.concepts.filter((concept) => text.toLowerCase().includes(concept.term.toLowerCase()))
 
 function Warnings({ title, items }: { title: string; items: string[] }) {
   return (
@@ -548,6 +630,89 @@ function ChapterSlide({
       </div>
       {ask}
     </div>
+  )
+}
+
+/**
+ * Una idea: la explicación del agente fija a un lado y todo su código al otro. El
+ * veredicto de abajo vale para todos sus trozos.
+ */
+function IdeaSlide({
+  review,
+  session,
+  story,
+  slide,
+  ask,
+}: {
+  review: ReviewResult
+  session: string
+  story: Storyline
+  slide: Extract<Slide, { kind: 'idea' }>
+  ask: ReactNode
+}) {
+  const chapter = story.chapters[slide.chapter]
+  const idea = chapter.ideas[slide.idea]
+  const steps = slide.steps.flatMap((step) => review.steps[step] ?? [])
+  const declared = [...new Map(steps.flatMap((step) => step.declared).map((entry) => [entry.id, entry])).values()]
+  const terms = termsIn(story, idea.explanation)
+  return (
+    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
+        <header className="flex flex-col gap-2">
+          <p className="text-[13px] font-semibold text-muted-foreground">{chapter.title}</p>
+          <h2 className="text-2xl font-bold tracking-tight text-balance">{idea.title}</h2>
+          <p className="text-[16px] leading-relaxed whitespace-pre-line">{idea.explanation}</p>
+        </header>
+        {idea.look_at.length > 0 && (
+          <Block title="No pases por alto">
+            <ul className="flex flex-col gap-1.5 text-sm">
+              {idea.look_at.map((item) => (
+                <li key={item} className="flex gap-2">
+                  <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
+                </li>
+              ))}
+            </ul>
+          </Block>
+        )}
+        {terms.length > 0 && (
+          <Block title="Términos">
+            <Terms concepts={terms} />
+          </Block>
+        )}
+        <DeclaredPanel entries={declared} />
+        {ask}
+      </div>
+      <div className="flex min-w-0 flex-col gap-5">
+        {steps.map((step, index) => (
+          <IdeaCode key={step.key} review={review} session={session} step={step} peekHint={index === 0} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Un trozo de código de una idea, con su nombre y por qué se revisa. */
+function IdeaCode({ review, session, step, peekHint }: { review: ReviewResult; session: string; step: ReviewStep; peekHint: boolean }) {
+  const [composing, setComposing] = useState<number | null>(null)
+  return (
+    <section className="flex min-w-0 flex-col gap-2" aria-label={stepName(step)}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span aria-hidden="true" className={cn('size-2 rounded-full', step.verdict ? verdictDot[step.verdict] : 'border border-muted-foreground/60')} />
+        <Mono className="text-sm font-semibold">{stepName(step)}</Mono>
+        <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
+        <LevelMark level={step.triage.level} />
+      </div>
+      <StepDiff
+        step={step}
+        comments={review.comments.filter((comment) => comment.step_key === step.key)}
+        hints={review.hints}
+        session={session}
+        model={review.ask_model}
+        composing={composing}
+        onCompose={setComposing}
+        peekHint={peekHint}
+      />
+    </section>
   )
 }
 
