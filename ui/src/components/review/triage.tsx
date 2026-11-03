@@ -70,11 +70,14 @@ export function ComprehensionBar({
   policy,
   filter,
   onFilter,
+  compact = false,
 }: {
   comprehension: Comprehension
   policy: ReviewPolicy
   filter: TriageFilter
   onFilter: (filter: TriageFilter) => void
+  /** Sin el nombre de la política ni separar el filtro, para caber en el rastro. */
+  compact?: boolean
 }) {
   const { must, acknowledge, skip } = comprehension
   return (
@@ -86,9 +89,11 @@ export function ComprehensionBar({
         {' · '}Vistazo {acknowledge.done}/{acknowledge.total}
         {' · '}Saltable {skip.total}
       </span>
-      <span title={policy.source ?? 'Sin .huella.toml en el repositorio'}>
-        Política {presetLabel[policy.preset]} · {policy.source ? baseName(policy.source) : 'por defecto'}
-      </span>
+      {!compact && (
+        <span title={policy.source ?? 'Sin .huella.toml en el repositorio'}>
+          Política {presetLabel[policy.preset]} · {policy.source ? baseName(policy.source) : 'por defecto'}
+        </span>
+      )}
       {policy.error && <span className="text-destructive">{policy.error}</span>}
       <ToggleGroup
         type="single"
@@ -101,7 +106,7 @@ export function ComprehensionBar({
         variant="outline"
         size="sm"
         aria-label="Qué pasos mostrar"
-        className="ml-auto"
+        className={compact ? undefined : 'ml-auto'}
       >
         <ToggleGroupItem value="all" className="px-3">
           Todo

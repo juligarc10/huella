@@ -161,6 +161,24 @@
     --diff-removed: #3a2221;
 }
 
+/* Cada diapositiva entra sin saltos. */
+@keyframes slide-enter {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+}
+
+.slide-enter {
+    animation: slide-enter 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .slide-enter {
+        animation: none;
+    }
+}
+
 /* Con ⌘ o Ctrl pulsado, cada nombre del código se puede abrir. */
 .peek-ready [data-word]:hover {
     color: var(--color-brand);

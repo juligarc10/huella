@@ -297,7 +297,7 @@ export function Review({
         }
       />
 
-      {review.task && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
+      {review.task && !presenting && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
 
       {review.follow_ups.length > 0 && (
         <Panel className="flex flex-col gap-2 border-brand/40 bg-brand-soft/50">
@@ -326,26 +326,28 @@ export function Review({
         </Panel>
       )}
 
-      <div className="flex flex-col gap-2">
-        <ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} />
-        <div className="flex flex-wrap justify-between gap-2 text-[13px] text-muted-foreground">
-          <span>
-            <strong className="text-foreground">{decided}</strong> de {steps.length} pasos revisados
-            {openComments.length > 0 && (
-              <>
-                {' '}
-                · <strong className="text-warn">{openComments.length}</strong> comentarios abiertos
-              </>
-            )}
-          </span>
-          {unexplained > 0 && (
+      {!presenting && (
+        <div className="flex flex-col gap-2">
+          <ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} />
+          <div className="flex flex-wrap justify-between gap-2 text-[13px] text-muted-foreground">
             <span>
-              <strong className="text-warn">{unexplained}</strong> pasos con líneas sin explicación
+              <strong className="text-foreground">{decided}</strong> de {steps.length} pasos revisados
+              {openComments.length > 0 && (
+                <>
+                  {' '}
+                  · <strong className="text-warn">{openComments.length}</strong> comentarios abiertos
+                </>
+              )}
             </span>
-          )}
+            {unexplained > 0 && (
+              <span>
+                <strong className="text-warn">{unexplained}</strong> pasos con líneas sin explicación
+              </span>
+            )}
+          </div>
+          <Progress value={(decided / steps.length) * 100} aria-label="Pasos revisados" className="h-2 [&>div]:bg-brand" />
         </div>
-        <Progress value={(decided / steps.length) * 100} aria-label="Pasos revisados" className="h-2 [&>div]:bg-brand" />
-      </div>
+      )}
 
       {presenting ? (
         <Presentation
@@ -355,6 +357,8 @@ export function Review({
           onCurrent={go}
           filter={filter}
           onFilter={setFilter}
+          status={<ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} compact />}
+          overview={review.task && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
           onDecide={giveVerdict}
           onUndo={undoVerdict}
           onDetail={() => chooseMode('steps')}
