@@ -13,10 +13,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use huella_decisions::{ExtractError, JsonModel};
-use huella_review::flow::{FlowStep, StepRole};
+use huella_review::flow::{FlowStep, StepRole, is_test_path};
 use huella_review::{DiffLine, SessionReview};
 use huella_store::{Store, StoredStoryline};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use crate::coverage::RequirementStatus;
 use crate::declared::DeclaredView;
 use crate::declared::plain_symbol;
 use crate::triage::{Level, StepTriage};
+use crate::workspace::git;
 use crate::{EngineError, Result};
 
 /// El esquema del guion, tal como se publica y se da al agente.
@@ -62,6 +63,8 @@ en el idioma de la descripción.";
 const DIFF_BUDGET: usize = 2400;
 /// Líneas de diff por paso, como mucho y como poco.
 const STEP_LINES: (usize, usize) = (60, 6);
+/// Ficheros sin mencionar que se le dicen al agente de una vez.
+const MAX_UNMENTIONED: usize = 40;
 /// Menos que esto no explica nada a quien no conoce el código.
 const MIN_EXPLANATION: usize = 80;
 
@@ -253,6 +256,15 @@ pub struct Idea {
     pub steps: Vec<usize>,
 }
 
+/// Un capítulo cuyo código no entra en la revisión (ya está en la rama de destino),
+/// pero cuenta algo que ayuda a entender el resto.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Context {
+    pub title: String,
+    pub intent: String,
+    pub narration: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Example {
     pub scenario: String,
@@ -301,6 +313,8 @@ pub struct Storyline {
     pub after: String,
     pub example: Option<Example>,
     pub concepts: Vec<StoryConcept>,
+    /// Lo que se contó de código que no entra en esta revisión.
+    pub context: Vec<Context>,
     pub requirements: Vec<Requirement>,
     pub chapters: Vec<Chapter>,
     pub flow: Vec<Flow>,
@@ -461,7 +475,7 @@ fn place_chapters(
     review: &SessionReview,
     plan: &[FlowStep],
     repos: &[RepoRef],
-) -> (Vec<Chapter>, Vec<(String, usize)>, bool) {
+) -> Placed {
     let mut stale = false;
     // Id de cada capítulo del guion → capítulo de la presentación que lo muestra.
     let mut chapter_ids: Vec<(String, usize)> = Vec::new();
@@ -549,7 +563,31 @@ fn place_chapters(
         }
     }
     place_ideas(&mut chapters, &told_ideas, review, plan, repos);
-    // Un capítulo que se queda sin código no se muestra.
+    let context = context_of(&chapters);
+    let chapter_ids = drop_empty(&mut chapters, chapter_ids);
+    Placed { chapters, chapter_ids, stale, context }
+}
+
+/// Un capítulo sin código en esta revisión no se muestra, pero si cuenta algo que
+/// ayuda a entender el resto (no unos tests ni una configuración) se conserva.
+fn context_of(chapters: &[Chapter]) -> Vec<Context> {
+    chapters
+        .iter()
+        .filter(|chapter| {
+            chapter.steps.is_empty()
+                && !chapter.narration.trim().is_empty()
+                && !matches!(chapter.kind.as_deref(), Some("test" | "config"))
+        })
+        .map(|chapter| Context {
+            title: chapter.title.clone(),
+            intent: chapter.intent.clone(),
+            narration: chapter.narration.clone(),
+        })
+        .collect()
+}
+
+/// Quita los capítulos sin código y renumera sus ids.
+fn drop_empty(chapters: &mut Vec<Chapter>, ids: Vec<(String, usize)>) -> Vec<(String, usize)> {
     let mut shown = 0;
     let renumbered: Vec<Option<usize>> = chapters
         .iter()
@@ -561,8 +599,83 @@ fn place_chapters(
         })
         .collect();
     chapters.retain(|chapter| !chapter.steps.is_empty());
-    let chapter_ids = chapter_ids.into_iter().filter_map(|(id, index)| Some((id, renumbered[index]?))).collect();
-    (chapters, chapter_ids, stale)
+    ids.into_iter().filter_map(|(id, index)| Some((id, renumbered[index]?))).collect()
+}
+
+/// Lo que sale de colocar los capítulos del guion.
+struct Placed {
+    chapters: Vec<Chapter>,
+    /// Id de cada capítulo del guion → capítulo de la presentación que lo muestra.
+    chapter_ids: Vec<(String, usize)>,
+    /// Algo cambió desde que se declaró.
+    stale: bool,
+    context: Vec<Context>,
+}
+
+const TEST_KIND: &str = "test";
+
+fn is_test_chapter(chapter: &Chapter) -> bool {
+    chapter.kind.as_deref() == Some(TEST_KIND)
+}
+
+/// ¿Este paso es de tests? Los imports de un fichero de tests no tienen símbolo y
+/// por eso se mira también su ruta.
+fn is_test_step(review: &SessionReview, step: &FlowStep) -> bool {
+    step.role == StepRole::Test || is_test_path(&review.files[step.file].path)
+}
+
+/// Saca los tests de los capítulos de implementación: van en su propia sección.
+fn separate_tests(chapters: &mut Vec<Chapter>, review: &SessionReview, plan: &[FlowStep]) {
+    let is_test = |step: usize| is_test_step(review, &plan[step]);
+    let mut loose = Vec::new();
+    let mut moved_ideas = Vec::new();
+    for chapter in chapters.iter_mut().filter(|chapter| !is_test_chapter(chapter)) {
+        if !chapter.steps.iter().any(|&step| is_test(step)) {
+            continue;
+        }
+        if chapter.steps.iter().all(|&step| is_test(step)) {
+            chapter.kind = Some(TEST_KIND.to_owned());
+            continue;
+        }
+        let (tests, code): (Vec<usize>, Vec<usize>) = chapter.steps.iter().partition(|&&step| is_test(step));
+        chapter.steps = code;
+        let (only_tests, kept): (Vec<Idea>, Vec<Idea>) =
+            chapter.ideas.drain(..).partition(|idea| idea.steps.iter().all(|&step| is_test(step)));
+        chapter.ideas = kept;
+        for idea in &mut chapter.ideas {
+            idea.steps.retain(|&step| !is_test(step));
+        }
+        let in_moved: BTreeSet<usize> = only_tests.iter().flat_map(|idea| idea.steps.iter().copied()).collect();
+        loose.extend(tests.into_iter().filter(|step| !in_moved.contains(step)));
+        moved_ideas.extend(only_tests);
+    }
+    if loose.is_empty() && moved_ideas.is_empty() {
+        return;
+    }
+    let target = chapters.iter().position(is_test_chapter).unwrap_or_else(|| {
+        let mut tests =
+            Chapter::plain("Tests".into(), "Lo que comprueba que el cambio funciona.".into(), Vec::new(), false);
+        tests.kind = Some(TEST_KIND.to_owned());
+        chapters.push(tests);
+        chapters.len() - 1
+    });
+    let chapter = &mut chapters[target];
+    chapter.steps.extend(moved_ideas.iter().flat_map(|idea| idea.steps.iter().copied()));
+    chapter.steps.extend(loose);
+    chapter.ideas.extend(moved_ideas);
+}
+
+/// Deja los capítulos de tests al final y devuelve dónde quedó cada capítulo.
+fn tests_last(chapters: &mut Vec<Chapter>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..chapters.len()).collect();
+    order.sort_by_key(|&index| is_test_chapter(&chapters[index]));
+    let mut moved = vec![0; chapters.len()];
+    for (to, &from) in order.iter().enumerate() {
+        moved[from] = to;
+    }
+    let mut taken: Vec<Option<Chapter>> = chapters.drain(..).map(Some).collect();
+    chapters.extend(order.iter().filter_map(|&from| taken[from].take()));
+    moved
 }
 
 /// Reparte los pasos de cada capítulo entre sus ideas, sin repetirlos. Lo que no se
@@ -640,11 +753,27 @@ pub fn gaps(story: &Story) -> Vec<String> {
     if story.concepts.is_empty() {
         found.push("concepts: los términos del dominio y del código que hay que conocer".to_owned());
     }
+    // Quien lee ve títulos, nunca los ids del guion.
+    let ids: BTreeSet<&str> = story
+        .chapters
+        .iter()
+        .map(|chapter| chapter.id.as_str())
+        .chain(story.requirements.iter().map(|requirement| requirement.id.as_str()))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let names_id =
+        |text: &str| text.split(|c: char| !c.is_alphanumeric()).find(|word| ids.contains(word)).map(str::to_owned);
     for chapter in &story.chapters {
         if chapter.narration.trim().is_empty() {
             found.push(format!("narration de «{}»: cómo encaja con lo anterior", chapter.title));
         }
-        if chapter.ideas.is_empty() && !matches!(chapter.kind.as_str(), "config" | "test") {
+        let id = std::iter::once(chapter.narration.as_str())
+            .chain(chapter.ideas.iter().map(|idea| idea.explanation.as_str()))
+            .find_map(names_id);
+        if let Some(id) = id {
+            found.push(format!("«{}» nombra {id}: quien lee no ve esos ids, usa el título", chapter.title));
+        }
+        if chapter.ideas.is_empty() && chapter.kind != "config" {
             found.push(format!("ideas de «{}»: explica su código por ideas", chapter.title));
         }
         for idea in &chapter.ideas {
@@ -681,6 +810,38 @@ fn resolve_example(
     })
 }
 
+/// Lo que el guion no colocó: aparte el código y los tests.
+fn push_untold(chapters: &mut Vec<Chapter>, source: Source, rest: Vec<usize>, tests: Vec<usize>) {
+    let told = source == Source::Declared;
+    if !rest.is_empty() {
+        chapters.push(if told {
+            Chapter::plain(
+                "No lo contó el agente".into(),
+                "Código del cambio que el guion del agente no menciona: revísalo con más cuidado.".into(),
+                rest,
+                true,
+            )
+        } else {
+            Chapter::plain(
+                "Otros cambios".into(),
+                "Pasos que el guion no colocó en ningún capítulo.".into(),
+                rest,
+                false,
+            )
+        });
+    }
+    if !tests.is_empty() {
+        let mut chapter = Chapter::plain(
+            if told { "Tests que no contó el agente" } else { "Otros tests" }.into(),
+            "Tests del cambio que el guion no menciona.".into(),
+            tests,
+            told,
+        );
+        chapter.kind = Some(TEST_KIND.to_owned());
+        chapters.push(chapter);
+    }
+}
+
 /// Convierte un guion (de cualquier fuente) en la presentación de esta revisión.
 #[must_use]
 pub fn resolve(
@@ -714,29 +875,20 @@ pub fn resolve(
         })
         .collect();
     let requirement_index = |id: &str| requirements.iter().position(|requirement| requirement.id == id);
-    let (mut chapters, chapter_ids, chapters_stale) =
+    let Placed { mut chapters, mut chapter_ids, stale: chapters_stale, context } =
         place_chapters(&story.chapters, requirement_index, &mut placed, review, plan, repos);
     stale |= chapters_stale;
+    separate_tests(&mut chapters, review, plan);
     // Lo que el guion no colocó no se pierde: va al final, y lo generado aparte.
     let (generated, rest): (Vec<usize>, Vec<usize>) = (0..plan.len())
         .filter(|step| !placed.contains(step))
         .partition(|&step| crate::triage::clearly_generated(&review.files[plan[step].file].path));
-    if !rest.is_empty() {
-        chapters.push(if source == Source::Declared {
-            Chapter::plain(
-                "No lo contó el agente".into(),
-                "Código del cambio que el guion del agente no menciona: revísalo con más cuidado.".into(),
-                rest,
-                true,
-            )
-        } else {
-            Chapter::plain(
-                "Otros cambios".into(),
-                "Pasos que el guion no colocó en ningún capítulo.".into(),
-                rest,
-                false,
-            )
-        });
+    let (untold_tests, rest): (Vec<usize>, Vec<usize>) =
+        rest.into_iter().partition(|&step| is_test_step(review, &plan[step]));
+    push_untold(&mut chapters, source, rest, untold_tests);
+    let moved = tests_last(&mut chapters);
+    for (_, index) in &mut chapter_ids {
+        *index = moved[*index];
     }
     if !generated.is_empty() {
         chapters.push(Chapter::plain(
@@ -772,6 +924,7 @@ pub fn resolve(
         after: story.after,
         example,
         concepts: story.concepts,
+        context,
         requirements,
         chapters,
         flow,
@@ -798,6 +951,34 @@ pub struct Recorded {
     pub gaps: Vec<String>,
 }
 
+/// Los ficheros de este repositorio que cambian respecto a su rama principal y
+/// ningún capítulo menciona. Con el guion ya resuelto: rutas relativas a la raíz.
+fn unmentioned(told: &Story, root: &Path) -> Option<String> {
+    let base = crate::branch::default_base(root).ok()?;
+    let fork = git(root, &["merge-base", &base, "HEAD"]).ok()?;
+    let changed = git(root, &["diff", "--name-only", fork.trim()]).ok()?;
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard"]).ok()?;
+    let identity = identity(root);
+    let mentioned: BTreeSet<&str> = told
+        .chapters
+        .iter()
+        .flat_map(|chapter| chapter.anchors.iter().chain(chapter.ideas.iter().flat_map(|idea| idea.anchors.iter())))
+        .filter(|anchor| anchor.repo == identity)
+        .filter_map(|anchor| anchor.file.as_deref())
+        .collect();
+    let missing: BTreeSet<&str> = changed
+        .lines()
+        .chain(untracked.lines())
+        .filter(|path| !mentioned.contains(path) && !crate::triage::clearly_generated(path) && root.join(path).exists())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        let shown: Vec<&str> = missing.iter().take(MAX_UNMENTIONED).copied().collect();
+        let more = missing.len().saturating_sub(MAX_UNMENTIONED);
+        let more = if more > 0 { format!(" y {more} más") } else { String::new() };
+        format!("ficheros que cambian respecto a {base} y ningún capítulo menciona: {}{more}", shown.join(", "))
+    })
+}
+
 /// Guarda el guion que declara el agente: resuelve cada ancla en disco (con su
 /// símbolo y su texto) y lo asocia a cada repositorio y rama que toca.
 ///
@@ -808,7 +989,8 @@ pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
         return Err(EngineError::Invalid("el guion no tiene capítulos".into()));
     }
     told.version = Some(VERSION.to_owned());
-    let gaps = gaps(&told);
+    let mut gaps = gaps(&told);
+    let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
     let mut repos: BTreeSet<(String, String)> = BTreeSet::new();
     let mut unresolved = Vec::new();
     let mut resolved = 0;
@@ -829,6 +1011,7 @@ pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
         anchor.lines = Some(vec![start, end]);
         anchor.file = Some(path.strip_prefix(&root).map_or(file, |inside| inside.display().to_string()));
         anchor.repo = identity(&root);
+        roots.insert(root.clone());
         if let (Some(repo), Some(branch)) = (anchor.repo.clone(), crate::task::checked_out(&root)) {
             repos.insert((repo, branch));
         }
@@ -840,6 +1023,7 @@ pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
             unresolved.join(", ")
         )));
     }
+    gaps.extend(roots.iter().filter_map(|root| unmentioned(&told, root)));
     let text = serde_json::to_string(&told).map_err(|error| EngineError::Invalid(error.to_string()))?;
     let id = store.add_declared_storyline(&text, &repos.into_iter().collect::<Vec<_>>())?;
     Ok(Recorded { id, chapters: told.chapters.len(), anchors: resolved, unresolved, gaps })
@@ -1308,6 +1492,8 @@ pub fn fallback(review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) ->
             None => chapters.push(Chapter::plain(title, String::new(), vec![index], false)),
         }
     }
+    separate_tests(&mut chapters, review, plan);
+    tests_last(&mut chapters);
     Storyline {
         source: Source::Automatic,
         model: None,
@@ -1316,6 +1502,7 @@ pub fn fallback(review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) ->
         after: String::new(),
         example: None,
         concepts: Vec::new(),
+        context: Vec::new(),
         requirements: Vec::new(),
         chapters,
         flow: Vec::new(),
@@ -1769,6 +1956,13 @@ mod tests {
             ]}]}))
         .unwrap();
         assert_eq!(gaps(&full), Vec::<String>::new());
+
+        let with_id: Story = serde_json::from_value(json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "Puertos", "kind": "config", "intent": "i", "narration": "n"},
+            {"id": "C2", "title": "Adaptadores", "kind": "config", "intent": "i", "narration": "Implementan los puertos de C1."}
+        ]}))
+        .unwrap();
+        assert!(gaps(&with_id).iter().any(|gap| gap.starts_with("«Adaptadores» nombra C1")), "{:?}", gaps(&with_id));
     }
 
     #[test]
@@ -1795,6 +1989,149 @@ mod tests {
         assert_eq!(example.walk[0].step, Some(position(&plan, "Cart.add")));
         assert_eq!(example.walk[1].step, None);
         assert_eq!(found.concepts[0].term, "Carrito");
+    }
+
+    /// Una revisión con estos ficheros y un guion declarado, ya resueltos.
+    fn told(name: &str, files: &[(&str, &str)], guion: &Value) -> (Storyline, Vec<FlowStep>, SessionReview) {
+        let repo = git_repo(name);
+        let mut paths = Vec::new();
+        for (path, content) in files {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, content).unwrap();
+            paths.push((file.display().to_string(), *content));
+        }
+        let mut guion = guion.clone();
+        for chapter in guion["chapters"].as_array_mut().unwrap() {
+            let root = repo.display().to_string();
+            for anchor in chapter["anchors"].as_array_mut().into_iter().flatten() {
+                anchor["file"] = json!(format!("{root}/{}", anchor["file"].as_str().unwrap()));
+            }
+            for idea in chapter.get_mut("ideas").and_then(Value::as_array_mut).into_iter().flatten() {
+                for anchor in idea["anchors"].as_array_mut().unwrap() {
+                    anchor["file"] = json!(format!("{root}/{}", anchor["file"].as_str().unwrap()));
+                }
+            }
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        let refs: Vec<(&str, &str)> = paths.iter().map(|(path, content)| (path.as_str(), *content)).collect();
+        let (review, plan) = review_of(&refs);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        (found, plan, review)
+    }
+
+    #[test]
+    fn tests_go_in_their_own_section_after_the_code() {
+        const TESTS: &str =
+            "import { total } from './total';\ntest('suma', () => {\n  expect(total([])).toBe(0);\n});\n";
+        let guion = json!({"summary": "s", "flow": [{"from": "C1", "to": "C2", "label": "lo comprueban"}], "chapters": [
+            {"id": "C1", "title": "Comprobaciones", "kind": "test", "intent": "i", "anchors": [{"file": "src/total.test.ts"}]},
+            {"id": "C2", "title": "Total", "kind": "logic", "intent": "i", "anchors": [{"file": "src/total.ts"}, {"file": "src/other.test.ts"}]}
+        ]});
+        let (found, _, review) = told(
+            "tests",
+            &[("src/total.ts", TOTAL), ("src/total.test.ts", TESTS), ("src/other.test.ts", TESTS)],
+            &guion,
+        );
+        let titles: Vec<&str> = found.chapters.iter().map(|chapter| chapter.title.as_str()).collect();
+        assert_eq!(titles, ["Total", "Comprobaciones"], "los tests, al final");
+        let paths_of = |chapter: &Chapter| -> BTreeSet<String> {
+            let plan = huella_review::flow::plan(&review);
+            chapter.steps.iter().map(|&step| review.files[plan[step].file].path.clone()).collect()
+        };
+        assert!(paths_of(&found.chapters[0]).iter().all(|path| !path.contains(".test.")), "{:?}", found.chapters[0]);
+        assert_eq!(paths_of(&found.chapters[1]).len(), 2, "los tests del otro capítulo se mueven aquí");
+        assert_eq!((found.flow[0].from, found.flow[0].to), (1, 0), "las flechas siguen a sus capítulos");
+    }
+
+    #[test]
+    fn untold_tests_are_flagged_apart_and_automatic_stories_split_them_too() {
+        const TESTS: &str = "test('suma', () => {\n  expect(1).toBe(1);\n});\n";
+        let guion = json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "Total", "kind": "logic", "intent": "i", "anchors": [{"file": "src/total.ts"}]}]});
+        let (found, plan, review) =
+            told("untold-tests", &[("src/total.ts", TOTAL), ("src/total.test.ts", TESTS)], &guion);
+        let last = found.chapters.last().unwrap();
+        assert_eq!(last.title, "Tests que no contó el agente");
+        assert!(last.unnarrated && last.kind.as_deref() == Some("test"));
+
+        let automatic = fallback(&review, &plan, &[]);
+        assert_eq!(automatic.chapters.len(), 2);
+        assert_eq!(automatic.chapters[1].kind.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn a_chapter_whose_code_is_not_in_the_review_stays_as_context_if_it_tells_something() {
+        let guion = json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "Total", "intent": "i", "anchors": [{"file": "src/total.ts"}]},
+            {"id": "C2", "title": "El modelo", "intent": "Las piezas del juego", "narration": "Un personaje tiene vida y armadura.", "anchors": [{"file": "src/world.ts"}]},
+            {"id": "C3", "title": "Solo el título", "intent": "i", "anchors": [{"file": "src/world.ts"}]},
+            {"id": "C4", "title": "Tests antiguos", "kind": "test", "intent": "i", "narration": "n", "anchors": [{"file": "src/world.ts"}]}
+        ]});
+        let repo_files = [("src/total.ts", TOTAL), ("src/world.ts", OTHER)];
+        // `world.ts` existe en disco, pero no entra en la revisión.
+        let repo = git_repo("context");
+        for (path, content) in repo_files {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), content).unwrap();
+        }
+        let mut guion = guion;
+        for chapter in guion["chapters"].as_array_mut().unwrap() {
+            for anchor in chapter["anchors"].as_array_mut().unwrap() {
+                anchor["file"] = json!(repo.join(anchor["file"].as_str().unwrap()));
+            }
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        let path = repo.join("src/total.ts").display().to_string();
+        let (review, plan) = review_of(&[(&path, TOTAL)]);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert_eq!(found.chapters.len(), 1);
+        let titles: Vec<&str> = found.context.iter().map(|context| context.title.as_str()).collect();
+        assert_eq!(titles, ["El modelo"], "solo lo que cuenta algo y no son tests");
+        assert_eq!(found.context[0].narration, "Un personaje tiene vida y armadura.");
+    }
+
+    #[test]
+    fn the_agent_hears_which_changed_files_no_chapter_mentions() {
+        let run = |repo: &Path, args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        let repo = std::env::temp_dir().join(format!("huella-guion-unmentioned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("dist")).unwrap();
+        let repo = std::fs::canonicalize(repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("base.ts"), OTHER).unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-q", "-m", "base"]);
+        run(&repo, &["switch", "-q", "-c", "feature/A-1"]);
+        for name in ["told.ts", "pom.xml", "new.ts", "dist/app.js"] {
+            std::fs::write(repo.join(name), OTHER).unwrap();
+        }
+        run(&repo, &["add", "told.ts", "pom.xml", "dist/app.js"]);
+        run(&repo, &["commit", "-q", "-m", "x"]);
+        let mut store = Store::open_in_memory().unwrap();
+        let guion = json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "T", "intent": "i", "narration": "n", "anchors": [{"file": repo.join("told.ts")}]}]});
+        let recorded = record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        let gap = recorded.gaps.iter().find(|gap| gap.starts_with("ficheros que cambian")).expect("avisa");
+        assert!(gap.contains("respecto a main"), "{gap}");
+        assert!(gap.contains("pom.xml") && gap.contains("new.ts"), "{gap}");
+        assert!(!gap.contains("told.ts") && !gap.contains("base.ts") && !gap.contains("dist/app.js"), "{gap}");
     }
 
     #[test]
