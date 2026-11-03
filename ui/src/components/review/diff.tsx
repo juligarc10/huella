@@ -134,7 +134,10 @@ export function StepDiff({
     <div className="overflow-hidden rounded-2xl border bg-card">
       <div className="@container overflow-x-auto">
         <div className="min-w-max py-2 font-mono text-[13px] leading-6">
-          {step.lines.map((line, index) => (
+          {step.lines.map((line, index) =>
+            // En una clase, los huecos de los métodos que son otros pasos dejan
+            // tiradas de líneas en blanco: basta con una.
+            !line.text.trim() && index > 0 && !step.lines[index - 1].text.trim() && !selected(index) ? null : (
             <Fragment key={index}>
               <div
                 ref={focus?.[0] === index ? firstFocused : undefined}
@@ -229,7 +232,8 @@ export function StepDiff({
                 </div>
               )}
             </Fragment>
-          ))}
+            ),
+          )}
         </div>
       </div>
       {peekHint && (

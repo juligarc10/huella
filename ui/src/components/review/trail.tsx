@@ -9,6 +9,7 @@ export type Slide =
   | { kind: 'cover' }
   | { kind: 'chapter'; chapter: number }
   | { kind: 'idea'; chapter: number; idea: number; steps: number[] }
+  | { kind: 'file'; chapter: number; path: string; steps: number[] }
   | { kind: 'step'; chapter: number; step: number }
   | { kind: 'closing' }
 
@@ -92,7 +93,7 @@ export function Trail({
   onChapter: (chapter: number) => void
   onStep: (step: number) => void
 }) {
-  const active = slide.kind === 'chapter' || slide.kind === 'step' || slide.kind === 'idea' ? slide.chapter : null
+  const active = slide.kind === 'chapter' || slide.kind === 'step' || slide.kind === 'idea' || slide.kind === 'file' ? slide.chapter : null
   const cap = 'rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:border-foreground/40'
   const selected = active !== null ? `c${active}` : slide.kind
   const choose = (value: string) => {
@@ -109,30 +110,34 @@ export function Trail({
           Portada
         </button>
         {story.chapters.map((chapter, chapterIndex) => (
-          <div
-            key={chapterIndex}
-            title={chapter.title}
-            className={cn(
-              'flex flex-wrap rounded-md px-0.5 transition-colors',
-              active === chapterIndex && 'bg-brand-soft',
-              chapter.unnarrated && 'ring-1 ring-warn/50',
+          <div key={chapterIndex} className="flex items-center gap-1.5">
+            {chapter.kind === 'test' && story.chapters[chapterIndex - 1]?.kind !== 'test' && (
+              <span className="text-xs text-muted-foreground">tests</span>
             )}
-          >
-            {chapter.steps.map((step) => {
-              const found = steps[step]
-              if (!found) return null
-              walked += 1
-              return (
-                <Footprint
-                  key={step}
-                  step={found}
-                  odd={walked % 2 === 1}
-                  shown={visible(step)}
-                  current={(slide.kind === 'step' && slide.step === step) || (slide.kind === 'idea' && slide.steps.includes(step))}
-                  onClick={() => onStep(step)}
-                />
-              )
-            })}
+            <div
+              title={chapter.title}
+              className={cn(
+                'flex flex-wrap rounded-md px-0.5 transition-colors',
+                active === chapterIndex && 'bg-brand-soft',
+                chapter.unnarrated && 'ring-1 ring-warn/50',
+              )}
+            >
+              {chapter.steps.map((step) => {
+                const found = steps[step]
+                if (!found) return null
+                walked += 1
+                return (
+                  <Footprint
+                    key={step}
+                    step={found}
+                    odd={walked % 2 === 1}
+                    shown={visible(step)}
+                    current={(slide.kind === 'step' && slide.step === step) || ((slide.kind === 'idea' || slide.kind === 'file') && slide.steps.includes(step))}
+                    onClick={() => onStep(step)}
+                  />
+                )
+              })}
+            </div>
           </div>
         ))}
         <button type="button" onClick={onClosing} aria-current={slide.kind === 'closing'} className={cn(cap, slide.kind === 'closing' && 'border-brand bg-brand-soft')}>
@@ -154,6 +159,7 @@ export function Trail({
               const done = chapter.steps.filter((step) => steps[step]?.verdict).length
               return (
                 <option key={index} value={`c${index}`} disabled={!chapter.steps.some(visible)} className="bg-card font-normal">
+                  {chapter.kind === 'test' ? 'Tests · ' : ''}
                   {chapter.title} · {done}/{chapter.steps.length}
                 </option>
               )
