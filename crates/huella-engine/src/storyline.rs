@@ -62,6 +62,8 @@ en el idioma de la descripción.";
 const DIFF_BUDGET: usize = 2400;
 /// Líneas de diff por paso, como mucho y como poco.
 const STEP_LINES: (usize, usize) = (60, 6);
+/// Menos que esto no explica nada a quien no conoce el código.
+const MIN_EXPLANATION: usize = 80;
 
 // ---------------------------------------------------------------------------
 // El formato común: huella.storyline/v1.
@@ -72,12 +74,52 @@ pub struct Story {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub summary: String,
+    /// Cómo se comportaba el sistema antes del cambio.
+    pub before: String,
+    /// Cómo se comporta ahora.
+    pub after: String,
+    /// Un caso concreto, de principio a fin.
+    pub example: StoryExample,
+    /// Términos del dominio y del código que hay que conocer.
+    pub concepts: Vec<StoryConcept>,
     pub requirements: Vec<StoryRequirement>,
     pub chapters: Vec<StoryChapter>,
     pub flow: Vec<StoryFlow>,
     pub outside: Vec<StoryOutside>,
     pub unverified: Vec<String>,
     pub risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryExample {
+    pub scenario: String,
+    pub walk: Vec<StoryWalk>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryWalk {
+    pub what: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Anchor>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryConcept {
+    pub term: String,
+    pub meaning: String,
+}
+
+/// Una idea del capítulo: lo que hay que entender y el código que la forma.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryIdea {
+    pub title: String,
+    pub explanation: String,
+    pub anchors: Vec<Anchor>,
+    pub look_at: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +141,7 @@ pub struct StoryChapter {
     pub kind: String,
     pub intent: String,
     pub narration: String,
+    pub ideas: Vec<StoryIdea>,
     pub anchors: Vec<Anchor>,
     pub requirements: Vec<String>,
     pub look_at: Vec<String>,
@@ -150,8 +193,11 @@ impl Story {
         self.requirements
             .iter_mut()
             .flat_map(|requirement| requirement.places.iter_mut())
-            .chain(self.chapters.iter_mut().flat_map(|chapter| chapter.anchors.iter_mut()))
+            .chain(self.chapters.iter_mut().flat_map(|chapter| {
+                chapter.anchors.iter_mut().chain(chapter.ideas.iter_mut().flat_map(|idea| idea.anchors.iter_mut()))
+            }))
             .chain(self.outside.iter_mut().map(|outside| &mut outside.anchor))
+            .chain(self.example.walk.iter_mut().filter_map(|walk| walk.anchor.as_mut()))
     }
 }
 
@@ -191,8 +237,33 @@ pub struct Chapter {
     pub steps: Vec<usize>,
     pub look_at: Vec<String>,
     pub questions: Vec<String>,
+    /// Las ideas del capítulo, en orden de lectura; los pasos que no estén en
+    /// ninguna se muestran sueltos.
+    pub ideas: Vec<Idea>,
     /// Código del cambio que el guion del agente no menciona.
     pub unnarrated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Idea {
+    pub title: String,
+    pub explanation: String,
+    pub look_at: Vec<String>,
+    /// Índices en el plan.
+    pub steps: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Example {
+    pub scenario: String,
+    pub walk: Vec<Walk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Walk {
+    pub what: String,
+    /// Paso del plan donde ocurre, si se encontró.
+    pub step: Option<usize>,
 }
 
 impl Chapter {
@@ -206,6 +277,7 @@ impl Chapter {
             steps,
             look_at: Vec::new(),
             questions: Vec::new(),
+            ideas: Vec::new(),
             unnarrated,
         }
     }
@@ -225,6 +297,10 @@ pub struct Storyline {
     /// Modelo que lo escribió (revisor); `None` si lo declaró el agente o es automático.
     pub model: Option<String>,
     pub summary: String,
+    pub before: String,
+    pub after: String,
+    pub example: Option<Example>,
+    pub concepts: Vec<StoryConcept>,
     pub requirements: Vec<Requirement>,
     pub chapters: Vec<Chapter>,
     pub flow: Vec<Flow>,
@@ -305,6 +381,16 @@ fn mentions_file(anchor: &Anchor, review: &SessionReview, step: &FlowStep, repos
     same_repo && (inside == file || inside.ends_with(&format!("/{file}")) || file.ends_with(&format!("/{inside}")))
 }
 
+/// ¿Alguna línea que cambia este paso nombra esta palabra?
+fn changes_word(step: &FlowStep, word: &str) -> bool {
+    step.lines.iter().any(|line| match line {
+        DiffLine::Added { text, .. } | DiffLine::Removed(text) => {
+            text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$').any(|part| part == word)
+        }
+        DiffLine::Context(_) => false,
+    })
+}
+
 /// Los pasos a los que se refiere un ancla.
 fn steps_of(anchor: &Anchor, review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) -> Vec<usize> {
     if let Some(step) = anchor.step {
@@ -318,14 +404,24 @@ fn steps_of(anchor: &Anchor, review: &SessionReview, plan: &[FlowStep], repos: &
     let in_file: Vec<usize> =
         (0..plan.len()).filter(|&index| mentions_file(anchor, review, &plan[index], repos)).collect();
     match (&anchor.symbol, anchor.range()) {
-        (Some(symbol), _) => in_file
-            .into_iter()
-            .filter(|&index| {
-                plan[index].symbol.as_ref().is_some_and(|step| {
-                    same_symbol(symbol, &step.qualified_name) || contains_symbol(symbol, &step.qualified_name)
+        (Some(symbol), _) => {
+            let named: Vec<usize> = in_file
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    plan[index].symbol.as_ref().is_some_and(|step| {
+                        same_symbol(symbol, &step.qualified_name) || contains_symbol(symbol, &step.qualified_name)
+                    })
                 })
-            })
-            .collect(),
+                .collect();
+            if !named.is_empty() {
+                return named;
+            }
+            // Un campo o una constante no son un símbolo: están donde cambia esa palabra.
+            let plain = plain_symbol(symbol);
+            let word = short(&plain);
+            in_file.into_iter().filter(|&index| changes_word(&plan[index], word)).collect()
+        }
         (None, Some((start, end))) => in_file
             .into_iter()
             .filter(|&index| {
@@ -374,10 +470,13 @@ fn place_chapters(
     let mut holder: BTreeMap<usize, usize> = BTreeMap::new();
     // Las anclas de cada capítulo de la presentación, para lo que no se nombró.
     let mut mentioned: Vec<(usize, &Anchor)> = Vec::new();
+    // Las ideas de cada capítulo de la presentación, que se resuelven al final.
+    let mut told_ideas: Vec<(usize, &StoryIdea)> = Vec::new();
     for chapter in story_chapters {
+        let all_anchors = || chapter.anchors.iter().chain(chapter.ideas.iter().flat_map(|idea| idea.anchors.iter()));
         let mut steps = Vec::new();
         let mut already = None;
-        for anchor in &chapter.anchors {
+        for anchor in all_anchors() {
             let found = steps_of(anchor, review, plan, repos);
             // Lo declarado desfasa si el código del ancla ya no es el que se declaró.
             if let (Some(snapshot), Some(&first)) = (&anchor.snapshot, found.first()) {
@@ -410,11 +509,13 @@ fn place_chapters(
                 }
             }
             chapter_ids.push((chapter.id.clone(), index));
-            mentioned.extend(chapter.anchors.iter().map(|anchor| (index, anchor)));
+            mentioned.extend(all_anchors().map(|anchor| (index, anchor)));
+            told_ideas.extend(chapter.ideas.iter().map(|idea| (index, idea)));
             continue;
         }
         let index = chapters.len();
-        mentioned.extend(chapter.anchors.iter().map(|anchor| (index, anchor)));
+        mentioned.extend(all_anchors().map(|anchor| (index, anchor)));
+        told_ideas.extend(chapter.ideas.iter().map(|idea| (index, idea)));
         for &step in &steps {
             holder.insert(step, index);
         }
@@ -428,6 +529,7 @@ fn place_chapters(
             steps,
             look_at: chapter.look_at.clone(),
             questions: chapter.questions.clone(),
+            ideas: Vec::new(),
             unnarrated: false,
         });
     }
@@ -446,6 +548,7 @@ fn place_chapters(
             placed.insert(step);
         }
     }
+    place_ideas(&mut chapters, &told_ideas, review, plan, repos);
     // Un capítulo que se queda sin código no se muestra.
     let mut shown = 0;
     let renumbered: Vec<Option<usize>> = chapters
@@ -460,6 +563,122 @@ fn place_chapters(
     chapters.retain(|chapter| !chapter.steps.is_empty());
     let chapter_ids = chapter_ids.into_iter().filter_map(|(id, index)| Some((id, renumbered[index]?))).collect();
     (chapters, chapter_ids, stale)
+}
+
+/// Reparte los pasos de cada capítulo entre sus ideas, sin repetirlos. Lo que no se
+/// nombra de un fichero que una idea menciona va con ella. Una idea sin código no
+/// pierde lo que cuenta: pasa a la narración del capítulo.
+fn place_ideas(
+    chapters: &mut [Chapter],
+    told: &[(usize, &StoryIdea)],
+    review: &SessionReview,
+    plan: &[FlowStep],
+    repos: &[RepoRef],
+) {
+    for (index, chapter) in chapters.iter_mut().enumerate() {
+        let ideas: Vec<&StoryIdea> = told.iter().filter(|(at, _)| *at == index).map(|(_, idea)| *idea).collect();
+        if ideas.is_empty() {
+            continue;
+        }
+        let mut taken = BTreeSet::new();
+        let mut steps: Vec<Vec<usize>> = ideas
+            .iter()
+            .map(|idea| {
+                idea.anchors
+                    .iter()
+                    .flat_map(|anchor| steps_of(anchor, review, plan, repos))
+                    .filter(|step| chapter.steps.contains(step) && taken.insert(*step))
+                    .collect()
+            })
+            .collect();
+        for &step in &chapter.steps {
+            if taken.contains(&step) {
+                continue;
+            }
+            let holder = ideas
+                .iter()
+                .position(|idea| idea.anchors.iter().any(|anchor| mentions_file(anchor, review, &plan[step], repos)));
+            if let Some(holder) = holder {
+                steps[holder].push(step);
+                taken.insert(step);
+            }
+        }
+        // Se leen en el orden de las ideas, y al final lo que no está en ninguna.
+        let rest: Vec<usize> = chapter.steps.iter().copied().filter(|step| !taken.contains(step)).collect();
+        chapter.steps = steps.iter().flatten().copied().chain(rest).collect();
+        for (idea, steps) in ideas.into_iter().zip(steps) {
+            if steps.is_empty() {
+                if !idea.explanation.trim().is_empty() {
+                    if !chapter.narration.is_empty() {
+                        chapter.narration.push(' ');
+                    }
+                    chapter.narration.push_str(idea.explanation.trim());
+                }
+                continue;
+            }
+            chapter.ideas.push(Idea {
+                title: idea.title.clone(),
+                explanation: idea.explanation.clone(),
+                look_at: idea.look_at.clone(),
+                steps,
+            });
+        }
+    }
+}
+
+/// Lo que le falta a un guion para que lo entienda alguien sin contexto. Se le
+/// devuelve al agente para que lo complete mientras aún lo sabe.
+#[must_use]
+pub fn gaps(story: &Story) -> Vec<String> {
+    let mut found = Vec::new();
+    if story.before.trim().is_empty() || story.after.trim().is_empty() {
+        found.push("before y after: cómo se comportaba el sistema antes y cómo ahora".to_owned());
+    }
+    if story.example.scenario.trim().is_empty() || story.example.walk.is_empty() {
+        found.push("example: un caso concreto con datos de verdad, de principio a fin".to_owned());
+    }
+    if story.concepts.is_empty() {
+        found.push("concepts: los términos del dominio y del código que hay que conocer".to_owned());
+    }
+    for chapter in &story.chapters {
+        if chapter.narration.trim().is_empty() {
+            found.push(format!("narration de «{}»: cómo encaja con lo anterior", chapter.title));
+        }
+        if chapter.ideas.is_empty() && !matches!(chapter.kind.as_str(), "config" | "test") {
+            found.push(format!("ideas de «{}»: explica su código por ideas", chapter.title));
+        }
+        for idea in &chapter.ideas {
+            if idea.explanation.trim().len() < MIN_EXPLANATION {
+                found.push(format!(
+                    "explanation de «{}»: es demasiado breve para quien no conoce el código",
+                    idea.title
+                ));
+            }
+            if idea.anchors.is_empty() {
+                found.push(format!("anchors de «{}»: di qué código la forma", idea.title));
+            }
+        }
+    }
+    found
+}
+
+fn resolve_example(
+    example: &StoryExample,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    repos: &[RepoRef],
+) -> Option<Example> {
+    (!example.scenario.trim().is_empty() || !example.walk.is_empty()).then(|| Example {
+        scenario: example.scenario.clone(),
+        walk: example
+            .walk
+            .iter()
+            .map(|walk| Walk {
+                what: walk.what.clone(),
+                step: walk.anchor.as_ref().and_then(|anchor| steps_of(anchor, review, plan, repos).first().copied()),
+            })
+            .collect(),
+    })
 }
 
 /// Convierte un guion (de cualquier fuente) en la presentación de esta revisión.
@@ -528,6 +747,7 @@ pub fn resolve(
         ));
     }
     let chapter_index = |id: &str| chapter_ids.iter().find(|(chapter, _)| chapter == id).map(|(_, index)| *index);
+    let example = resolve_example(&story.example, review, plan, repos);
     let flow = story
         .flow
         .iter()
@@ -548,6 +768,10 @@ pub fn resolve(
         source,
         model: None,
         summary: story.summary,
+        before: story.before,
+        after: story.after,
+        example,
+        concepts: story.concepts,
         requirements,
         chapters,
         flow,
@@ -570,6 +794,8 @@ pub struct Recorded {
     pub anchors: usize,
     /// Anclas que no se pudieron resolver (fichero inexistente), para que el agente las corrija.
     pub unresolved: Vec<String>,
+    /// Lo que le falta para que lo entienda alguien sin contexto.
+    pub gaps: Vec<String>,
 }
 
 /// Guarda el guion que declara el agente: resuelve cada ancla en disco (con su
@@ -582,6 +808,7 @@ pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
         return Err(EngineError::Invalid("el guion no tiene capítulos".into()));
     }
     told.version = Some(VERSION.to_owned());
+    let gaps = gaps(&told);
     let mut repos: BTreeSet<(String, String)> = BTreeSet::new();
     let mut unresolved = Vec::new();
     let mut resolved = 0;
@@ -615,7 +842,7 @@ pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
     }
     let text = serde_json::to_string(&told).map_err(|error| EngineError::Invalid(error.to_string()))?;
     let id = store.add_declared_storyline(&text, &repos.into_iter().collect::<Vec<_>>())?;
-    Ok(Recorded { id, chapters: told.chapters.len(), anchors: resolved, unresolved })
+    Ok(Recorded { id, chapters: told.chapters.len(), anchors: resolved, unresolved, gaps })
 }
 
 /// El guion declarado de una revisión: el más reciente de cada repositorio y
@@ -660,6 +887,21 @@ fn merge(mut stories: Vec<Story>) -> Story {
                 merged.summary.push(' ');
             }
             merged.summary.push_str(story.summary.trim());
+        }
+        // De varias sesiones o micros: el primer antes y ahora, y todos los términos.
+        if merged.before.is_empty() {
+            merged.before = story.before;
+        }
+        if merged.after.is_empty() {
+            merged.after = story.after;
+        }
+        if merged.example.scenario.is_empty() {
+            merged.example = story.example;
+        }
+        for concept in story.concepts {
+            if !merged.concepts.iter().any(|known| known.term.eq_ignore_ascii_case(&concept.term)) {
+                merged.concepts.push(concept);
+            }
         }
         merged.requirements.extend(
             story
@@ -1070,6 +1312,10 @@ pub fn fallback(review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) ->
         source: Source::Automatic,
         model: None,
         summary: String::new(),
+        before: String::new(),
+        after: String::new(),
+        example: None,
+        concepts: Vec::new(),
         requirements: Vec::new(),
         chapters,
         flow: Vec::new(),
@@ -1359,6 +1605,11 @@ mod tests {
             for anchor in chapter["anchors"].as_array_mut().unwrap() {
                 anchor["file"] = json!(repo.join("cart.ts"));
             }
+            for idea in chapter.get_mut("ideas").and_then(Value::as_array_mut).into_iter().flatten() {
+                for anchor in idea["anchors"].as_array_mut().unwrap() {
+                    anchor["file"] = json!(repo.join("cart.ts"));
+                }
+            }
         }
         record(&mut store, serde_json::from_value(json!({"summary": "s", "chapters": chapters})).unwrap()).unwrap();
         let paths = [
@@ -1437,6 +1688,113 @@ mod tests {
         assert_eq!(found.chapters.len(), 1, "{:?}", found.chapters);
         assert_eq!(found.chapters[0].steps.len(), plan.len());
         assert!(!found.stale);
+    }
+
+    #[test]
+    fn ideas_group_the_steps_of_a_chapter_and_nothing_is_lost() {
+        let chapters = json!([{"id": "C1", "title": "El carrito", "intent": "i", "narration": "Empieza.", "anchors": [{"symbol": "Cart.remove"}], "ideas": [
+            {"title": "Quitar", "explanation": "Quita.", "look_at": ["negativos"], "anchors": [{"symbol": "Cart.remove"}]},
+            {"title": "Con errata", "explanation": "Esto se cuenta igual.", "anchors": [{"symbol": "Carro.nada"}]},
+            {"title": "Añadir", "explanation": "Añade.", "anchors": [{"symbol": "Cart.add"}]}
+        ]}]);
+        let (found, plan, in_cart) = told_about_cart("ideas", &chapters);
+        let chapter = &found.chapters[0];
+        assert_eq!(chapter.steps.len(), in_cart, "{chapter:?}");
+        let titles: Vec<&str> = chapter.ideas.iter().map(|idea| idea.title.as_str()).collect();
+        assert_eq!(titles, ["Quitar", "Añadir"], "{chapter:?}");
+        assert!(chapter.narration.ends_with("Esto se cuenta igual."), "{chapter:?}");
+        // Lo que nadie nombró de ese fichero (imports, la clase) va con la primera idea que lo menciona.
+        assert_eq!(chapter.ideas[0].steps[0], position(&plan, "Cart.remove"));
+        assert_eq!(chapter.ideas[1].steps, vec![position(&plan, "Cart.add")]);
+        let all: Vec<usize> = chapter.ideas.iter().flat_map(|idea| idea.steps.clone()).collect();
+        assert_eq!(all.len(), in_cart, "ningún paso suelto, ni repetido");
+        assert_eq!(all.iter().collect::<BTreeSet<_>>().len(), all.len());
+        assert_eq!(chapter.steps, all, "se lee en el orden de las ideas");
+    }
+
+    #[test]
+    fn a_field_is_found_where_that_word_changes() {
+        const SERVICE: &str = "public class Limits {\n  private static final int MAX_LENGTH = 254;\n\n  public boolean ok(String email) {\n    return email.length() < MAX_LENGTH;\n  }\n}\n";
+        let repo = git_repo("field");
+        let file = repo.join("Limits.java");
+        std::fs::write(&file, SERVICE).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let told: Story = serde_json::from_value(
+            json!({"summary": "s", "chapters": [{"id": "C1", "title": "T", "intent": "i", "ideas": [
+                {"title": "El método", "explanation": "e", "anchors": [{"file": file, "symbol": "Limits.ok"}]},
+                {"title": "El límite", "explanation": "e", "anchors": [{"file": file, "symbol": "Limits.MAX_LENGTH"}]}
+            ]}]}),
+        )
+        .unwrap();
+        record(&mut store, told).unwrap();
+        let path = file.display().to_string();
+        let (review, plan) = review_of(&[(&path, SERVICE)]);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        let titles: Vec<&str> = found.chapters[0].ideas.iter().map(|idea| idea.title.as_str()).collect();
+        assert_eq!(titles, ["El método", "El límite"], "{:?}", found.chapters[0]);
+        assert_eq!(found.chapters[0].ideas[0].steps, vec![position(&plan, "Limits.ok")]);
+        assert_eq!(found.chapters[0].ideas[1].steps, vec![position(&plan, "Limits")]);
+    }
+
+    #[test]
+    fn an_idea_without_code_keeps_what_it_tells_in_the_chapter() {
+        let chapters = json!([{"id": "C1", "title": "T", "intent": "i", "narration": "Empieza.", "anchors": [{"symbol": "Cart.add"}], "ideas": [
+            {"title": "Con código", "explanation": "Añade.", "anchors": [{"symbol": "Cart"}]},
+            {"title": "Sin código", "explanation": "Esto se cuenta igual.", "anchors": []}
+        ]}]);
+        let (found, _, _) = told_about_cart("idea-empty", &chapters);
+        assert_eq!(found.chapters[0].ideas.len(), 1);
+        assert!(found.chapters[0].narration.ends_with("Esto se cuenta igual."), "{:?}", found.chapters[0]);
+    }
+
+    #[test]
+    fn a_story_says_what_is_missing_for_someone_without_context() {
+        let thin: Story = serde_json::from_value(json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "Lógica", "intent": "i", "anchors": [{"file": "a.ts"}]},
+            {"id": "C2", "title": "Ajustes", "kind": "config", "intent": "i", "narration": "n", "anchors": [{"file": "b.toml"}]}
+        ]}))
+        .unwrap();
+        let found = gaps(&thin);
+        for expected in ["before y after", "example", "concepts", "narration de «Lógica»", "ideas de «Lógica»"] {
+            assert!(found.iter().any(|gap| gap.starts_with(expected)), "falta «{expected}»: {found:?}");
+        }
+        assert!(!found.iter().any(|gap| gap.contains("Ajustes")), "la configuración no necesita ideas: {found:?}");
+
+        let full: Story = serde_json::from_value(json!({"summary": "s", "before": "b", "after": "a",
+            "example": {"scenario": "x", "walk": [{"what": "y"}]}, "concepts": [{"term": "t", "meaning": "m"}],
+            "chapters": [{"id": "C1", "title": "T", "intent": "i", "narration": "n", "ideas": [
+                {"title": "I", "explanation": "Una explicación con suficiente detalle para alguien que no conoce nada de este código.", "anchors": [{"file": "a.ts"}]}
+            ]}]}))
+        .unwrap();
+        assert_eq!(gaps(&full), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_example_and_the_concepts_reach_the_presentation() {
+        let repo = git_repo("example");
+        std::fs::write(repo.join("cart.ts"), CART).unwrap();
+        let file = repo.join("cart.ts");
+        let mut store = Store::open_in_memory().unwrap();
+        let told: Story =
+            serde_json::from_value(json!({"summary": "s", "before": "Antes fallaba", "after": "Ahora suma",
+            "example": {"scenario": "Un carrito con 2 productos", "walk": [
+                {"what": "Se añade uno", "anchor": {"file": file, "symbol": "Cart.add"}}, {"what": "Se muestra"}]},
+            "concepts": [{"term": "Carrito", "meaning": "Lo que el cliente va a comprar"}],
+            "chapters": [{"id": "C1", "title": "T", "intent": "i", "anchors": [{"file": file, "symbol": "Cart"}]}]}))
+            .unwrap();
+        record(&mut store, told).unwrap();
+        let path = file.display().to_string();
+        let (review, plan) = review_of(&[(&path, CART)]);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert_eq!((found.before.as_str(), found.after.as_str()), ("Antes fallaba", "Ahora suma"));
+        let example = found.example.unwrap();
+        assert_eq!(example.walk[0].step, Some(position(&plan, "Cart.add")));
+        assert_eq!(example.walk[1].step, None);
+        assert_eq!(found.concepts[0].term, "Carrito");
     }
 
     #[test]

@@ -132,6 +132,8 @@ pub struct StepContext<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct StepStory<'a> {
     pub story: &'a Storyline,
+    /// El paso.
+    pub step: usize,
     /// Índice del capítulo que tiene el paso.
     pub chapter: usize,
     /// Pasos anterior y siguiente en el orden de la presentación.
@@ -147,6 +149,7 @@ pub fn story_of(story: &Storyline, index: usize) -> Option<StepStory<'_>> {
     let at = order.iter().position(|&step| step == index)?;
     Some(StepStory {
         story,
+        step: index,
         chapter,
         previous: at.checked_sub(1).map(|before| order[before]),
         next: order.get(at + 1).copied(),
@@ -178,6 +181,14 @@ pub fn render_story(review: &SessionReview, plan: &[FlowStep], place: &StepStory
     if !chapter.narration.trim().is_empty() {
         let _ = writeln!(out, "- Cómo se cuenta: {}", clip(&one_line(&chapter.narration), 1500));
     }
+    if let Some(idea) = chapter.ideas.iter().find(|idea| idea.steps.contains(&place.step)) {
+        let _ = writeln!(
+            out,
+            "- Lo que explica el agente de esta parte («{}»): {}",
+            idea.title,
+            clip(&one_line(&idea.explanation), 2000)
+        );
+    }
     let neighbour = |label: &str, step: Option<usize>| match step {
         Some(step) => format!("- {label}: {}\n", step_name(review, plan, step)),
         None => format!("- {label}: ninguno\n"),
@@ -190,18 +201,38 @@ pub fn render_story(review: &SessionReview, plan: &[FlowStep], place: &StepStory
     for question in &chapter.questions {
         let _ = writeln!(out, "- Quien revisa debería saber responder: {}", one_line(question));
     }
+    write_concepts(&mut out, place.story);
     out
+}
+
+fn write_concepts(out: &mut String, story: &Storyline) {
+    for concept in story.concepts.iter().take(30) {
+        let _ = writeln!(out, "- Término «{}»: {}", concept.term, clip(&one_line(&concept.meaning), 300));
+    }
 }
 
 /// El guion entero, para las preguntas sobre toda la tarea.
 #[must_use]
 pub fn render_overview(story: &Storyline) -> String {
     let mut out = format!("Lo que hace el cambio: {}\n", clip(&one_line(&story.summary), 1000));
+    if !story.before.is_empty() {
+        let _ = writeln!(out, "Antes: {}\nAhora: {}", one_line(&story.before), one_line(&story.after));
+    }
+    if let Some(example) = &story.example {
+        let _ = writeln!(out, "Un caso: {}", one_line(&example.scenario));
+        for walk in &example.walk {
+            let _ = writeln!(out, "  - {}", one_line(&walk.what));
+        }
+    }
+    write_concepts(&mut out, story);
     for requirement in &story.requirements {
         let _ = writeln!(out, "- Requisito ({:?}): {}", requirement.status, one_line(&requirement.text));
     }
     for (number, chapter) in story.chapters.iter().enumerate() {
         let _ = writeln!(out, "{}. {}: {}", number + 1, chapter.title, clip(&one_line(&chapter.intent), 500));
+        for idea in &chapter.ideas {
+            let _ = writeln!(out, "   - {}: {}", idea.title, clip(&one_line(&idea.explanation), 800));
+        }
     }
     for item in story.unverified.iter().chain(&story.risks) {
         let _ = writeln!(out, "- Sin comprobar o con riesgo: {}", one_line(item));

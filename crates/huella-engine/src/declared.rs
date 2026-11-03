@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::{EngineError, Result};
 
-pub const KINDS: [&str; 4] = ["decision", "assumption", "unverified", "risk"];
+pub const KINDS: [&str; 6] = ["decision", "assumption", "unverified", "risk", "explanation", "concept"];
 pub const CONFIDENCES: [&str; 3] = ["high", "medium", "low"];
 /// Declaraciones por paso que se muestran y se pasan al modelo.
 const PER_STEP: usize = 5;
@@ -254,6 +254,8 @@ pub fn kind_label(kind: &str) -> &'static str {
         "assumption" => "suposición",
         "unverified" => "sin verificar",
         "risk" => "riesgo",
+        "explanation" => "explicación",
+        "concept" => "concepto",
         _ => "decisión",
     }
 }

@@ -5,12 +5,81 @@
   "description": "El guion de un cambio: cómo presentárselo a quien lo revisa para que lo entienda antes de aceptarlo. Lo escribe quien hizo el cambio (o un modelo que lo revisa) y lo usa la aplicación para montar la presentación y otro modelo para explicar cada paso con este contexto.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "chapters"],
+  "required": [
+    "summary",
+    "chapters"
+  ],
   "properties": {
-    "version": { "const": "huella.storyline/v1" },
+    "version": {
+      "const": "huella.storyline/v1"
+    },
     "summary": {
       "type": "string",
       "description": "2 a 4 frases: qué hace el cambio en conjunto y por qué, contado como un flujo. Es lo primero que lee quien revisa."
+    },
+    "before": {
+      "type": "string",
+      "description": "Cómo se comportaba el sistema antes del cambio, para alguien que no lo conoce. Comportamiento, no código."
+    },
+    "after": {
+      "type": "string",
+      "description": "Cómo se comporta ahora."
+    },
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario",
+        "walk"
+      ],
+      "description": "Un caso concreto con datos de verdad, de principio a fin: lo que da el mapa para entender todo lo demás.",
+      "properties": {
+        "scenario": {
+          "type": "string",
+          "description": "Qué pasa en este caso («llega un alta con el correo A@B.com »)."
+        },
+        "walk": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "what"
+            ],
+            "properties": {
+              "what": {
+                "type": "string",
+                "description": "Qué ocurre aquí, con los datos del caso."
+              },
+              "anchor": {
+                "$ref": "#/$defs/anchor"
+              }
+            }
+          },
+          "description": "Lo que ocurre, en orden de ejecución, con el código donde ocurre."
+        }
+      }
+    },
+    "concepts": {
+      "type": "array",
+      "description": "Los términos del dominio y del código que hay que conocer, para alguien que llega de nuevas.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "meaning"
+        ],
+        "properties": {
+          "term": {
+            "type": "string"
+          },
+          "meaning": {
+            "type": "string",
+            "description": "Qué significa, sin dar nada por sabido."
+          }
+        }
+      }
     },
     "requirements": {
       "type": "array",
@@ -18,13 +87,38 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "text", "status"],
+        "required": [
+          "id",
+          "text",
+          "status"
+        ],
         "properties": {
-          "id": { "type": "string", "description": "R1, R2… para referirse a él desde los capítulos." },
-          "text": { "type": "string" },
-          "status": { "enum": ["done", "partial", "missing"], "description": "done si el código lo cumple; partial si a medias; missing si no. Sé honesto: quien revisa lo comprueba." },
-          "where": { "type": "array", "items": { "$ref": "#/$defs/anchor" }, "description": "El código que lo cumple." },
-          "note": { "type": "string", "description": "Qué falta o qué conviene comprobar." }
+          "id": {
+            "type": "string",
+            "description": "R1, R2… para referirse a él desde los capítulos."
+          },
+          "text": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "done",
+              "partial",
+              "missing"
+            ],
+            "description": "done si el código lo cumple; partial si a medias; missing si no. Sé honesto: quien revisa lo comprueba."
+          },
+          "where": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/anchor"
+            },
+            "description": "El código que lo cumple."
+          },
+          "note": {
+            "type": "string",
+            "description": "Qué falta o qué conviene comprobar."
+          }
         }
       }
     },
@@ -35,17 +129,107 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "intent", "anchors"],
+        "required": [
+          "id",
+          "title",
+          "intent"
+        ],
         "properties": {
-          "id": { "type": "string", "description": "C1, C2…" },
-          "title": { "type": "string", "description": "Corto: lo que hace este trozo («Endpoint del filtro»)." },
-          "kind": { "enum": ["entry", "logic", "data", "effect", "integration", "test", "config", "other"], "description": "entry: por donde entra (endpoint, UI, CLI, consumidor); logic: reglas; data: persistencia y migraciones; effect: correos, eventos, llamadas salientes; integration: la unión con otro repositorio o servicio." },
-          "intent": { "type": "string", "description": "1 o 2 frases: qué hace y para qué lo necesita la tarea." },
-          "narration": { "type": "string", "description": "2 a 5 frases para contarlo: cómo encaja con el capítulo anterior y qué hay que entender aquí." },
-          "anchors": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/anchor" }, "description": "El código del capítulo, en orden de lectura." },
-          "requirements": { "type": "array", "items": { "type": "string" }, "description": "Ids de los requisitos que cubre." },
-          "look_at": { "type": "array", "items": { "type": "string" }, "description": "Lo que quien revisa no debería pasar por alto aquí (casos límite, decisiones discutibles)." },
-          "questions": { "type": "array", "items": { "type": "string" }, "description": "Preguntas que quien revisa debería saber responder al acabar el capítulo si lo ha entendido." }
+          "id": {
+            "type": "string",
+            "description": "C1, C2…"
+          },
+          "title": {
+            "type": "string",
+            "description": "Corto: lo que hace este trozo («Endpoint del filtro»)."
+          },
+          "kind": {
+            "enum": [
+              "entry",
+              "logic",
+              "data",
+              "effect",
+              "integration",
+              "test",
+              "config",
+              "other"
+            ],
+            "description": "entry: por donde entra (endpoint, UI, CLI, consumidor); logic: reglas; data: persistencia y migraciones; effect: correos, eventos, llamadas salientes; integration: la unión con otro repositorio o servicio."
+          },
+          "intent": {
+            "type": "string",
+            "description": "1 o 2 frases: qué hace y para qué lo necesita la tarea."
+          },
+          "narration": {
+            "type": "string",
+            "description": "2 a 5 frases para contarlo: cómo encaja con el capítulo anterior y qué hay que entender aquí."
+          },
+          "ideas": {
+            "type": "array",
+            "description": "El código del capítulo explicado por ideas, en orden de lectura. Cada idea es una diapositiva: agrupa los trozos que se entienden juntos, aunque estén en varios ficheros.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "explanation",
+                "anchors"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "Lo que hay que entender («Normalizar el correo antes de validarlo»)."
+                },
+                "explanation": {
+                  "type": "string",
+                  "description": "Para alguien sin contexto del código ni del dominio: qué hace, por qué hace falta y cómo encaja con lo anterior y lo siguiente. Di qué es cada pieza la primera vez que la nombres. Sin repetir el código línea a línea."
+                },
+                "anchors": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/anchor"
+                  },
+                  "description": "El código que forma la idea, en orden de lectura."
+                },
+                "look_at": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Lo que no hay que pasar por alto aquí."
+                }
+              }
+            }
+          },
+          "anchors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/anchor"
+            },
+            "description": "Código del capítulo que no está en ninguna idea (configuración, tests…), en orden de lectura."
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids de los requisitos que cubre."
+          },
+          "look_at": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lo que quien revisa no debería pasar por alto aquí (casos límite, decisiones discutibles)."
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Preguntas que quien revisa debería saber responder al acabar el capítulo si lo ha entendido."
+          }
         }
       }
     },
@@ -55,11 +239,23 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["from", "to"],
+        "required": [
+          "from",
+          "to"
+        ],
         "properties": {
-          "from": { "type": "string", "description": "Id del capítulo de origen." },
-          "to": { "type": "string", "description": "Id del capítulo de destino." },
-          "label": { "type": "string", "description": "Qué pasa entre ellos («llama a POST /filtros», «guarda en audit_filter»)." }
+          "from": {
+            "type": "string",
+            "description": "Id del capítulo de origen."
+          },
+          "to": {
+            "type": "string",
+            "description": "Id del capítulo de destino."
+          },
+          "label": {
+            "type": "string",
+            "description": "Qué pasa entre ellos («llama a POST /filtros», «guarda en audit_filter»)."
+          }
         }
       }
     },
@@ -69,12 +265,34 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["anchor", "why"],
-        "properties": { "anchor": { "$ref": "#/$defs/anchor" }, "why": { "type": "string" } }
+        "required": [
+          "anchor",
+          "why"
+        ],
+        "properties": {
+          "anchor": {
+            "$ref": "#/$defs/anchor"
+          },
+          "why": {
+            "type": "string"
+          }
+        }
       }
     },
-    "unverified": { "type": "array", "items": { "type": "string" }, "description": "Lo que no se ha probado ni comprobado." },
-    "risks": { "type": "array", "items": { "type": "string" }, "description": "Riesgos concretos del cambio." }
+    "unverified": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Lo que no se ha probado ni comprobado."
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Riesgos concretos del cambio."
+    }
   },
   "$defs": {
     "anchor": {
@@ -82,10 +300,24 @@
       "additionalProperties": false,
       "description": "Un trozo de código: el fichero y, si lo hay, el símbolo (Clase.metodo o el nombre de la función). `step` solo lo usa el modelo revisor, que ve los pasos numerados.",
       "properties": {
-        "file": { "type": "string", "description": "Ruta absoluta o relativa a la raíz del repositorio." },
-        "symbol": { "type": "string" },
-        "lines": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
-        "step": { "type": "integer" }
+        "file": {
+          "type": "string",
+          "description": "Ruta absoluta o relativa a la raíz del repositorio."
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "step": {
+          "type": "integer"
+        }
       }
     }
   }

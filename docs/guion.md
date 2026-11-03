@@ -19,8 +19,11 @@ tres partes:
 | Campo | Para qué |
 | --- | --- |
 | `summary` | Qué hace el cambio y por qué, en 2 a 4 frases. |
+| `before`, `after` | Cómo se comportaba el sistema antes y cómo ahora. |
+| `example` | Un caso concreto con datos de verdad, de principio a fin, con el código donde ocurre cada cosa. |
+| `concepts` | Los términos del dominio y del código que hay que conocer. |
 | `requirements` | Lo que pide la tarea, troceado, con su estado (`done`, `partial`, `missing`) y dónde se cumple. |
-| `chapters` | El cambio en orden de lectura: de la entrada a la lógica, los datos y los efectos. Cada uno con `kind`, `intent`, `narration`, su código (`anchors`), qué no pasar por alto (`look_at`) y qué debería saber responder quien revisa (`questions`). |
+| `chapters` | El cambio en orden de lectura: de la entrada a la lógica, los datos y los efectos. Cada uno con `kind`, `intent`, `narration`, su código explicado por ideas (`ideas`; lo que no esté en ninguna, en `anchors`), qué no pasar por alto (`look_at`) y qué debería saber responder quien revisa (`questions`). |
 | `flow` | Cómo pasa la ejecución de un capítulo a otro («llama a POST /filtros»). |
 | `outside` | Lo que se cambió y la tarea no pide. |
 | `unverified`, `risks` | Lo que no se comprobó y los riesgos. |
@@ -47,6 +50,10 @@ pasos numerados, usa `step`.
 - La guía de cada paso y las preguntas reciben el guion (el capítulo, el paso
   anterior y el siguiente, qué mirar), para que la explicación se lea seguida. Si
   el guion cambia, las guías quedan desfasadas.
+- Cada idea es una diapositiva con todo su código. Los pasos que no están en
+  ninguna salen sueltos, con la guía del modelo local.
+- Al guardarlo, `huella_storyline` le dice al agente lo que le falta para que lo
+  entienda alguien sin contexto, para que lo complete mientras aún lo sabe.
 - El orden de preferencia es: el guion del agente, el del modelo revisor y, sin
   ninguno, un capítulo por repositorio.
 
