@@ -245,6 +245,8 @@ export function Review({
 
   return (
     <>
+      {/* La revisión usa todo el ancho: el marco de la aplicación lo mira. */}
+      <span data-wide hidden />
       <PageHeader
         title={
           review.task

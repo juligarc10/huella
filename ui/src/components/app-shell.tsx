@@ -8,14 +8,17 @@ import {
   Loader2,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Sun,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { NavLink, Outlet } from 'react-router'
 
 import { Logo } from '@/components/brand'
 import { CommandPalette } from '@/components/command-palette'
+import { ResizeHandle, useStoredNumber } from '@/components/resizable'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { baseName } from '@/lib/format'
 import { useProject } from '@/lib/project'
@@ -34,8 +37,15 @@ const nav = [
   { to: '/estado', label: 'Estado', icon: Activity, end: false },
 ]
 
+const SIDEBAR_INITIAL = 256
+const SIDEBAR_MIN = 200
+const SIDEBAR_MAX = 420
+
 export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [sidebar, setSidebar] = useStoredNumber('huella-sidebar', SIDEBAR_INITIAL)
+  const [hidden, setHidden] = useStoredNumber('huella-sidebar-hidden', 0)
+  const toggleSidebar = () => setHidden(hidden ? 0 : 1)
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -43,16 +53,49 @@ export function AppShell() {
         event.preventDefault()
         setPaletteOpen((open) => !open)
       }
+      if (event.key.toLowerCase() === 'b' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault()
+        toggleSidebar()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  })
 
   return (
-    <div className="flex min-h-svh flex-col bg-background lg:flex-row">
-      <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
-      <main className="min-w-0 flex-1 px-5 py-8 sm:px-10 lg:py-10">
-        <div className="mx-auto flex max-w-6xl flex-col gap-7">
+    <div
+      style={{ '--sidebar': `${sidebar}px` } as CSSProperties}
+      className="relative flex min-h-svh flex-col bg-background lg:flex-row"
+    >
+      {!hidden && (
+        <>
+          <Sidebar onOpenPalette={() => setPaletteOpen(true)} onHide={toggleSidebar} />
+          <ResizeHandle
+            value={sidebar}
+            min={SIDEBAR_MIN}
+            max={SIDEBAR_MAX}
+            step={16}
+            initial={SIDEBAR_INITIAL}
+            label="Ancho de la barra lateral"
+            toValue={(clientX) => clientX}
+            onChange={setSidebar}
+            className="sticky top-0 -mr-3 h-svh"
+          />
+        </>
+      )}
+      {Boolean(hidden) && (
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label="Mostrar la barra lateral (⌘B)"
+          title="Mostrar la barra lateral (⌘B)"
+          className="fixed top-3 left-3 z-30 hidden size-9 items-center justify-center rounded-lg border bg-card text-muted-foreground hover:text-foreground lg:flex"
+        >
+          <PanelLeftOpen className="size-4" aria-hidden="true" />
+        </button>
+      )}
+      <main className={cn('min-w-0 flex-1 px-5 py-8 has-[[data-wide]]:sm:px-6 sm:px-10 lg:py-10', hidden && 'lg:pl-14!')}>
+        <div className="mx-auto flex max-w-6xl flex-col gap-7 has-[[data-wide]]:max-w-none">
           <Outlet />
         </div>
       </main>
@@ -61,18 +104,27 @@ export function AppShell() {
   )
 }
 
-function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+function Sidebar({ onOpenPalette, onHide }: { onOpenPalette: () => void; onHide: () => void }) {
   const { data: overview } = useOverview()
   const { project, setProject } = useProject()
 
   return (
-    <aside className="flex flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:sticky lg:top-0 lg:h-svh lg:w-64 lg:shrink-0">
+    <aside className="flex flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:sticky lg:top-0 lg:h-svh lg:w-[var(--sidebar)] lg:shrink-0">
       <div className="flex items-center gap-2.5 px-2">
         <Logo />
         <span className="text-lg font-bold tracking-tight">Huella</span>
         <span className="ml-auto rounded-full border border-sidebar-border px-2 py-0.5 text-[11px] text-sidebar-muted">
           local
         </span>
+        <button
+          type="button"
+          onClick={onHide}
+          aria-label="Ocultar la barra lateral (⌘B)"
+          title="Ocultar la barra lateral (⌘B)"
+          className="hidden rounded-md p-1 text-sidebar-muted transition-colors hover:bg-white/8 hover:text-sidebar-foreground lg:block"
+        >
+          <PanelLeftClose className="size-4" aria-hidden="true" />
+        </button>
       </div>
 
       <button
