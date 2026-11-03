@@ -323,6 +323,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "comments"]) => add_comment(app, session, body)?,
         ("GET", ["review", session, "feedback"]) => feedback(app, session)?,
         ("GET", ["review", session, "impact"]) => impact(app, session)?,
+        ("GET", ["review", session, "definition"]) => definition(app, session, params)?,
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
         ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
@@ -1145,6 +1146,27 @@ fn check_guide(app: &mut App, session: &str, body: &str) -> Result<Value> {
 }
 
 /// Qué código del proyecto, fuera de la sesión, usa lo que cambió cada paso.
+/// Dónde está definido un nombre: en una tarea, en la rama de cada repositorio; en
+/// una sesión, en la copia de trabajo de su proyecto.
+fn definition(app: &mut App, session: &str, params: &HashMap<String, String>) -> Result<Value> {
+    use huella_engine::definition::{SearchRoot, find};
+    let name = non_empty(params.get("name")).context("falta el nombre")?;
+    let from = non_empty(params.get("path")).context("falta el fichero")?;
+    load_review(app, session)?;
+    let (review, _) = app.review.as_ref().context("revisión no cargada")?;
+    let roots: Vec<SearchRoot> = match &app.task_repos {
+        Some(repos) => repos
+            .iter()
+            .map(|repo| SearchRoot { root: PathBuf::from(&repo.repo), reference: repo.branch_ref.clone() })
+            .collect(),
+        None => huella_engine::session_project(&app.store, &review.session_id)?
+            .map(|project| SearchRoot { root: PathBuf::from(project), reference: None })
+            .into_iter()
+            .collect(),
+    };
+    Ok(json!({"definitions": find(review, &roots, &name, &from)}))
+}
+
 fn impact(app: &mut App, session: &str) -> Result<Value> {
     load_review(app, session)?;
     if let Some(cached) = &app.impact {
