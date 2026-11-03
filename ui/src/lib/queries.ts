@@ -192,15 +192,26 @@ export function useSetVerdict(session: string) {
   return useMutation({
     mutationFn: (mark: { key: string; hash: string; verdict: Verdict | null }) => api.post(`review/${session}/mark`, mark),
     onMutate: (mark) => {
-      client.setQueryData<ReviewResult>(['review', session], (review) =>
-        review && {
+      client.setQueryData<ReviewResult>(['review', session], (review) => {
+        if (!review) return review
+        // Los contadores van con el paso: de ellos depende poder aprobar.
+        const target = review.steps.find((step) => step.key === mark.key)
+        const change = target ? Number(mark.verdict !== null) - Number(Boolean(target.verdict)) : 0
+        const level = target?.triage.level
+        return {
           ...review,
           status: review.status === 'pending' ? 'in_review' : review.status,
+          comprehension: level
+            ? {
+                ...review.comprehension,
+                [level]: { ...review.comprehension[level], done: review.comprehension[level].done + change },
+              }
+            : review.comprehension,
           steps: review.steps.map((step) =>
             step.key === mark.key ? { ...step, reviewed: mark.verdict !== null, verdict: mark.verdict } : step,
           ),
-        },
-      )
+        }
+      })
     },
     onError: (error) => {
       toast.error(error.message)
