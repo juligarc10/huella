@@ -554,18 +554,19 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     let Assessment { coverage, evidence, policy, policy_error, triage } =
         assess(&app.store, review, plan, &points, &app.activity, project.as_deref())?;
     let mut declared = huella_engine::declared::for_steps(&app.store, review, plan)?;
+    let story = task_story(app, review, plan, &triage, &declared)?;
     let context: Vec<huella_engine::guide::StepContext<'_>> = (0..plan.len())
         .map(|index| huella_engine::guide::StepContext {
             evidence: &evidence[index],
             triage: &triage[index],
             declared: declared.get(&index).map_or(&[], Vec::as_slice),
+            story: story.as_ref().and_then(|story| huella_engine::guide::story_of(story, index)),
         })
         .collect();
     let mut guides = huella_engine::guide::guides(&app.store, review, plan, &context)?;
     drop(context);
-    // El guion, solo en las tareas: el del modelo si lo hay; si no, el automático.
     // En una tarea: lo que pide, cómo está cada repositorio, el repositorio de cada paso y el guion.
-    add_task(app, review, plan, &triage, &declared, &mut value)?;
+    add_task(app, review, plan, story.as_ref(), &mut value)?;
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
@@ -915,6 +916,7 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
     let Assessment { evidence, triage, .. } =
         assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
     let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
+    let told = task_story(app, &review, &plan, &triage, &declared)?;
     let wanted: Vec<String> = plan
         .iter()
         .zip(&triage)
@@ -961,6 +963,7 @@ fn start_guide(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)>
                             evidence: &evidence[index],
                             triage: &triage[index],
                             declared: declared.get(&index).map_or(&[], Vec::as_slice),
+                            story: told.as_ref().and_then(|told| huella_engine::guide::story_of(told, index)),
                         };
                         huella_engine::guide::guide_step(store, &review, &plan, index, context, llm.as_ref())
                             .map_err(anyhow::Error::from)
@@ -984,8 +987,7 @@ fn add_task(
     app: &App,
     review: &SessionReview,
     plan: &[FlowStep],
-    triage: &[huella_engine::triage::StepTriage],
-    declared: &BTreeMap<usize, Vec<huella_engine::declared::DeclaredView>>,
+    story: Option<&huella_engine::storyline::Storyline>,
     value: &mut Value,
 ) -> Result<()> {
     let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) else {
@@ -1003,7 +1005,25 @@ fn add_task(
             step["repo"] = json!(repo_of(repos, &review.files[flow.file].path).map(|repo| &repo.repo));
         }
     }
-    // El guion: el que contó el agente; si no, el del modelo revisor; si no, el automático.
+    value["storyline"] = serde_json::to_value(story)?;
+    value["storylining"] =
+        json!(app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
+    Ok(())
+}
+
+/// El guion de una tarea: el que contó el agente; si no, el del modelo revisor; si
+/// no, el automático. `None` si la revisión es de una sesión.
+fn task_story(
+    app: &App,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    triage: &[huella_engine::triage::StepTriage],
+    declared: &BTreeMap<usize, Vec<huella_engine::declared::DeclaredView>>,
+) -> Result<Option<huella_engine::storyline::Storyline>> {
+    let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) else {
+        return Ok(None);
+    };
+    let task = app.store.task(key)?;
     let refs: Vec<huella_engine::storyline::RepoRef> =
         repos.iter().map(|repo| huella_engine::storyline::RepoRef::new(&repo.repo)).collect();
     let with_branch: Vec<(huella_engine::storyline::RepoRef, String)> =
@@ -1022,10 +1042,25 @@ fn add_task(
             None => huella_engine::storyline::fallback(review, plan, &refs),
         },
     };
-    value["storyline"] = serde_json::to_value(story)?;
-    value["storylining"] =
-        json!(app.storylining.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
-    Ok(())
+    Ok(Some(story))
+}
+
+/// Lo que sabe el guion de la tarea para responder una pregunta: el paso en su
+/// capítulo o, sin paso, el cambio entero. `None` si no es una tarea.
+fn ask_background(app: &App, review: &SessionReview, plan: &[FlowStep], step: Option<usize>) -> Result<Option<String>> {
+    if !review.session_id.starts_with("task:") {
+        return Ok(None);
+    }
+    let project = review_project(app, &review.session_id)?;
+    let points = huella_review::attention::attention(review, plan);
+    let Assessment { triage, .. } = assess(&app.store, review, plan, &points, &app.activity, project.as_deref())?;
+    let declared = huella_engine::declared::for_steps(&app.store, review, plan)?;
+    let Some(story) = task_story(app, review, plan, &triage, &declared)? else { return Ok(None) };
+    let place = step.and_then(|step| huella_engine::guide::story_of(&story, step));
+    Ok(Some(place.map_or_else(
+        || huella_engine::guide::render_overview(&story),
+        |place| huella_engine::guide::render_story(review, plan, &place),
+    )))
 }
 
 /// Guion de la tarea: lo escribe un hilo con el modelo configurado; la revisión
@@ -1260,6 +1295,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let session_id = review.session_id.clone();
+    let background = ask_background(app, &review, &plan, step)?;
     let pending = PendingAsk { question: question.clone(), step, error: None };
     app.asking.lock().unwrap_or_else(PoisonError::into_inner).entry(session_id.clone()).or_default().push(pending);
     let (asking, db, model) = (Arc::clone(&app.asking), app.db.clone(), app.model.clone());
@@ -1267,7 +1303,15 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
             let extractor = crate::build_model(&model)?;
-            huella_engine::review_loop::ask(&store, extractor.as_ref(), &review, &plan, step, &question)?;
+            huella_engine::review_loop::ask(
+                &store,
+                extractor.as_ref(),
+                &review,
+                &plan,
+                step,
+                &question,
+                background.as_deref(),
+            )?;
             Ok(())
         })();
         let mut all = asking.lock().unwrap_or_else(PoisonError::into_inner);

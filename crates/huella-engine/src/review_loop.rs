@@ -220,8 +220,10 @@ pub fn ask(
     plan: &[FlowStep],
     step: Option<usize>,
     question: &str,
+    background: Option<&str>,
 ) -> crate::Result<Answer> {
-    let context = ask_context(store, review, plan, step)?;
+    let mut context = background.map_or_else(String::new, |text| format!("## El cambio\n\n{text}\n"));
+    context.push_str(&ask_context(store, review, plan, step)?);
     let request = huella_core::redact::redact(&format!("{context}\n## Pregunta\n\n{}", question.trim())).into_owned();
     let schema = json!({
         "type": "object",
@@ -473,7 +475,7 @@ mod tests {
         let (index, _) = step_named(&plan, "redeem");
         let model = Fake { requests: RefCell::new(Vec::new()) };
         let question = "¿Por qué sale sin error? Mi clave es API_KEY=a8f3k2j9d0s7q1w4e6r5";
-        let answer = ask(&store, &model, &review, &plan, Some(index), question).unwrap();
+        let answer = ask(&store, &model, &review, &plan, Some(index), question, None).unwrap();
         assert_eq!(answer.model, "fake:1");
         let request = model.requests.borrow()[0].clone();
         assert!(request.contains("«añade el canje»"), "la petición: {request}");
@@ -485,7 +487,7 @@ mod tests {
         assert_eq!(stored[0].step_key.as_deref(), Some(plan[index].key(&review).as_str()));
 
         // La siguiente pregunta ve la anterior.
-        ask(&store, &model, &review, &plan, None, "¿Qué falta por probar?").unwrap();
+        ask(&store, &model, &review, &plan, None, "¿Qué falta por probar?", None).unwrap();
         assert!(model.requests.borrow()[1].contains("## Preguntas anteriores"));
     }
 

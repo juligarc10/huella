@@ -36,9 +36,17 @@ pasos numerados, usa `step`.
   cualquiera de sus repositorios, aunque el agente trabajara en un worktree, y
   junta los de varias sesiones o micros.
 - Si el código cambia después, el guion se marca como desfasado.
-- Todo el código del cambio sale en algún capítulo: lo que el agente no contó va a
-  **«No lo contó el agente»**, bien visible. Dos capítulos sobre la misma función
-  se juntan sin perder lo que cuenta cada uno.
+- Todo el código del cambio sale en algún capítulo:
+  - Un ancla a una clase cubre sus métodos, y valen nombres como `Clase#metodo(int)`.
+  - Lo que el guion no nombra de un fichero que sí menciona (imports, campos, un
+    símbolo mal escrito) va con el capítulo que lo menciona.
+  - Los ficheros que no menciona van a **«No lo contó el agente»**, bien visible,
+    salvo los que produce una herramienta (`dist`, lockfiles, minificados y
+    snapshots), que van a «Ficheros generados».
+  - Dos capítulos sobre la misma función se juntan sin perder lo que cuenta cada uno.
+- La guía de cada paso y las preguntas reciben el guion (el capítulo, el paso
+  anterior y el siguiente, qué mirar), para que la explicación se lea seguida. Si
+  el guion cambia, las guías quedan desfasadas.
 - El orden de preferencia es: el guion del agente, el del modelo revisor y, sin
   ninguno, un capítulo por repositorio.
 
