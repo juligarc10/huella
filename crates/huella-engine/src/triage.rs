@@ -302,6 +302,10 @@ pub fn triage(
                 });
             }
             findings.sort_by_key(|finding| std::cmp::Reverse(policy.levels[&finding.tag]));
+            // Lo que produce una herramienta no se lee: lo que contenga no sube su nivel.
+            if clearly_generated(&review.files[step.file].path) {
+                findings.retain(|finding| finding.tag == Tag::Generated);
+            }
             StepTriage { level: policy.level_of(&findings), findings }
         })
         .collect()
@@ -391,6 +395,20 @@ const LOCKFILES: [&str; 8] = [
 const CONFIG_NAMES: [&str; 5] = ["dockerfile", "docker-compose.yml", "docker-compose.yaml", "makefile", ".gitignore"];
 const CONFIG_EXTENSIONS: [&str; 6] = ["yml", "yaml", "toml", "ini", "conf", "env"];
 const DOC_EXTENSIONS: [&str; 4] = ["md", "mdx", "rst", "txt"];
+
+/// ¿Es seguro que lo produce una herramienta? Lockfiles, minificados, snapshots y
+/// `dist` fuera de `src`. Es más estricto que la etiqueta «generado»: un paquete
+/// de Java puede llamarse `build` o `generated`, y una línea puede decir «do not edit».
+#[must_use]
+pub fn clearly_generated(path: &str) -> bool {
+    let path = path.to_lowercase();
+    let dirs: Vec<&str> = path.split('/').collect();
+    let name = dirs.last().copied().unwrap_or_default();
+    LOCKFILES.contains(&name)
+        || name.contains(".min.")
+        || dirs.contains(&"__snapshots__")
+        || (dirs.contains(&"dist") && !dirs.contains(&"src"))
+}
 
 /// Las etiquetas que se ven en el propio paso: su fichero, su papel y sus líneas.
 fn findings(review: &SessionReview, step: &FlowStep) -> Vec<Finding> {
@@ -559,6 +577,20 @@ mod tests {
 
         let (review, plan) = plan_of("/r/src/math.ts", None, "function twice(n: number) {\n  return n * 2;\n}\n");
         assert_eq!(tags(&review, &plan, &Policy::default()), vec![(Level::Acknowledge, vec![])]);
+    }
+
+    #[test]
+    fn what_a_tool_produces_does_not_climb_by_what_it_contains() {
+        let code = "const credential = token;\n";
+        let (review, plan) = plan_of("/w/ui/dist/assets/index-a1b2.js", None, code);
+        let found = tags(&review, &plan, &Policy::default());
+        assert!(found.iter().all(|(level, tags)| *level == Level::Skip && tags == &[Tag::Generated]), "{found:?}");
+
+        // Un paquete de Java que se llama `build` es código de verdad: sigue subiendo.
+        let (review, plan) = plan_of("/w/src/main/java/com/acme/build/Auth.java", None, code);
+        assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level == Level::Must));
+        let (review, plan) = plan_of("/w/src/dist/auth.ts", None, code);
+        assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level == Level::Must));
     }
 
     #[test]
