@@ -10,7 +10,7 @@ import {
   MessageSquarePlus,
   Sparkles,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
@@ -25,7 +25,7 @@ import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { DeclaredPanel } from '@/components/review/declared'
 import { GuidePanel } from '@/components/review/guide'
 import { Presentation } from '@/components/review/presentation'
-import { verdictDot, verdicts } from '@/components/review/verdicts'
+import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -34,7 +34,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { LineRange, ReviewResult, ReviewStep, Verdict } from '@/lib/api'
 import { baseName, cleanPrompt, clip, dateTime, reviewStatusLabel, shortId } from '@/lib/format'
 import { useOpenInEditor, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
-import { cn } from '@/lib/utils'
+import { cn, releaseFocus } from '@/lib/utils'
 
 const isUnexplained = (step: ReviewStep) => step.lines.some((line) => line.kind === 'added' && line.external)
 
@@ -171,9 +171,31 @@ export function Review({
     const target = position < 0 ? sequence[0] : sequence[position + direction]
     if (target) go(target.index)
   }
-  const decide = (target: ReviewStep, verdict: Verdict) => {
+  // Veredictos dados en esta visita, del más antiguo al último: lo que puede deshacer `u`.
+  const given = useRef<string[]>([])
+  const giveVerdict = (target: ReviewStep, verdict: Verdict) => {
     const next = target.verdict === verdict ? null : verdict
     setVerdict.mutate({ key: target.key, hash: target.hash, verdict: next })
+    given.current = given.current.filter((key) => key !== target.key)
+    if (next) given.current.push(target.key)
+    return next
+  }
+  /** Quita el último veredicto dado (o, si no hay, el del paso actual) y dice de qué paso era. */
+  const undoVerdict = () => {
+    while (given.current.length > 0) {
+      const target = steps.find((s) => s.key === given.current.at(-1))
+      given.current.pop()
+      if (target) {
+        setVerdict.mutate({ key: target.key, hash: target.hash, verdict: null })
+        return target.index
+      }
+    }
+    if (!step?.verdict) return null
+    setVerdict.mutate({ key: step.key, hash: step.hash, verdict: null })
+    return step.index
+  }
+  const decide = (target: ReviewStep, verdict: Verdict) => {
+    const next = giveVerdict(target, verdict)
     if (next === 'ok') {
       const from = sequence.findIndex((s) => s.index === target.index)
       const after = sequence.find((s, at) => at > from && !s.verdict)
@@ -184,7 +206,7 @@ export function Review({
     }
   }
 
-  // j / k para moverse; r, c y d para el veredicto, como en la revisión de código.
+  // j / k para moverse; r, c y d para el veredicto, como en la revisión de código; u lo quita.
   // En la presentación manda la suya (← y →).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -195,7 +217,10 @@ export function Review({
       if (event.key === 'j') move(1)
       else if (event.key === 'k') move(-1)
       else if (verdict && step) decide(step, verdict.value)
-      else return
+      else if (event.key === undoKey) {
+        const back = undoVerdict()
+        if (back !== null) go(back)
+      } else return
       event.preventDefault()
     }
     window.addEventListener('keydown', onKey)
@@ -241,7 +266,11 @@ export function Review({
               <ToggleGroup
                 type="single"
                 value={mode}
-                onValueChange={(value) => value && chooseMode(value as Mode)}
+                onValueChange={(value) => {
+                  if (!value) return
+                  chooseMode(value as Mode)
+                  releaseFocus()
+                }}
                 variant="outline"
                 aria-label="Cómo revisar la tarea"
               >
@@ -324,7 +353,10 @@ export function Review({
           session={session}
           current={current}
           onCurrent={go}
-          onDecide={(target, verdict) => setVerdict.mutate({ key: target.key, hash: target.hash, verdict: target.verdict === verdict ? null : verdict })}
+          filter={filter}
+          onFilter={setFilter}
+          onDecide={giveVerdict}
+          onUndo={undoVerdict}
           onDetail={() => chooseMode('steps')}
         />
       ) : (
@@ -484,7 +516,7 @@ export function Review({
             )}
 
             <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto del paso">
-              {verdicts.map(({ value, label, icon: Icon, active }) => (
+              {verdicts.map(({ value, label, icon: Icon, active, key }) => (
                 <Button
                   key={value}
                   size="lg"
@@ -493,7 +525,7 @@ export function Review({
                   aria-pressed={step.verdict === value}
                   onClick={() => decide(step, value)}
                 >
-                  <Icon aria-hidden="true" /> {label}
+                  <Icon aria-hidden="true" /> {label} <kbd className="font-mono text-xs opacity-60">{key}</kbd>
                 </Button>
               ))}
               <Button variant="ghost" size="lg" className="min-h-11" onClick={() => setComposing(composing === -1 ? null : -1)}>
@@ -517,6 +549,7 @@ export function Review({
             </div>
             <p className="-mt-2 text-xs text-muted-foreground">
               Selecciona líneas del diff (clic, y mayúsculas+clic para un rango) para preguntar sobre ellas o comentarlas.
+              {' '}<kbd className="font-mono">{undoKey}</kbd> quita el último veredicto.
               {step.symbol && (
                 <>
                   {' '}
@@ -533,7 +566,7 @@ export function Review({
 
             <EvidencePanel evidence={step.evidence} path={step.path} />
             <ImpactPanel session={session} step={step} />
-            <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} />
+            <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} task={Boolean(review.task)} />
             <p className="text-xs text-muted-foreground">Empezó {dateTime(review.turns[0]?.started_at)}</p>
           </article>
         </div>

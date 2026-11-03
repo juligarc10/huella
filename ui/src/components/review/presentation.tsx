@@ -12,14 +12,15 @@ import {
   RotateCcw,
   Sparkles,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { Mono, Panel } from '@/components/bits'
+import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
 import { StepDiff } from '@/components/review/diff'
 import { GuidePanel } from '@/components/review/guide'
-import { LevelMark, TriageChips } from '@/components/review/triage'
-import { verdictDot, verdicts } from '@/components/review/verdicts'
+import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
+import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
 import { baseName, dateTime } from '@/lib/format'
@@ -38,17 +39,21 @@ const statusView = {
   missing: { icon: CircleX, label: 'Sin hacer', tone: 'text-destructive' },
 } as const
 
-/** Portada, cada capítulo con sus pasos y el cierre, en orden. */
-function slidesOf(story: Storyline): Slide[] {
+/** Portada, cada capítulo con sus pasos visibles y el cierre, en orden. Un capítulo sin pasos visibles no sale. */
+function slidesOf(story: Storyline, visible: (step: number) => boolean): Slide[] {
   return [
     { kind: 'cover' },
-    ...story.chapters.flatMap((chapter, index): Slide[] => [
-      { kind: 'chapter', chapter: index },
-      ...chapter.steps.map((step): Slide => ({ kind: 'step', chapter: index, step })),
-    ]),
+    ...story.chapters.flatMap((chapter, index): Slide[] => {
+      const steps = chapter.steps.filter(visible)
+      if (steps.length === 0) return []
+      return [{ kind: 'chapter', chapter: index }, ...steps.map((step): Slide => ({ kind: 'step', chapter: index, step }))]
+    }),
     { kind: 'closing' },
   ]
 }
+
+const sameSlide = (a: Slide, b: Slide) =>
+  a.kind === b.kind && (a.kind !== 'step' || a.step === (b as typeof a).step) && (a.kind !== 'chapter' || a.chapter === (b as typeof a).chapter)
 
 /**
  * La revisión de una tarea como una presentación: qué pide y qué se hizo, y
@@ -59,35 +64,70 @@ export function Presentation({
   review,
   session,
   current,
+  filter,
+  onFilter,
   onCurrent,
   onDecide,
+  onUndo,
   onDetail,
 }: {
   review: ReviewResult
   session: string
   current: number
+  /** Qué pasos se presentan. */
+  filter: TriageFilter
+  onFilter: (filter: TriageFilter) => void
   onCurrent: (index: number) => void
-  onDecide: (step: ReviewStep, verdict: Verdict) => void
+  /** Da el veredicto (o lo quita si ya era ese) y devuelve cómo queda. */
+  onDecide: (step: ReviewStep, verdict: Verdict) => Verdict | null
+  /** Quita el último veredicto y dice de qué paso era. */
+  onUndo: () => number | null
   onDetail: () => void
 }) {
   const story = review.storyline
-  const slides = useMemo(() => (story ? slidesOf(story) : []), [story])
+  const everySlide = useMemo(() => (story ? slidesOf(story, () => true) : []), [story])
+  const slides = useMemo(() => {
+    if (!story) return []
+    const shown = shownBy(filter)
+    return slidesOf(story, (step) => Boolean(review.steps[step]) && shown(review.steps[step]))
+  }, [story, review.steps, filter])
   // Se empieza en la portada, salvo que se venga de un paso (desde la vista por pasos).
-  const [position, setPosition] = useState(() => {
-    const at = slides.findIndex((slide) => slide.kind === 'step' && slide.step === current)
-    return current > 0 && at >= 0 ? at : 0
+  const [place, setPlace] = useState<Slide>(() => {
+    const from = slides.find((slide) => slide.kind === 'step' && slide.step === current)
+    return current > 0 && from ? from : { kind: 'cover' }
   })
-  const slide = slides[Math.min(position, slides.length - 1)]
+  // Si el filtro esconde la diapositiva actual, se sigue en la siguiente que quede.
+  const position = useMemo(() => {
+    const at = slides.findIndex((slide) => sameSlide(slide, place))
+    if (at >= 0) return at
+    const after = everySlide.slice(everySlide.findIndex((slide) => sameSlide(slide, place)) + 1)
+    const next = after.find((slide) => slides.some((shown) => sameSlide(shown, slide)))
+    return next ? slides.findIndex((slide) => sameSlide(slide, next)) : 0
+  }, [slides, everySlide, place])
+  const slide = slides[position]
 
   const go = (to: number) => {
-    const next = Math.min(Math.max(to, 0), slides.length - 1)
-    setPosition(next)
-    const target = slides[next]
-    if (target?.kind === 'step') onCurrent(target.step)
+    const target = slides[Math.min(Math.max(to, 0), slides.length - 1)]
+    if (!target) return
+    setPlace(target)
+    if (target.kind === 'step') onCurrent(target.step)
   }
-  const goToStep = (step: number) => go(slides.findIndex((s) => s.kind === 'step' && s.step === step))
+  const goToStep = (step: number) => {
+    const at = slides.findIndex((s) => s.kind === 'step' && s.step === step)
+    if (at >= 0) return go(at)
+    // Un enlace a un paso que el filtro esconde: se quita el filtro para poder verlo.
+    const target = everySlide.find((s) => s.kind === 'step' && s.step === step)
+    if (!target) return
+    onFilter('all')
+    setPlace(target)
+    onCurrent(step)
+  }
+  // «Bien» avanza a la siguiente diapositiva; `u` lo deshace y vuelve.
+  const decide = (step: ReviewStep, verdict: Verdict) => {
+    if (onDecide(step, verdict) === 'ok') go(position + 1)
+  }
 
-  // ← y → para avanzar; r, c y d dan el veredicto en una diapositiva de paso.
+  // ← y → para avanzar; r, c y d dan el veredicto en una diapositiva de paso; u lo quita.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
@@ -95,8 +135,11 @@ export function Presentation({
       const verdict = verdicts.find((v) => v.key === event.key)
       if (event.key === 'ArrowRight') go(position + 1)
       else if (event.key === 'ArrowLeft') go(position - 1)
-      else if (verdict && slide?.kind === 'step') onDecide(review.steps[slide.step], verdict.value)
-      else return
+      else if (verdict && slide?.kind === 'step') decide(review.steps[slide.step], verdict.value)
+      else if (event.key === undoKey) {
+        const back = onUndo()
+        if (back !== null) goToStep(back)
+      } else return
       event.preventDefault()
     }
     window.addEventListener('keydown', onKey)
@@ -105,14 +148,42 @@ export function Presentation({
 
   if (!story || !slide) return null
   const chapterOf = (s: Slide) => (s.kind === 'chapter' || s.kind === 'step' ? s.chapter : null)
+  const firstChapter = slides.find((s) => s.kind === 'chapter')
+  const ask = (step?: ReviewStep) => (
+    <AskPanel
+      session={session}
+      step={step}
+      questions={review.questions}
+      asking={review.asking}
+      model={review.ask_model}
+      problem={review.ask_problem}
+      task
+    />
+  )
 
   return (
     <div className="flex flex-col gap-4">
-      <ChapterStrip story={story} steps={review.steps} active={chapterOf(slide)} slide={slide} onJump={(chapter) =>
-        go(slides.findIndex((s) => s.kind === 'chapter' && s.chapter === chapter))
-      } onCover={() => go(0)} onClosing={() => go(slides.length - 1)} />
+      <ChapterStrip
+        story={story}
+        steps={review.steps}
+        active={chapterOf(slide)}
+        slide={slide}
+        visible={(chapter) => slides.some((s) => s.kind === 'chapter' && s.chapter === chapter)}
+        onJump={(chapter) => go(slides.findIndex((s) => s.kind === 'chapter' && s.chapter === chapter))}
+        onCover={() => go(0)}
+        onClosing={() => go(slides.length - 1)}
+      />
 
-      {slide.kind === 'cover' && <Cover review={review} session={session} story={story} onStep={goToStep} onStart={() => go(1)} />}
+      {slide.kind === 'cover' && (
+        <Cover
+          review={review}
+          session={session}
+          story={story}
+          first={firstChapter?.kind === 'chapter' ? story.chapters[firstChapter.chapter].title : null}
+          onStep={goToStep}
+          onStart={() => go(1)}
+        />
+      )}
       {slide.kind === 'chapter' && <ChapterSlide review={review} story={story} chapter={slide.chapter} onStep={goToStep} />}
       {slide.kind === 'step' && (
         <StepSlide
@@ -122,18 +193,22 @@ export function Presentation({
           story={story}
           chapter={slide.chapter}
           step={review.steps[slide.step]}
-          onDecide={onDecide}
+          siblings={slides.flatMap((s) => (s.kind === 'step' && s.chapter === slide.chapter ? [s.step] : []))}
+          ask={ask(review.steps[slide.step])}
+          onDecide={decide}
           onDetail={onDetail}
         />
       )}
       {slide.kind === 'closing' && <Closing review={review} story={story} onStep={goToStep} />}
+      {slide.kind !== 'step' && ask()}
 
       <nav className="flex items-center gap-2" aria-label="Diapositivas">
         <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(position - 1)} disabled={position === 0}>
           <ArrowLeft aria-hidden="true" /> Anterior
         </Button>
         <span className="flex-1 text-center text-[13px] text-muted-foreground">
-          {position + 1} de {slides.length} · <kbd className="font-mono">←</kbd>/<kbd className="font-mono">→</kbd> para avanzar
+          {position + 1} de {slides.length} · <kbd className="font-mono">←</kbd>/<kbd className="font-mono">→</kbd> para avanzar ·{' '}
+          <kbd className="font-mono">{undoKey}</kbd> quita el último veredicto
         </span>
         <Button size="lg" className="min-h-11" onClick={() => go(position + 1)} disabled={position === slides.length - 1}>
           Siguiente <ArrowRight aria-hidden="true" />
@@ -149,6 +224,7 @@ function ChapterStrip({
   steps,
   active,
   slide,
+  visible,
   onJump,
   onCover,
   onClosing,
@@ -157,6 +233,8 @@ function ChapterStrip({
   steps: ReviewStep[]
   active: number | null
   slide: Slide
+  /** ¿Le queda algún paso con el filtro actual? */
+  visible: (chapter: number) => boolean
   onJump: (chapter: number) => void
   onCover: () => void
   onClosing: () => void
@@ -179,9 +257,12 @@ function ChapterStrip({
             <button
               type="button"
               onClick={() => onJump(index)}
+              disabled={!visible(index)}
+              title={visible(index) ? undefined : 'Sin pasos con este filtro'}
               aria-current={active === index}
               className={cn(
                 pill,
+                !visible(index) && 'cursor-not-allowed opacity-50 hover:border-border',
                 chapter.unnarrated && 'border-warn/60 text-warn',
                 active === index && 'border-brand bg-brand-soft',
                 done === chapter.steps.length && 'text-muted-foreground',
@@ -231,12 +312,15 @@ function Cover({
   review,
   session,
   story,
+  first,
   onStep,
   onStart,
 }: {
   review: ReviewResult
   session: string
   story: Storyline
+  /** El primer capítulo que se va a ver; `null` si el filtro los esconde todos. */
+  first: string | null
   onStep: (index: number) => void
   onStart: () => void
 }) {
@@ -380,7 +464,7 @@ function Cover({
       )}
 
       <Button size="lg" className="min-h-11 self-start" onClick={onStart}>
-        Empezar por «{story.chapters[0]?.title}» <ArrowRight aria-hidden="true" />
+        {first ? `Empezar por «${first}»` : 'Ir al cierre'} <ArrowRight aria-hidden="true" />
       </Button>
     </div>
   )
@@ -452,6 +536,8 @@ function StepSlide({
   story,
   chapter,
   step,
+  siblings,
+  ask,
   onDecide,
   onDetail,
 }: {
@@ -460,20 +546,22 @@ function StepSlide({
   story: Storyline
   chapter: number
   step: ReviewStep
+  /** Los pasos del capítulo que se presentan con el filtro actual. */
+  siblings: number[]
+  ask: ReactNode
   onDecide: (step: ReviewStep, verdict: Verdict) => void
   onDetail: () => void
 }) {
   const [focus, setFocus] = useState<LineRange | null>(null)
   const [composing, setComposing] = useState<number | null>(null)
   const anchored = step.guide && !step.guide.stale ? step.guide : null
-  const position = story.chapters[chapter].steps.indexOf(step.index)
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-start gap-5">
         <div className="flex min-w-0 flex-[1_1_340px] flex-col gap-4">
           <Panel className="flex flex-col gap-2">
             <p className="text-[13px] text-muted-foreground">
-              {story.chapters[chapter].title} · paso {position + 1} de {story.chapters[chapter].steps.length}
+              {story.chapters[chapter].title} · paso {siblings.indexOf(step.index) + 1} de {siblings.length}
             </p>
             <h2 className="font-mono text-xl font-medium">{stepName(step)}</h2>
             <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
@@ -481,6 +569,7 @@ function StepSlide({
           </Panel>
           <DeclaredPanel entries={step.declared} />
           <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
+          {ask}
         </div>
         <div className="min-w-0 flex-[1.4_1_480px]">
           <StepDiff
@@ -497,7 +586,7 @@ function StepSlide({
         </div>
       </div>
       <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto del paso">
-        {verdicts.map(({ value, label, icon: Icon, active }) => (
+        {verdicts.map(({ value, label, icon: Icon, active, key }) => (
           <Button
             key={value}
             size="lg"
@@ -506,7 +595,7 @@ function StepSlide({
             aria-pressed={step.verdict === value}
             onClick={() => onDecide(step, value)}
           >
-            <Icon aria-hidden="true" /> {label}
+            <Icon aria-hidden="true" /> {label} <kbd className="font-mono text-xs opacity-60">{key}</kbd>
           </Button>
         ))}
         <Button variant="ghost" size="lg" className="ml-auto min-h-11" onClick={onDetail}>
