@@ -3,7 +3,7 @@ import { ShieldAlert } from 'lucide-react'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { Comprehension, ReviewPolicy, ReviewStep, StepTriage, TriageLevel, TriageTag } from '@/lib/api'
 import { baseName } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { cn, releaseFocus } from '@/lib/utils'
 
 const tagLabel: Record<TriageTag, string> = {
   security: 'seguridad',
@@ -93,7 +93,11 @@ export function ComprehensionBar({
       <ToggleGroup
         type="single"
         value={filter}
-        onValueChange={(value) => value && onFilter(value as TriageFilter)}
+        onValueChange={(value) => {
+          if (!value) return
+          onFilter(value as TriageFilter)
+          releaseFocus()
+        }}
         variant="outline"
         size="sm"
         aria-label="Qué pasos mostrar"

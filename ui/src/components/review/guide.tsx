@@ -53,7 +53,7 @@ export function GuidePanel({
     return (
       <Panel className="flex flex-wrap items-center gap-3">
         <Compass className="size-4 text-brand" aria-hidden="true" />
-        <p className="min-w-0 flex-1 text-sm">¿Qué hace este código, por dónde leerlo y qué comprobar?</p>
+        <p className="min-w-0 flex-[1_1_16rem] text-sm">¿Qué hace este código, por dónde leerlo y qué comprobar?</p>
         <Button
           size="sm"
           variant="outline"

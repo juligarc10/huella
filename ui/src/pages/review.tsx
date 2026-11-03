@@ -34,7 +34,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { LineRange, ReviewResult, ReviewStep, Verdict } from '@/lib/api'
 import { baseName, cleanPrompt, clip, dateTime, reviewStatusLabel, shortId } from '@/lib/format'
 import { useOpenInEditor, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
-import { cn } from '@/lib/utils'
+import { cn, releaseFocus } from '@/lib/utils'
 
 const isUnexplained = (step: ReviewStep) => step.lines.some((line) => line.kind === 'added' && line.external)
 
@@ -266,7 +266,11 @@ export function Review({
               <ToggleGroup
                 type="single"
                 value={mode}
-                onValueChange={(value) => value && chooseMode(value as Mode)}
+                onValueChange={(value) => {
+                  if (!value) return
+                  chooseMode(value as Mode)
+                  releaseFocus()
+                }}
                 variant="outline"
                 aria-label="Cómo revisar la tarea"
               >

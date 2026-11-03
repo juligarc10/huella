@@ -193,6 +193,7 @@ export function Presentation({
           story={story}
           chapter={slide.chapter}
           step={review.steps[slide.step]}
+          siblings={slides.flatMap((s) => (s.kind === 'step' && s.chapter === slide.chapter ? [s.step] : []))}
           ask={ask(review.steps[slide.step])}
           onDecide={decide}
           onDetail={onDetail}
@@ -535,6 +536,7 @@ function StepSlide({
   story,
   chapter,
   step,
+  siblings,
   ask,
   onDecide,
   onDetail,
@@ -544,6 +546,8 @@ function StepSlide({
   story: Storyline
   chapter: number
   step: ReviewStep
+  /** Los pasos del capítulo que se presentan con el filtro actual. */
+  siblings: number[]
   ask: ReactNode
   onDecide: (step: ReviewStep, verdict: Verdict) => void
   onDetail: () => void
@@ -551,14 +555,13 @@ function StepSlide({
   const [focus, setFocus] = useState<LineRange | null>(null)
   const [composing, setComposing] = useState<number | null>(null)
   const anchored = step.guide && !step.guide.stale ? step.guide : null
-  const position = story.chapters[chapter].steps.indexOf(step.index)
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-start gap-5">
         <div className="flex min-w-0 flex-[1_1_340px] flex-col gap-4">
           <Panel className="flex flex-col gap-2">
             <p className="text-[13px] text-muted-foreground">
-              {story.chapters[chapter].title} · paso {position + 1} de {story.chapters[chapter].steps.length}
+              {story.chapters[chapter].title} · paso {siblings.indexOf(step.index) + 1} de {siblings.length}
             </p>
             <h2 className="font-mono text-xl font-medium">{stepName(step)}</h2>
             <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
