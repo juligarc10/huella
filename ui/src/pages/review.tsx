@@ -172,30 +172,30 @@ export function Review({
     if (target) go(target.index)
   }
   // Veredictos dados en esta visita, del más antiguo al último: lo que puede deshacer `u`.
-  const given = useRef<string[]>([])
-  const giveVerdict = (target: ReviewStep, verdict: Verdict) => {
-    const next = target.verdict === verdict ? null : verdict
-    setVerdict.mutate({ key: target.key, hash: target.hash, verdict: next })
-    given.current = given.current.filter((key) => key !== target.key)
-    if (next) given.current.push(target.key)
+  // Una idea da el veredicto a todos sus pasos de una vez, y se deshace igual.
+  const given = useRef<string[][]>([])
+  const giveVerdicts = (targets: ReviewStep[], verdict: Verdict) => {
+    const next = targets.every((target) => target.verdict === verdict) ? null : verdict
+    const keys = targets.map((target) => target.key)
+    for (const target of targets) setVerdict.mutate({ key: target.key, hash: target.hash, verdict: next })
+    given.current = given.current.map((group) => group.filter((key) => !keys.includes(key))).filter((group) => group.length > 0)
+    if (next) given.current.push(keys)
     return next
   }
   /** Quita el último veredicto dado (o, si no hay, el del paso actual) y dice de qué paso era. */
   const undoVerdict = () => {
     while (given.current.length > 0) {
-      const target = steps.find((s) => s.key === given.current.at(-1))
-      given.current.pop()
-      if (target) {
-        setVerdict.mutate({ key: target.key, hash: target.hash, verdict: null })
-        return target.index
-      }
+      const keys = given.current.pop() ?? []
+      const targets = steps.filter((s) => keys.includes(s.key))
+      for (const target of targets) setVerdict.mutate({ key: target.key, hash: target.hash, verdict: null })
+      if (targets.length > 0) return targets[0].index
     }
     if (!step?.verdict) return null
     setVerdict.mutate({ key: step.key, hash: step.hash, verdict: null })
     return step.index
   }
   const decide = (target: ReviewStep, verdict: Verdict) => {
-    const next = giveVerdict(target, verdict)
+    const next = giveVerdicts([target], verdict)
     if (next === 'ok') {
       const from = sequence.findIndex((s) => s.index === target.index)
       const after = sequence.find((s, at) => at > from && !s.verdict)
@@ -359,7 +359,7 @@ export function Review({
           onFilter={setFilter}
           status={<ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} compact />}
           overview={review.task && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
-          onDecide={giveVerdict}
+          onDecide={giveVerdicts}
           onUndo={undoVerdict}
           onDetail={() => chooseMode('steps')}
         />

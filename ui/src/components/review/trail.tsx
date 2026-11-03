@@ -8,6 +8,7 @@ import { cn, releaseFocus } from '@/lib/utils'
 export type Slide =
   | { kind: 'cover' }
   | { kind: 'chapter'; chapter: number }
+  | { kind: 'idea'; chapter: number; idea: number; steps: number[] }
   | { kind: 'step'; chapter: number; step: number }
   | { kind: 'closing' }
 
@@ -82,7 +83,7 @@ export function Trail({
   slide: Slide
   /** ¿El filtro actual deja ver este paso? */
   visible: (step: number) => boolean
-  /** Lo que se dice junto al capítulo actual («paso 2 de 8»). */
+  /** Lo que se dice junto al capítulo actual («parte 2 de 8»). */
   position: string | null
   /** Contadores y filtro. */
   status: ReactNode
@@ -91,7 +92,7 @@ export function Trail({
   onChapter: (chapter: number) => void
   onStep: (step: number) => void
 }) {
-  const active = slide.kind === 'chapter' || slide.kind === 'step' ? slide.chapter : null
+  const active = slide.kind === 'chapter' || slide.kind === 'step' || slide.kind === 'idea' ? slide.chapter : null
   const cap = 'rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:border-foreground/40'
   const selected = active !== null ? `c${active}` : slide.kind
   const choose = (value: string) => {
@@ -127,7 +128,7 @@ export function Trail({
                   step={found}
                   odd={walked % 2 === 1}
                   shown={visible(step)}
-                  current={slide.kind === 'step' && slide.step === step}
+                  current={(slide.kind === 'step' && slide.step === step) || (slide.kind === 'idea' && slide.steps.includes(step))}
                   onClick={() => onStep(step)}
                 />
               )

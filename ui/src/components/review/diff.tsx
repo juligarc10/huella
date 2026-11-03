@@ -33,6 +33,7 @@ export function StepDiff({
   onCompose,
   stops = [],
   focus = null,
+  peekHint = true,
 }: {
   step: ReviewStep
   comments: ReviewComment[]
@@ -47,6 +48,8 @@ export function StepDiff({
   stops?: LineRange[]
   /** Líneas que la guía está señalando. */
   focus?: LineRange | null
+  /** Recuerda que ⌘+clic abre definiciones: basta una vez por diapositiva. */
+  peekHint?: boolean
 }) {
   const add = useAddComment(session)
   const ask = useAskCode(step.path)
@@ -229,9 +232,11 @@ export function StepDiff({
           ))}
         </div>
       </div>
-      <p className="border-t px-4 py-1.5 text-xs text-muted-foreground">
-        <kbd className="font-mono">{navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl'}</kbd>+clic en un nombre para ver su definición
-      </p>
+      {peekHint && (
+        <p className="border-t px-4 py-1.5 text-xs text-muted-foreground">
+          <kbd className="font-mono">{navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl'}</kbd>+clic en un nombre para ver su definición
+        </p>
+      )}
       {(loose.length > 0 || composing === -1 || thinking.some((t) => t.index < 0)) && (
         <div className="flex flex-col gap-2 border-t px-4 py-3">
           {loose.map((comment) => (

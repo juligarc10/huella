@@ -294,7 +294,7 @@ export interface Declared {
   recorded_at: string
   path: string
   symbol: string | null
-  kind: 'decision' | 'assumption' | 'unverified' | 'risk'
+  kind: 'decision' | 'assumption' | 'unverified' | 'risk' | 'explanation' | 'concept'
   summary: string
   how: string | null
   alternatives: { option: string; why_not: string }[]
@@ -605,6 +605,8 @@ export interface StoryChapter {
   look_at: string[]
   /** Lo que quien revisa debería saber responder al acabar el capítulo. */
   questions: string[]
+  /** Cada idea es una diapositiva con todo su código; los pasos fuera de ellas salen sueltos. */
+  ideas: { title: string; explanation: string; look_at: string[]; steps: number[] }[]
   /** Código que el guion del agente no menciona. */
   unnarrated: boolean
 }
@@ -618,6 +620,13 @@ export interface Storyline {
   /** Cuándo lo contó el agente. */
   recorded_at: string | null
   summary: string
+  /** Cómo se comportaba el sistema antes y cómo ahora. */
+  before: string
+  after: string
+  /** Un caso concreto, de principio a fin. */
+  example: { scenario: string; walk: { what: string; step: number | null }[] } | null
+  /** Términos que hay que conocer. */
+  concepts: { term: string; meaning: string }[]
   requirements: { id: string; text: string; status: 'done' | 'partial' | 'missing'; steps: number[]; note: string | null }[]
   chapters: StoryChapter[]
   /** Cómo pasa la ejecución de un capítulo a otro (índices en `chapters`). */
