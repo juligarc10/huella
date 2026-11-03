@@ -248,6 +248,18 @@ export interface InboxSession extends SessionInfo {
   status_at: string | null
 }
 
+/** Dónde está definido un nombre. */
+export interface Definition {
+  path: string
+  display_path: string
+  qualified_name: string
+  kind: string
+  start_line: number
+  lines: string[]
+  truncated: boolean
+  in_change: boolean
+}
+
 export interface ReviewStep {
   index: number
   key: string

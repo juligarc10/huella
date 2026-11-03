@@ -23,6 +23,7 @@ import {
   type SessionInfo,
   type StatusResult,
   type SymbolResult,
+  type Definition,
 } from '@/lib/api'
 
 export function useOverview() {
@@ -273,6 +274,18 @@ export function useImpact(session: string) {
   return useQuery({
     queryKey: ['impact', session],
     queryFn: () => api.get<ImpactResult>(`review/${session}/impact`),
+    staleTime: 5 * 60_000,
+  })
+}
+
+/** Dónde está definido un nombre, visto desde un fichero. */
+export function useDefinition(session: string, name: string, path: string) {
+  return useQuery({
+    queryKey: ['definition', session, name, path],
+    queryFn: () =>
+      api.get<{ definitions: Definition[] }>(
+        `review/${session}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`,
+      ),
     staleTime: 5 * 60_000,
   })
 }
