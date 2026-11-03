@@ -863,6 +863,8 @@ fn guide_command(
             evidence: &assessment.evidence[index],
             triage: &assessment.triage[index],
             declared: declared.get(&index).map_or(&[], Vec::as_slice),
+            // Este comando revisa sesiones: el guion es de las tareas.
+            story: None,
         })
         .collect();
     println!("Guiando {} pasos con {}…", chosen.len(), model.model_id());
@@ -992,7 +994,8 @@ fn review_loop_command(db: Option<PathBuf>, action: ReviewCommand) -> Result<()>
             let review = huella_engine::session_review(&sources(projects)?, &session)?;
             let plan = huella_review::flow::plan(&review);
             let step = step.map(|step| pick(&plan, step)).transpose()?;
-            let answer = huella_engine::review_loop::ask(&store, model.as_ref(), &review, &plan, step, &question)?;
+            let answer =
+                huella_engine::review_loop::ask(&store, model.as_ref(), &review, &plan, step, &question, None)?;
             emit(&format!("{}\n\n({})\n", answer.answer, answer.model));
             Ok(())
         }

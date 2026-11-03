@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::declared::DeclaredView;
 use crate::evidence::StepEvidence;
+use crate::storyline::Storyline;
 use crate::triage::{Level, StepTriage};
 use crate::{EngineError, Result};
 
@@ -25,16 +26,19 @@ const MAX_REASONING: usize = 3;
 
 pub const SYSTEM_PROMPT: &str = "\
 Guías a una persona desarrolladora por un trozo de código que escribió un agente de IA, para que lo entienda antes \
-de aceptarlo. Recibes su petición, lo que pensó y explicó el agente, por qué se marcó este paso para revisarlo y el \
-diff del paso con las líneas numeradas (L1, L2…).
+de aceptarlo. Recibes su petición, lo que pensó y explicó el agente, por qué se marcó este paso para revisarlo, el \
+diff del paso con las líneas numeradas (L1, L2…) y, si lo hay, el guion: dónde encaja el paso en el cambio.
+
+Quien lee no conoce este código ni la tarea: no des nada por sabido y di qué es cada pieza la primera vez que la nombres.
 
 Devuelve:
 - explanation: 2 a 4 frases que digan qué hace este código, para qué lo necesita la petición y cómo encaja con lo que \
-llama. Sin repetir el código línea a línea.
+llama. Sin repetir el código línea a línea. Si hay guion, se lee seguida de la anterior: empieza por lo que deja hecho \
+el paso anterior y por qué hace falta este, y termina apuntando al siguiente; no repitas el resumen ni la narración.
 - walkthrough: de 1 a 6 paradas en el orden en que conviene leer el diff. from y to son los números de línea (L) que \
 abarca la parada; note, en una frase, qué pasa ahí y por qué.
 - checks: de 1 a 4 comprobaciones concretas que la persona debe hacer antes de aceptarlo, empezando por los motivos \
-por los que se marcó. Cada una empieza por un verbo («Comprueba que…», «Mira si…») y dice qué mirar, no la \
+por los que se marcó y lo que el guion pide mirar. Cada una empieza por un verbo («Comprueba que…», «Mira si…») y dice qué mirar, no la \
 respuesta. from y to son las líneas a las que se refiere, o 0 y 0 si es del paso entero.
 
 Escribe en el idioma de la petición. No afirmes nada que no se vea en el diff o en lo que explicó el agente; si algo \
@@ -120,16 +124,103 @@ pub struct StepContext<'a> {
     pub triage: &'a StepTriage,
     /// Lo que declaró el agente sobre su código.
     pub declared: &'a [DeclaredView],
+    /// Dónde encaja en el guion, en una tarea.
+    pub story: Option<StepStory<'a>>,
+}
+
+/// Dónde encaja un paso en el guion de su tarea.
+#[derive(Debug, Clone, Copy)]
+pub struct StepStory<'a> {
+    pub story: &'a Storyline,
+    /// Índice del capítulo que tiene el paso.
+    pub chapter: usize,
+    /// Pasos anterior y siguiente en el orden de la presentación.
+    pub previous: Option<usize>,
+    pub next: Option<usize>,
+}
+
+/// Dónde encaja el paso `index` en el guion, si está en algún capítulo.
+#[must_use]
+pub fn story_of(story: &Storyline, index: usize) -> Option<StepStory<'_>> {
+    let chapter = story.chapters.iter().position(|chapter| chapter.steps.contains(&index))?;
+    let order: Vec<usize> = story.chapters.iter().flat_map(|chapter| chapter.steps.iter().copied()).collect();
+    let at = order.iter().position(|&step| step == index)?;
+    Some(StepStory {
+        story,
+        chapter,
+        previous: at.checked_sub(1).map(|before| order[before]),
+        next: order.get(at + 1).copied(),
+    })
+}
+
+fn step_name(review: &SessionReview, plan: &[FlowStep], index: usize) -> String {
+    let step = &plan[index];
+    let path = &review.files[step.file].path;
+    step.symbol.as_ref().map_or_else(|| path.clone(), |symbol| format!("{} ({path})", symbol.qualified_name))
+}
+
+/// El guion visto desde un paso: el cambio, su capítulo, el paso anterior y el siguiente.
+#[must_use]
+pub fn render_story(review: &SessionReview, plan: &[FlowStep], place: &StepStory<'_>) -> String {
+    let chapter = &place.story.chapters[place.chapter];
+    let mut out = String::from("Dónde encaja este paso en el cambio:\n");
+    if !place.story.summary.trim().is_empty() {
+        let _ = writeln!(out, "- El cambio: {}", clip(&one_line(&place.story.summary), 1000));
+    }
+    let _ = writeln!(
+        out,
+        "- Capítulo {} de {}: {}. {}",
+        place.chapter + 1,
+        place.story.chapters.len(),
+        chapter.title,
+        clip(&one_line(&chapter.intent), 500)
+    );
+    if !chapter.narration.trim().is_empty() {
+        let _ = writeln!(out, "- Cómo se cuenta: {}", clip(&one_line(&chapter.narration), 1500));
+    }
+    let neighbour = |label: &str, step: Option<usize>| match step {
+        Some(step) => format!("- {label}: {}\n", step_name(review, plan, step)),
+        None => format!("- {label}: ninguno\n"),
+    };
+    out.push_str(&neighbour("Paso anterior", place.previous));
+    out.push_str(&neighbour("Paso siguiente", place.next));
+    for item in &chapter.look_at {
+        let _ = writeln!(out, "- Hay que mirar: {}", one_line(item));
+    }
+    for question in &chapter.questions {
+        let _ = writeln!(out, "- Quien revisa debería saber responder: {}", one_line(question));
+    }
+    out
+}
+
+/// El guion entero, para las preguntas sobre toda la tarea.
+#[must_use]
+pub fn render_overview(story: &Storyline) -> String {
+    let mut out = format!("Lo que hace el cambio: {}\n", clip(&one_line(&story.summary), 1000));
+    for requirement in &story.requirements {
+        let _ = writeln!(out, "- Requisito ({:?}): {}", requirement.status, one_line(&requirement.text));
+    }
+    for (number, chapter) in story.chapters.iter().enumerate() {
+        let _ = writeln!(out, "{}. {}: {}", number + 1, chapter.title, clip(&one_line(&chapter.intent), 500));
+    }
+    for item in story.unverified.iter().chain(&story.risks) {
+        let _ = writeln!(out, "- Sin comprobar o con riesgo: {}", one_line(item));
+    }
+    out
 }
 
 /// Lo que se envía al modelo para un paso.
 #[must_use]
 pub fn step_request(review: &SessionReview, plan: &[FlowStep], index: usize, context: StepContext<'_>) -> String {
-    let StepContext { evidence, triage, declared } = context;
+    let StepContext { evidence, triage, declared, story } = context;
     let step = &plan[index];
     let mut out = String::new();
     let prompt = step.turn.and_then(|turn| review.turns.get(turn)).and_then(|turn| turn.prompt.as_deref());
     let _ = writeln!(out, "Petición de la persona:\n{}\n", prompt.unwrap_or("(sin petición)"));
+    if let Some(place) = &story {
+        out.push_str(&render_story(review, plan, place));
+        out.push('\n');
+    }
 
     let mut rationales: Vec<&str> = Vec::new();
     for &source in &step.sources {
@@ -354,6 +445,41 @@ mod tests {
     const ANSWER: &str = r#"{"explanation":"Comprueba la contraseña.","walkthrough":[{"from":1,"to":2,"note":"entrada"},{"from":40,"to":41,"note":"fuera"}],"checks":[{"from":2,"to":2,"check":"Comprueba que el hash viene de la base de datos"},{"from":0,"to":0,"check":"Mira si hay tests"}]}"#;
 
     #[test]
+    fn the_request_tells_where_the_step_fits_in_the_story() {
+        let (review, plan) = review_of("export function login(password: string) {\n  return password;\n}\n");
+        let triaged = triage(&review, &plan, &Policy::default(), &BTreeSet::new(), &BTreeSet::new());
+        let evidence = StepEvidence::default();
+        let context = |story| StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story };
+        let last = plan.len() - 1;
+        let story = Storyline {
+            summary: "Añade el acceso con contraseña.".into(),
+            chapters: vec![crate::storyline::Chapter {
+                narration: "Es la puerta de entrada.".into(),
+                look_at: vec!["la comparación de contraseñas".into()],
+                questions: vec!["¿Qué pasa con una contraseña vacía?".into()],
+                ..crate::storyline::Chapter::plain("Acceso".into(), "Comprueba la contraseña.".into(), vec![0], false)
+            }],
+            ..crate::storyline::fallback(&review, &plan, &[])
+        };
+        let place = story_of(&story, last).unwrap();
+        assert_eq!(place.next, None);
+        let request = step_request(&review, &plan, last, context(Some(place)));
+        for expected in [
+            "Añade el acceso con contraseña.",
+            "Capítulo 1 de 1: Acceso. Comprueba la contraseña.",
+            "Es la puerta de entrada.",
+            "Paso siguiente: ninguno",
+            "la comparación de contraseñas",
+            "¿Qué pasa con una contraseña vacía?",
+        ] {
+            assert!(request.contains(expected), "falta «{expected}»: {request}");
+        }
+        // El guion forma parte de la petición: si cambia, la guía queda desfasada.
+        assert_ne!(request, step_request(&review, &plan, last, context(None)));
+        assert!(story_of(&story, 99).is_none());
+    }
+
+    #[test]
     fn the_request_numbers_the_diff_and_says_why_the_step_was_flagged() {
         let (review, plan) =
             review_of("export function login(password: string) {\n  return bcrypt.compare(password, hash);\n}\n");
@@ -362,7 +488,7 @@ mod tests {
             &review,
             &plan,
             0,
-            StepContext { evidence: &StepEvidence::default(), triage: &triaged[0], declared: &[] },
+            StepContext { evidence: &StepEvidence::default(), triage: &triaged[0], declared: &[], story: None },
         );
         assert!(request.contains("L1 +export function login"), "{request}");
         assert!(request.contains("toca seguridad"), "{request}");
@@ -384,7 +510,7 @@ mod tests {
                 &review,
                 &plan,
                 0,
-                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story: None },
                 &model
             )
             .unwrap()
@@ -395,7 +521,7 @@ mod tests {
                 &review,
                 &plan,
                 0,
-                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+                StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story: None },
                 &model
             )
             .unwrap()
@@ -403,9 +529,13 @@ mod tests {
         assert_eq!(model.calls.borrow().len(), 1);
 
         store.set_guide_check("s", &plan[0].key(&review), 1, true).unwrap();
-        let guides =
-            guides(&store, &review, &plan, &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] }])
-                .unwrap();
+        let guides = guides(
+            &store,
+            &review,
+            &plan,
+            &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story: None }],
+        )
+        .unwrap();
         let guide = &guides[&0];
         assert!(!guide.stale);
         // La parada fuera del diff se descarta; la comprobación del paso entero queda sin líneas.
@@ -427,7 +557,7 @@ mod tests {
             &review,
             &plan,
             0,
-            StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] },
+            StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story: None },
             &model,
         )
         .unwrap();
@@ -439,7 +569,7 @@ mod tests {
             &store,
             &changed,
             &changed_plan,
-            &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[] }],
+            &[StepContext { evidence: &evidence, triage: &triaged[0], declared: &[], story: None }],
         )
         .unwrap();
         assert!(guides[&0].stale);
