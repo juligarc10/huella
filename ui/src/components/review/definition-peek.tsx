@@ -1,0 +1,137 @@
+import { ArrowLeft, Loader2, SearchX, X } from 'lucide-react'
+import { useEffect, useState, type MouseEvent } from 'react'
+
+import { CodeText, useTokens, wordAt } from '@/components/review/code'
+import { Button } from '@/components/ui/button'
+import type { Definition } from '@/lib/api'
+import { useDefinition } from '@/lib/queries'
+import { cn } from '@/lib/utils'
+
+/**
+ * La definición de un nombre, abierta debajo de la línea desde la que se pidió.
+ * Dentro, ⌘+clic sigue a otro nombre y «Volver» deshace el camino. Solo busca por
+ * nombre: si hay varios candidatos, se elige entre ellos.
+ */
+export function DefinitionPeek({
+  session,
+  name,
+  from,
+  onClose,
+}: {
+  session: string
+  name: string
+  from: string
+  onClose: () => void
+}) {
+  const [trail, setTrail] = useState([{ name, from }])
+  const [chosen, setChosen] = useState(0)
+  const current = trail[trail.length - 1]
+  const { data, isPending, error } = useDefinition(session, current.name, current.from)
+  const found = data?.definitions ?? []
+  const shown: Definition | undefined = found[chosen]
+
+  // Otro ⌘+clic en el diff abre otro nombre, aunque el panel siguiera abierto.
+  useEffect(() => {
+    setTrail([{ name, from }])
+    setChosen(0)
+  }, [name, from])
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const follow = (event: MouseEvent) => {
+    const word = wordAt(event)
+    if (!word || !shown) return
+    setTrail([...trail, { name: word, from: shown.path }])
+    setChosen(0)
+  }
+
+  return (
+    <section
+      aria-label={`Definición de ${current.name}`}
+      className="flex flex-col overflow-hidden rounded-xl border border-brand/40 bg-card font-sans shadow-sm"
+    >
+      <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-sm">
+        {trail.length > 1 && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setTrail(trail.slice(0, -1))
+              setChosen(0)
+            }}
+          >
+            <ArrowLeft aria-hidden="true" /> Volver
+          </Button>
+        )}
+        <strong className="font-mono">{shown?.qualified_name ?? current.name}</strong>
+        {shown && (
+          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+            {shown.display_path}:{shown.start_line}
+            {shown.in_change && ' · cambia en esta revisión'}
+          </span>
+        )}
+        <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose} aria-label="Cerrar la definición (Esc)">
+          <X aria-hidden="true" />
+        </Button>
+      </header>
+
+      {found.length > 1 && (
+        <ul className="flex flex-wrap gap-1.5 border-b px-3 py-2" aria-label="Candidatos con este nombre">
+          {found.map((definition, index) => (
+            <li key={`${definition.path}:${definition.start_line}`}>
+              <button
+                type="button"
+                aria-pressed={index === chosen}
+                onClick={() => setChosen(index)}
+                className={cn(
+                  'rounded-md border px-2 py-0.5 font-mono text-xs hover:border-foreground/40',
+                  index === chosen && 'border-brand bg-brand-soft',
+                )}
+              >
+                {definition.display_path.split('/').pop()}:{definition.start_line}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {isPending && (
+        <p className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground" role="status">
+          <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Buscando {current.name}…
+        </p>
+      )}
+      {error && <p className="px-3 py-3 text-sm text-destructive">{error.message}</p>}
+      {data && found.length === 0 && (
+        <p className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
+          <SearchX className="size-4 shrink-0" aria-hidden="true" />
+          No encuentro la definición de {current.name} en los repositorios: puede ser de una librería o del lenguaje.
+        </p>
+      )}
+      {shown && <DefinitionCode definition={shown} onClick={follow} />}
+    </section>
+  )
+}
+
+function DefinitionCode({ definition, onClick }: { definition: Definition; onClick: (event: MouseEvent) => void }) {
+  const tokens = useTokens(definition.path, definition.lines)
+  return (
+    <div className="max-h-96 overflow-auto py-2 font-mono text-[13px] leading-6" onClick={onClick}>
+      <div className="min-w-max">
+        {definition.lines.map((line, index) => (
+          <div key={index} className="flex pr-4">
+            <span aria-hidden="true" className="w-12 shrink-0 pr-3 text-right text-muted-foreground select-none">
+              {definition.start_line + index}
+            </span>
+            <CodeText text={line} tokens={tokens?.[index]} />
+          </div>
+        ))}
+        {definition.truncated && <p className="pl-12 text-xs text-muted-foreground">… la definición sigue</p>}
+      </div>
+    </div>
+  )
+}

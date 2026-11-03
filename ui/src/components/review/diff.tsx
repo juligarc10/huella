@@ -1,8 +1,10 @@
 import { MessageCircleQuestion, MessageSquarePlus, X } from 'lucide-react'
 import { Fragment, useEffect, useRef, useState, type MouseEvent } from 'react'
 
+import { CodeText, useDiffTokens, usePeekKey, wordAt } from '@/components/review/code'
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
 import { CommentCard, CommentComposer } from '@/components/review/comments'
+import { DefinitionPeek } from '@/components/review/definition-peek'
 import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
 import type { CodeQuestion, CommentHint, LineRange, ReviewComment, ReviewStep } from '@/lib/api'
@@ -17,8 +19,9 @@ type Selection = { from: number; to: number }
 /**
  * El diff de un paso. Se seleccionan líneas (clic, y mayúsculas+clic para un
  * rango) para preguntar sobre ellas o comentarlas. Comentarios y preguntas se
- * muestran debajo de las líneas a las que se refieren. Quien lo usa le da
- * `key={step.key}`: cada paso empieza sin selección.
+ * muestran debajo de las líneas a las que se refieren. ⌘+clic en un nombre abre
+ * su definición debajo de la línea. Quien lo usa le da `key={step.key}`: cada
+ * paso empieza sin selección.
  */
 export function StepDiff({
   step,
@@ -50,6 +53,12 @@ export function StepDiff({
   const { data: codeQuestions } = useCodeQuestions(step.path)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [asking, setAsking] = useState(false)
+  const [peek, setPeek] = useState<{ index: number; name: string } | null>(null)
+  const tokens = useDiffTokens(step.path, step.lines)
+  usePeekKey()
+  // En una tarea casi nada viene de una edición registrada: marcarlo teñiría todo el diff.
+  const unexplained = (line: { kind: string; external?: boolean }) =>
+    line.kind === 'added' && Boolean(line.external) && !session.startsWith('task:')
   const hintOf = (id: number) => hints.find((hint) => hint.id === id)
   const focused = (index: number) => focus !== null && index >= focus[0] && index <= focus[1]
   const firstFocused = useRef<HTMLDivElement>(null)
@@ -80,6 +89,12 @@ export function StepDiff({
   const thinking = (codeQuestions?.pending ?? []).map((pending) => ({ pending, index: placeOf(pending.quote) }))
 
   const select = (index: number, event: MouseEvent) => {
+    // ⌘+clic es para abrir nombres: fuera de uno no selecciona la línea.
+    if (event.metaKey || event.ctrlKey) {
+      const word = wordAt(event)
+      if (word) setPeek({ index, name: word })
+      return
+    }
     setAsking(false)
     if (event.shiftKey && selection) {
       setSelection({ from: Math.min(selection.from, index), to: Math.max(selection.to, index) })
@@ -122,8 +137,8 @@ export function StepDiff({
                 ref={focus?.[0] === index ? firstFocused : undefined}
                 className={cn(
                   'group flex cursor-pointer pr-4 select-none',
-                  line.kind === 'added' && (line.external ? 'bg-warn-soft' : 'bg-brand-soft/60'),
-                  line.kind === 'removed' && 'bg-muted text-muted-foreground line-through decoration-muted-foreground/40',
+                  line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-brand-soft/60'),
+                  line.kind === 'removed' && 'bg-[var(--diff-removed)]',
                   focused(index) && 'bg-brand/10 shadow-[inset_3px_0_0_var(--color-brand)]',
                   selected(index) && 'bg-brand/15 shadow-[inset_3px_0_0_var(--color-brand)]',
                   composing === index && 'ring-2 ring-brand/50 ring-inset',
@@ -141,13 +156,24 @@ export function StepDiff({
                   aria-hidden="true"
                   className={cn(
                     'w-9 shrink-0 pl-3 text-center select-none',
-                    line.kind === 'added' ? (line.external ? 'text-warn' : 'text-brand') : 'text-muted-foreground',
+                    line.kind === 'added'
+                      ? unexplained(line)
+                        ? 'text-warn'
+                        : 'text-brand'
+                      : line.kind === 'removed'
+                        ? 'text-destructive'
+                        : 'text-muted-foreground',
                   )}
                 >
-                  {line.kind === 'added' ? (line.external ? '!' : '+') : line.kind === 'removed' ? '−' : ' '}
+                  {line.kind === 'added' ? (unexplained(line) ? '!' : '+') : line.kind === 'removed' ? '−' : ' '}
                 </span>
-                <span className="whitespace-pre">{line.text || ' '}</span>
+                <CodeText text={line.text} tokens={tokens[index]} />
               </div>
+              {peek?.index === index && (
+                <div className={inline}>
+                  <DefinitionPeek session={session} name={peek.name} from={step.path} onClose={() => setPeek(null)} />
+                </div>
+              )}
               {(placed.get(index) ?? []).map((comment) => (
                 <div key={`c${comment.id}`} className={inline}>
                   <CommentCard comment={comment} hint={hintOf(comment.id)} session={session} />
@@ -203,6 +229,9 @@ export function StepDiff({
           ))}
         </div>
       </div>
+      <p className="border-t px-4 py-1.5 text-xs text-muted-foreground">
+        <kbd className="font-mono">{navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl'}</kbd>+clic en un nombre para ver su definición
+      </p>
       {(loose.length > 0 || composing === -1 || thinking.some((t) => t.index < 0)) && (
         <div className="flex flex-col gap-2 border-t px-4 py-3">
           {loose.map((comment) => (

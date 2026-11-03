@@ -132,6 +132,42 @@
     --sidebar-muted: #a9afa9;
 }
 
+/* Colores del código, sobre la tarjeta y sobre los fondos de añadido y quitado. */
+:root {
+    --code-token-keyword: #7a2fb5;
+    --code-token-function: #1d5cb8;
+    --code-token-string: #0b6b3a;
+    --code-token-string-expression: #0b6b3a;
+    --code-token-constant: #9c4300;
+    --code-token-parameter: #80500a;
+    --code-token-comment: #5c6863;
+    --code-token-punctuation: #4a4f52;
+    --code-token-link: #1d5cb8;
+    --code-foreground: inherit;
+    --code-background: transparent;
+    --diff-removed: #fbeceb;
+}
+
+.dark {
+    --code-token-keyword: #cda8ff;
+    --code-token-function: #8fbcff;
+    --code-token-string: #95dba6;
+    --code-token-string-expression: #95dba6;
+    --code-token-constant: #f3b98a;
+    --code-token-parameter: #ebcb94;
+    --code-token-comment: #94a19b;
+    --code-token-punctuation: #a9afa9;
+    --code-token-link: #8fbcff;
+    --diff-removed: #3a2221;
+}
+
+/* Con ⌘ o Ctrl pulsado, cada nombre del código se puede abrir. */
+.peek-ready [data-word]:hover {
+    color: var(--color-brand);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
 .dark {
     --background: #111312;
     --foreground: #e8eae6;

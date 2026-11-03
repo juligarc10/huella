@@ -8,6 +8,7 @@ pub mod code_ask;
 pub mod coverage;
 mod decisions;
 pub mod declared;
+pub mod definition;
 pub mod embeddings;
 pub mod evidence;
 pub mod guide;
