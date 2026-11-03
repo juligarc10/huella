@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use huella_store::{DecisionFilter, Store};
@@ -19,8 +19,9 @@ y por qué se escribió cada función, las decisiones de proyecto y la revisión
 huella_symbol_history antes de cambiar código que no conoces, huella_decisions antes de proponer cambios de \
 arquitectura o tecnología, y huella_review para explicar o revisar lo que hizo una sesión. Mientras escribes \
 código, registra con huella_record cada decisión entre alternativas, lo que das por hecho, lo que no has \
-comprobado y cómo funciona lo que no es obvio: es lo que verá quien revise. Al terminar una tarea, cuéntala con \
-huella_storyline: el guion con el que se presentará a quien la revise.";
+comprobado, cómo funciona lo que no es obvio y los términos del dominio que descubras, explicándolo para alguien \
+sin contexto del código ni del dominio: es lo que verá quien revise. Al terminar una tarea, relee lo registrado con \
+huella_recorded y cuéntala con huella_storyline: el guion con el que se presentará a quien la revise.";
 
 pub struct Context {
     pub store: Store,
@@ -153,6 +154,7 @@ fn tools() -> Value {
         let at = list.len().saturating_sub(1);
         list.insert(at, record_tool());
         list.insert(at + 1, storyline_tool());
+        list.insert(at + 2, recorded_tool());
     }
     tools
 }
@@ -170,13 +172,14 @@ fn storyline_tool() -> Value {
     }
     json!({
         "name": "huella_storyline",
-        "description": "Cuenta el cambio al terminar una tarea (o una parte grande): el guion con el que se le \
-                        presentará a quien lo revise. Capítulos en el orden en que conviene ENTENDERLO (de la entrada \
-                        a la lógica, los datos y los efectos, cruzando repositorios), no en el que lo escribiste; cada \
-                        uno con su código (anclas con ruta absoluta y símbolo), qué hay que mirar y qué debería saber \
-                        responder quien revisa. Incluye lo que hiciste fuera de la tarea y lo que no comprobaste: lo \
-                        que no cuentes aparecerá igualmente, marcado como no contado. Si el cambio sigue, vuelve a \
-                        llamarla con el guion completo.",
+        "description": "Cuenta el cambio al terminar una tarea (o una parte grande) para alguien sin contexto del \
+                        código ni del dominio: el guion con el que se le presentará a quien lo revise. Antes y ahora, \
+                        un caso concreto de principio a fin, un glosario y capítulos en el orden en que conviene \
+                        ENTENDERLO (de la entrada a la lógica, los datos y los efectos, cruzando repositorios), no en \
+                        el que lo escribiste; cada capítulo, con su código explicado por ideas (anclas con ruta \
+                        absoluta y símbolo). Incluye lo que hiciste fuera de la tarea y lo que no comprobaste: lo que \
+                        no cuentes aparecerá igualmente, marcado como no contado. La respuesta dice qué le falta: \
+                        complétalo y vuelve a llamarla con el guion completo, igual que si el cambio sigue.",
         "inputSchema": schema
     })
 }
@@ -209,7 +212,48 @@ fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
             recorded.unresolved.join(", ")
         );
     }
+    if !recorded.gaps.is_empty() {
+        let _ = write!(
+            text,
+            " Para que lo entienda alguien sin contexto, falta: {}. Complétalo y vuelve a llamar a huella_storyline con el guion completo.",
+            recorded.gaps.join("; ")
+        );
+    }
     Ok(text)
+}
+
+/// `huella_recorded`: lo registrado en unos ficheros, para contarlo al terminar aunque
+/// la conversación se haya compactado.
+fn recorded_tool() -> Value {
+    json!({
+        "name": "huella_recorded",
+        "description": "Devuelve lo que registraste con huella_record en estos ficheros, con lo más reciente primero. \
+                        Úsala antes de huella_storyline: en una tarea larga puedes haber olvidado lo que explicaste.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Rutas absolutas de los ficheros que cambiaste"}
+            },
+            "required": ["files"]
+        }
+    })
+}
+
+fn recorded(store: &Store, arguments: &Value) -> Result<String> {
+    let files: Vec<&str> = arguments["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let mut out = String::new();
+    for file in files {
+        let path = std::fs::canonicalize(file).unwrap_or_else(|_| PathBuf::from(file));
+        for entry in store.declarations(&huella_engine::normalize_path(&path, None))? {
+            let symbol = entry.symbol.as_deref().unwrap_or("(sin símbolo)");
+            let label = huella_engine::declared::kind_label(&entry.kind);
+            let _ = writeln!(out, "- {file} · {symbol} [{label}] {}", entry.summary);
+            if let Some(how) = &entry.how {
+                let _ = writeln!(out, "  Cómo funciona: {how}");
+            }
+        }
+    }
+    Ok(if out.is_empty() { "No hay nada registrado en esos ficheros.".to_owned() } else { out })
 }
 
 /// `huella_record`: el agente declara lo que decidió sobre el código que acaba de escribir.
@@ -217,10 +261,11 @@ fn record_tool() -> Value {
     json!({
         "name": "huella_record",
         "description": "Registra, justo después de escribir un trozo de código, una decisión que tomaste, algo \
-                        que diste por hecho, algo que no comprobaste o un riesgo, y cómo funciona si no es \
-                        obvio. Quien revise lo verá junto a ese código. Una entrada por decisión; no registres \
-                        lo trivial (renombrados, formato, código que se explica solo). Sé concreto y honesto: \
-                        lo que no probaste va en unverified, no se adorna.",
+                        que diste por hecho, algo que no comprobaste, un riesgo, cómo funciona lo que no es obvio o \
+                        un término del dominio. Escribe para alguien sin contexto del código ni del dominio. Quien \
+                        revise lo verá junto a ese código. Una entrada por cosa; no registres lo trivial (renombrados, \
+                        formato, código que se explica solo). Sé concreto y honesto: lo que no probaste va en \
+                        unverified, no se adorna.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -228,10 +273,12 @@ fn record_tool() -> Value {
                 "symbol": {"type": "string", "description": "Función, método o clase (Clase.metodo o su nombre)"},
                 "lines": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2,
                           "description": "[inicio, fin], 1-based, si no hay símbolo o es una parte de él"},
-                "kind": {"type": "string", "enum": ["decision", "assumption", "unverified", "risk"],
+                "kind": {"type": "string", "enum": ["decision", "assumption", "unverified", "risk", "explanation", "concept"],
                          "description": "decision: elegiste entre alternativas; assumption: das algo por hecho \
                                          que la tarea no dice; unverified: dejas algo sin comprobar; risk: \
-                                         tocas algo sensible (seguridad, datos, API pública)"},
+                                         tocas algo sensible (seguridad, datos, API pública); explanation: \
+                                         cómo funciona o por qué existe este código, para quien no lo conoce; \
+                                         concept: qué significa un término del dominio o del código"},
                 "summary": {"type": "string", "description": "Qué hiciste y por qué, en 1 a 3 frases"},
                 "how": {"type": "string", "description": "Cómo funciona el código, si no es obvio al leerlo"},
                 "alternatives": {"type": "array", "items": {"type": "object", "properties": {
@@ -256,6 +303,9 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
     }
     if name == "huella_storyline" {
         return storyline(&mut context.store, arguments);
+    }
+    if name == "huella_recorded" {
+        return recorded(&context.store, arguments);
     }
     // Lo nuevo de las transcripciones se indexa antes de responder.
     huella_engine::index(&mut context.store, &context.sources)?;
@@ -479,6 +529,7 @@ mod tests {
                 "huella_review_feedback",
                 "huella_record",
                 "huella_storyline",
+                "huella_recorded",
                 "huella_sessions"
             ]
         );

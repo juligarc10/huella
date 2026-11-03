@@ -44,7 +44,7 @@ pub fn install(dirs: &Dirs) -> Result<()> {
 #[must_use]
 pub fn agents_md() -> String {
     let body = SKILL.split("---").nth(2).unwrap_or(SKILL).trim();
-    let body = body.strip_prefix("# Registrar para quien revise").unwrap_or(body).trim_start();
+    let body = body.strip_prefix("# Registrar y explicar para quien revise").unwrap_or(body).trim_start();
     format!("## Huella: registrar para quien revise\n\n{body}\n")
 }
 
