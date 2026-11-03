@@ -50,7 +50,9 @@ Ejemplo:
 Cuando acabes la tarea (o una parte grande que se vaya a revisar), cuenta el cambio con `huella_storyline`. Es el guion con el que Huella se lo presentará a quien lo revise, capítulo a capítulo; otro modelo lo usará después para explicar cada paso, así que cuanto mejor lo cuentes, mejor se entenderá.
 
 - **Orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Tests y configuración, al final.
+- **Para quien no conoce el código ni la tarea**: no des nada por sabido y di qué es cada pieza la primera vez que la nombres. Cada `narration` enlaza con el capítulo anterior.
 - **Cada capítulo es una intención** («Endpoint del filtro», «Persistencia del filtro»), con su código en `anchors` (ruta absoluta y símbolo), qué hay que mirar (`look_at`) y qué debería saber responder quien revisa (`questions`).
+- **Menciona todos los ficheros que cambiaste.** Un ancla a una clase cubre sus métodos, y lo que no nombres de un fichero mencionado (imports, campos) va con ese capítulo. Si dos capítulos tocan el mismo fichero, ancla por método.
 - **`requirements`**: lo que pedía la tarea, cada uno con su estado real. `flow`: cómo pasa la ejecución de un capítulo a otro («llama a POST /filtros»).
 - **Lo incómodo también**: lo que cambiaste sin que se pidiera va en `outside`, y lo que no comprobaste, en `unverified`. Lo que no cuentes saldrá igualmente, marcado como «No lo contó el agente».
 - Si después cambias más código, vuelve a llamarla con el guion completo.

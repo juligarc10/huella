@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 
 use crate::coverage::RequirementStatus;
 use crate::declared::DeclaredView;
+use crate::declared::plain_symbol;
 use crate::triage::{Level, StepTriage};
 use crate::{EngineError, Result};
 
@@ -36,6 +37,9 @@ Preparas la presentación de un cambio para que una persona desarrolladora lo en
 que pide la tarea y los pasos del cambio, numerados, en todos los repositorios que toca: su diff, su nivel de \
 riesgo y lo que declaró el agente que los escribió. Devuelves el guion en el formato huella.storyline/v1; donde \
 se pide código (anchors, where, outside), usa { \"step\": número del paso }.
+
+Quien lo lee no conoce este código ni la tarea: no des nada por sabido y di qué es cada pieza la primera vez que \
+la nombres.
 
 - summary: 2 a 4 frases que cuenten qué hace el cambio en conjunto y por qué, como un flujo.
 - requirements: lo que pide la tarea troceado en requisitos comprobables, en su orden, con id R1, R2…; status \
@@ -192,7 +196,7 @@ pub struct Chapter {
 }
 
 impl Chapter {
-    fn plain(title: String, intent: String, steps: Vec<usize>, unnarrated: bool) -> Self {
+    pub(crate) fn plain(title: String, intent: String, steps: Vec<usize>, unnarrated: bool) -> Self {
         Self {
             title,
             kind: None,
@@ -268,8 +272,37 @@ fn short(name: &str) -> &str {
     name.rsplit(['.', ':']).next().unwrap_or(name)
 }
 
+/// ¿El símbolo del ancla es justo el del paso?
+fn same_symbol(wanted: &str, step: &str) -> bool {
+    let (wanted, step) = (plain_symbol(wanted), plain_symbol(step));
+    step == wanted || short(&step) == short(&wanted)
+}
+
+/// ¿El símbolo del ancla contiene el del paso? Una clase contiene sus métodos.
+fn contains_symbol(wanted: &str, step: &str) -> bool {
+    let (wanted, step) = (plain_symbol(wanted), plain_symbol(step));
+    if step.starts_with(&format!("{wanted}.")) {
+        return true;
+    }
+    // `com.acme.Clase` es `Clase`, pero `Clase.Clase` es su constructor, no la clase.
+    let mut last = wanted.rsplit('.');
+    let is_constructor = last.next().is_some_and(|name| last.next() == Some(name));
+    !is_constructor && step.starts_with(&format!("{}.", short(&wanted)))
+}
+
 fn squash(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// ¿El ancla menciona el fichero de este paso?
+fn mentions_file(anchor: &Anchor, review: &SessionReview, step: &FlowStep, repos: &[RepoRef]) -> bool {
+    let Some(file) = anchor.file.as_deref().map(|file| file.trim_start_matches("./")) else { return false };
+    let (repo, inside) = place(repos, &review.files[step.file].path);
+    let same_repo = match (anchor.repo.as_deref(), repo.and_then(|repo| repo.identity.as_deref())) {
+        (Some(wanted), Some(found)) => wanted == found,
+        _ => true,
+    };
+    same_repo && (inside == file || inside.ends_with(&format!("/{file}")) || file.ends_with(&format!("/{inside}")))
 }
 
 /// Los pasos a los que se refiere un ancla.
@@ -282,26 +315,15 @@ fn steps_of(anchor: &Anchor, review: &SessionReview, plan: &[FlowStep], repos: &
             .into_iter()
             .collect();
     }
-    let Some(file) = anchor.file.as_deref().map(|file| file.trim_start_matches("./")) else { return Vec::new() };
-    let in_file: Vec<usize> = (0..plan.len())
-        .filter(|&index| {
-            let (repo, inside) = place(repos, &review.files[plan[index].file].path);
-            let same_repo = match (anchor.repo.as_deref(), repo.and_then(|repo| repo.identity.as_deref())) {
-                (Some(wanted), Some(found)) => wanted == found,
-                _ => true,
-            };
-            same_repo
-                && (inside == file || inside.ends_with(&format!("/{file}")) || file.ends_with(&format!("/{inside}")))
-        })
-        .collect();
+    let in_file: Vec<usize> =
+        (0..plan.len()).filter(|&index| mentions_file(anchor, review, &plan[index], repos)).collect();
     match (&anchor.symbol, anchor.range()) {
         (Some(symbol), _) => in_file
             .into_iter()
             .filter(|&index| {
-                plan[index]
-                    .symbol
-                    .as_ref()
-                    .is_some_and(|step| step.qualified_name == *symbol || short(&step.qualified_name) == short(symbol))
+                plan[index].symbol.as_ref().is_some_and(|step| {
+                    same_symbol(symbol, &step.qualified_name) || contains_symbol(symbol, &step.qualified_name)
+                })
             })
             .collect(),
         (None, Some((start, end))) => in_file
@@ -315,15 +337,25 @@ fn steps_of(anchor: &Anchor, review: &SessionReview, plan: &[FlowStep], repos: &
 }
 
 /// El texto actual del código de un paso (su símbolo) o, sin símbolo, de esas líneas.
-fn current_text(review: &SessionReview, step: &FlowStep, lines: Option<(usize, usize)>) -> String {
+fn current_text(review: &SessionReview, step: &FlowStep, anchor: &Anchor) -> String {
+    let lines = anchor.range();
+    // Si el ancla es una clase y el paso un método suyo, lo declarado son sus líneas.
+    let symbol = step.symbol.as_ref().filter(|symbol| {
+        // El constructor de Java se llama como su clase, pero no es ella.
+        anchor.symbol.as_deref().is_none_or(|wanted| {
+            same_symbol(wanted, &symbol.qualified_name) && !contains_symbol(wanted, &symbol.qualified_name)
+        })
+    });
     let current: Vec<&str> = review.files[step.file].after.lines().collect();
     let (start, end) =
-        step.symbol.as_ref().map(|symbol| (symbol.start_line, symbol.end_line)).or(lines).unwrap_or((1, current.len()));
+        symbol.map(|symbol| (symbol.start_line, symbol.end_line)).or(lines).unwrap_or((1, current.len()));
     current.get(start.saturating_sub(1)..end.min(current.len())).map(|slice| slice.join("\n")).unwrap_or_default()
 }
 
 /// Los capítulos del guion con sus pasos, cada paso en uno solo. Un capítulo
-/// cuyo código ya está en otro se suma a ese. Devuelve los capítulos, qué
+/// cuyo código ya está en otro se suma a ese. Lo que el guion no nombra de un
+/// fichero que sí menciona va con el capítulo que lo menciona: imports, campos o
+/// un símbolo mal escrito no son código sin contar. Devuelve los capítulos, qué
 /// capítulo muestra cada id del guion y si algo está desfasado.
 fn place_chapters(
     story_chapters: &[StoryChapter],
@@ -339,6 +371,8 @@ fn place_chapters(
     let mut chapters: Vec<Chapter> = Vec::new();
     // Capítulo de la presentación que tiene cada paso.
     let mut holder: BTreeMap<usize, usize> = BTreeMap::new();
+    // Las anclas de cada capítulo de la presentación, para lo que no se nombró.
+    let mut mentioned: Vec<(usize, &Anchor)> = Vec::new();
     for chapter in story_chapters {
         let mut steps = Vec::new();
         let mut already = None;
@@ -346,7 +380,7 @@ fn place_chapters(
             let found = steps_of(anchor, review, plan, repos);
             // Lo declarado desfasa si el código del ancla ya no es el que se declaró.
             if let (Some(snapshot), Some(&first)) = (&anchor.snapshot, found.first()) {
-                stale |= squash(&current_text(review, &plan[first], anchor.range())) != squash(snapshot);
+                stale |= squash(&current_text(review, &plan[first], anchor)) != squash(snapshot);
             }
             for step in found {
                 if placed.insert(step) {
@@ -357,29 +391,29 @@ fn place_chapters(
             }
         }
         let requirements: Vec<usize> = chapter.requirements.iter().filter_map(|id| requirement_index(id)).collect();
-        if steps.is_empty() {
+        if let (true, Some(index)) = (steps.is_empty(), already) {
             // Su código es un paso que ya está en otro capítulo (otra parte de la
             // misma función): no se pierde lo que cuenta, se suma a ese capítulo.
-            if let Some(index) = already {
-                let target = &mut chapters[index];
-                if !chapter.narration.trim().is_empty() {
-                    if !target.narration.is_empty() {
-                        target.narration.push(' ');
-                    }
-                    target.narration.push_str(chapter.narration.trim());
+            let target = &mut chapters[index];
+            if !chapter.narration.trim().is_empty() {
+                if !target.narration.is_empty() {
+                    target.narration.push(' ');
                 }
-                target.look_at.extend(chapter.look_at.iter().cloned());
-                target.questions.extend(chapter.questions.iter().cloned());
-                for requirement in requirements {
-                    if !target.requirements.contains(&requirement) {
-                        target.requirements.push(requirement);
-                    }
-                }
-                chapter_ids.push((chapter.id.clone(), index));
+                target.narration.push_str(chapter.narration.trim());
             }
+            target.look_at.extend(chapter.look_at.iter().cloned());
+            target.questions.extend(chapter.questions.iter().cloned());
+            for requirement in requirements {
+                if !target.requirements.contains(&requirement) {
+                    target.requirements.push(requirement);
+                }
+            }
+            chapter_ids.push((chapter.id.clone(), index));
+            mentioned.extend(chapter.anchors.iter().map(|anchor| (index, anchor)));
             continue;
         }
         let index = chapters.len();
+        mentioned.extend(chapter.anchors.iter().map(|anchor| (index, anchor)));
         for &step in &steps {
             holder.insert(step, index);
         }
@@ -396,6 +430,34 @@ fn place_chapters(
             unnarrated: false,
         });
     }
+    for (step, flow) in plan.iter().enumerate() {
+        if placed.contains(&step) {
+            continue;
+        }
+        // Primero un capítulo que aún no tenga código: si no, se perdería su narración.
+        let target = mentioned
+            .iter()
+            .filter(|(_, anchor)| mentions_file(anchor, review, flow, repos))
+            .map(|(index, _)| *index)
+            .min_by_key(|&index| (!chapters[index].steps.is_empty(), index));
+        if let Some(index) = target {
+            chapters[index].steps.push(step);
+            placed.insert(step);
+        }
+    }
+    // Un capítulo que se queda sin código no se muestra.
+    let mut shown = 0;
+    let renumbered: Vec<Option<usize>> = chapters
+        .iter()
+        .map(|chapter| {
+            (!chapter.steps.is_empty()).then(|| {
+                shown += 1;
+                shown - 1
+            })
+        })
+        .collect();
+    chapters.retain(|chapter| !chapter.steps.is_empty());
+    let chapter_ids = chapter_ids.into_iter().filter_map(|(id, index)| Some((id, renumbered[index]?))).collect();
     (chapters, chapter_ids, stale)
 }
 
@@ -435,8 +497,10 @@ pub fn resolve(
     let (mut chapters, chapter_ids, chapters_stale) =
         place_chapters(&story.chapters, requirement_index, &mut placed, review, plan, repos);
     stale |= chapters_stale;
-    // Lo que el guion no colocó no se pierde: va al final.
-    let rest: Vec<usize> = (0..plan.len()).filter(|step| !placed.contains(step)).collect();
+    // Lo que el guion no colocó no se pierde: va al final, y lo generado aparte.
+    let (generated, rest): (Vec<usize>, Vec<usize>) = (0..plan.len())
+        .filter(|step| !placed.contains(step))
+        .partition(|&step| crate::triage::clearly_generated(&review.files[plan[step].file].path));
     if !rest.is_empty() {
         chapters.push(if source == Source::Declared {
             Chapter::plain(
@@ -453,6 +517,14 @@ pub fn resolve(
                 false,
             )
         });
+    }
+    if !generated.is_empty() {
+        chapters.push(Chapter::plain(
+            "Ficheros generados".into(),
+            "Los produce una herramienta (compilados, lockfiles…): no hace falta leerlos.".into(),
+            generated,
+            false,
+        ));
     }
     let chapter_index = |id: &str| chapter_ids.iter().find(|(chapter, _)| chapter == id).map(|(_, index)| *index);
     let flow = story
@@ -1261,6 +1333,101 @@ mod tests {
         .unwrap();
         assert!(record(&mut store, missing).unwrap_err().to_string().contains("ninguna ancla"));
         std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn a_class_contains_its_methods_but_a_constructor_does_not() {
+        assert!(contains_symbol("UserService", "UserService.register"));
+        assert!(contains_symbol("com.acme.UserService", "UserService.register"));
+        assert!(!contains_symbol("UserService.UserService", "UserService.register"));
+        assert!(!contains_symbol("UserService.register", "UserService.count"));
+        assert!(same_symbol("UserService#register(String)", "UserService.register"));
+        assert!(!same_symbol("UserService.count", "UserService.register"));
+    }
+
+    const CART: &str = "import { a } from './a';\nexport const LIMIT = a;\nexport class Cart {\n  add(x) {\n    return x + 1;\n  }\n  remove(x) {\n    return x - 1;\n  }\n}\n";
+
+    /// Un guion del agente sobre `cart.ts` y `other.ts` sin contar, con estos capítulos.
+    fn told_about_cart(name: &str, chapters: &Value) -> (Storyline, Vec<FlowStep>, usize) {
+        let repo = git_repo(name);
+        std::fs::write(repo.join("cart.ts"), CART).unwrap();
+        std::fs::write(repo.join("other.ts"), OTHER).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let mut chapters = chapters.clone();
+        for chapter in chapters.as_array_mut().unwrap() {
+            for anchor in chapter["anchors"].as_array_mut().unwrap() {
+                anchor["file"] = json!(repo.join("cart.ts"));
+            }
+        }
+        record(&mut store, serde_json::from_value(json!({"summary": "s", "chapters": chapters})).unwrap()).unwrap();
+        let paths = [
+            repo.join("cart.ts").display().to_string(),
+            repo.join("other.ts").display().to_string(),
+            repo.join("dist/app.js").display().to_string(),
+        ];
+        let (review, plan) = review_of(&[(&paths[0], CART), (&paths[1], OTHER), (&paths[2], "var a = 1;\n")]);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        let in_cart = plan.iter().filter(|step| review.files[step.file].path.ends_with("cart.ts")).count();
+        (found, plan, in_cart)
+    }
+
+    #[test]
+    fn an_anchor_to_a_class_covers_its_methods_and_what_is_not_named_stays_in_that_chapter() {
+        let chapter = json!([{"id": "C1", "title": "El carrito", "intent": "i", "anchors": [{"symbol": "Cart"}]}]);
+        let (found, _, in_cart) = told_about_cart("class", &chapter);
+        assert_eq!(found.chapters[0].title, "El carrito");
+        assert_eq!(found.chapters[0].steps.len(), in_cart, "{found:?}");
+        assert!(found.chapters[0].steps.len() > 1, "métodos e imports: {:?}", found.chapters[0]);
+        assert!(!found.stale, "un ancla a la clase no desfasa por compararla con un método");
+    }
+
+    #[test]
+    fn only_files_the_story_does_not_mention_count_as_untold_and_generated_goes_apart() {
+        let chapter = json!([{"id": "C1", "title": "El carrito", "intent": "i", "anchors": [{"symbol": "Cart.add"}]}]);
+        let (found, plan, _) = told_about_cart("rest", &chapter);
+        let titles: Vec<&str> = found.chapters.iter().map(|chapter| chapter.title.as_str()).collect();
+        assert_eq!(titles, ["El carrito", "No lo contó el agente", "Ficheros generados"]);
+        assert!(found.chapters[1].unnarrated && !found.chapters[2].unnarrated);
+        assert_eq!(found.chapters[1].steps, vec![position(&plan, "other")]);
+    }
+
+    #[test]
+    fn java_style_names_match_and_a_misspelled_symbol_keeps_its_chapter() {
+        let chapters = json!([
+            {"id": "C1", "title": "Quitar", "intent": "i", "anchors": [{"symbol": "Cart#remove(int)"}]},
+            {"id": "C2", "title": "Con errata", "intent": "i", "narration": "Lo que cuenta", "anchors": [{"symbol": "Carro.nada"}]}
+        ]);
+        let (found, plan, _) = told_about_cart("java", &chapters);
+        assert_eq!(found.chapters[0].steps[0], position(&plan, "Cart.remove"));
+        assert_eq!(found.chapters[1].title, "Con errata", "{found:?}");
+        assert_eq!(found.chapters[1].narration, "Lo que cuenta");
+    }
+
+    #[test]
+    fn a_java_class_told_as_a_whole_leaves_nothing_untold() {
+        const SERVICE: &str = "package com.acme;\n\nimport java.util.List;\n\npublic class UserService {\n  private final List<String> users = List.of();\n\n  public UserService() {}\n\n  public void register(String email) {\n    users.add(email);\n  }\n\n  public int count() {\n    return users.size();\n  }\n}\n";
+        let repo = git_repo("java-class");
+        let dir = repo.join("src/main/java/com/acme");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("UserService.java");
+        std::fs::write(&file, SERVICE).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let told: Story = serde_json::from_value(json!({"summary": "s", "chapters": [
+            {"id": "C1", "title": "Usuarios", "intent": "i", "anchors": [{"file": file, "symbol": "UserService"}]}
+        ]}))
+        .unwrap();
+        record(&mut store, told).unwrap();
+        let path = file.display().to_string();
+        let (review, plan) = review_of(&[(&path, SERVICE)]);
+        let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
+        let found = declared(&store, &review, &plan, &repos).unwrap().unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert!(plan.len() > 1, "{plan:?}");
+        assert_eq!(found.chapters.len(), 1, "{:?}", found.chapters);
+        assert_eq!(found.chapters[0].steps.len(), plan.len());
+        assert!(!found.stale);
     }
 
     #[test]

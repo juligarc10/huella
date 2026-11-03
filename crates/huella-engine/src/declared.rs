@@ -99,6 +99,11 @@ pub fn record(store: &Store, new: &NewDeclaration) -> Result<Recorded> {
 /// El símbolo al que se refiere: el que se nombra (el más interno que tenga
 /// esas líneas, si hay varios) o el más interno que contiene las líneas. Sin
 /// símbolo, quedan las líneas; sin nada, el fichero entero.
+/// Un símbolo sin firma y con `.` como separador: `Clase#metodo(int)` es `Clase.metodo`.
+pub(crate) fn plain_symbol(name: &str) -> String {
+    name.split('(').next().unwrap_or(name).trim().replace('#', ".").replace("::", ".")
+}
+
 pub(crate) fn anchor(
     file: &Path,
     source: &str,
@@ -110,20 +115,26 @@ pub(crate) fn anchor(
         .and_then(|language| huella_anchoring::extract_symbols(language, source).ok())
         .map(|extraction| extraction.symbols)
         .unwrap_or_default();
+    let name = name.map(plain_symbol);
+    let name = name.as_deref();
+    let exact = |symbol: &&huella_core::Symbol| name.is_some_and(|name| plain_symbol(&symbol.qualified_name) == name);
     let named = |symbol: &&huella_core::Symbol| {
         name.is_some_and(|name| {
             let short = symbol.qualified_name.rsplit(['.', ':']).next().unwrap_or(&symbol.qualified_name);
-            symbol.qualified_name == name || short == name
+            let wanted = name.rsplit('.').next().unwrap_or(name);
+            short == wanted
         })
     };
     let contains = |symbol: &&huella_core::Symbol| {
         lines.is_some_and(|(start, end)| symbol.start_line <= start && end.max(start) <= symbol.end_line)
     };
     let innermost = |symbol: &&huella_core::Symbol| symbol.end_line - symbol.start_line;
+    // Primero el nombre exacto: el constructor de Java se llama como su clase.
     let found = symbols
         .iter()
-        .filter(named)
+        .filter(exact)
         .min_by_key(|symbol| (!contains(symbol), innermost(symbol)))
+        .or_else(|| symbols.iter().filter(named).min_by_key(|symbol| (!contains(symbol), innermost(symbol))))
         .or_else(|| symbols.iter().filter(contains).min_by_key(innermost));
     match (found, lines) {
         (Some(symbol), _) => (Some(symbol.qualified_name.clone()), (symbol.start_line, symbol.end_line)),
