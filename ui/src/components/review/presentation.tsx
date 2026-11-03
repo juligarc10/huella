@@ -5,33 +5,39 @@ import {
   CircleCheck,
   CircleDashed,
   CircleX,
+  Eye,
   Loader2,
   Maximize2,
-  Megaphone,
-  Eye,
+  MessageCircleQuestion,
   RotateCcw,
   Sparkles,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { Mono, Panel } from '@/components/bits'
 import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
 import { StepDiff } from '@/components/review/diff'
 import { GuidePanel } from '@/components/review/guide'
+import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
-import { baseName, dateTime } from '@/lib/format'
+import { dateTime } from '@/lib/format'
 import { useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
-type Slide =
-  | { kind: 'cover' }
-  | { kind: 'chapter'; chapter: number }
-  | { kind: 'step'; chapter: number; step: number }
-  | { kind: 'closing' }
+/** Qué tipo de capítulo es, en palabras. */
+const kindLabel: Record<string, string> = {
+  entry: 'Por donde entra',
+  logic: 'Lógica',
+  data: 'Datos',
+  effect: 'Efectos',
+  integration: 'Unión con otro servicio',
+  test: 'Tests',
+  config: 'Configuración',
+}
 
 const statusView = {
   done: { icon: CircleCheck, label: 'Hecho', tone: 'text-brand' },
@@ -66,6 +72,8 @@ export function Presentation({
   current,
   filter,
   onFilter,
+  status,
+  overview,
   onCurrent,
   onDecide,
   onUndo,
@@ -77,6 +85,10 @@ export function Presentation({
   /** Qué pasos se presentan. */
   filter: TriageFilter
   onFilter: (filter: TriageFilter) => void
+  /** Contadores y filtro, junto al rastro. */
+  status: ReactNode
+  /** Repositorios y lo que pide la tarea, en la portada. */
+  overview: ReactNode
   onCurrent: (index: number) => void
   /** Da el veredicto (o lo quita si ya era ese) y devuelve cómo queda. */
   onDecide: (step: ReviewStep, verdict: Verdict) => Verdict | null
@@ -105,6 +117,14 @@ export function Presentation({
     return next ? slides.findIndex((slide) => sameSlide(slide, next)) : 0
   }, [slides, everySlide, place])
   const slide = slides[position]
+  // Cada diapositiva se empieza a leer por arriba, justo debajo del rastro.
+  const slideKey = !slide ? '' : slide.kind === 'step' ? `s${slide.step}` : slide.kind === 'chapter' ? `c${slide.chapter}` : slide.kind
+  const stage = useRef<HTMLDivElement>(null)
+  const shownKey = useRef(slideKey)
+  useEffect(() => {
+    if (shownKey.current !== slideKey) stage.current?.scrollIntoView({ block: 'start' })
+    shownKey.current = slideKey
+  }, [slideKey])
 
   const go = (to: number) => {
     const target = slides[Math.min(Math.max(to, 0), slides.length - 1)]
@@ -122,6 +142,13 @@ export function Presentation({
     setPlace(target)
     onCurrent(step)
   }
+  const goToChapter = (chapter: number) => {
+    const at = slides.findIndex((s) => s.kind === 'chapter' && s.chapter === chapter)
+    if (at >= 0) return go(at)
+    // Un capítulo que el filtro deja vacío: se quita el filtro para poder verlo.
+    onFilter('all')
+    setPlace({ kind: 'chapter', chapter })
+  }
   // «Bien» avanza a la siguiente diapositiva; `u` lo deshace y vuelve.
   const decide = (step: ReviewStep, verdict: Verdict) => {
     if (onDecide(step, verdict) === 'ok') go(position + 1)
@@ -131,7 +158,7 @@ export function Presentation({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
-      if (event.metaKey || event.ctrlKey || target.closest('input, textarea, [role="dialog"]')) return
+      if (event.metaKey || event.ctrlKey || target.closest('input, textarea, select, [role="dialog"]')) return
       const verdict = verdicts.find((v) => v.key === event.key)
       if (event.key === 'ArrowRight') go(position + 1)
       else if (event.key === 'ArrowLeft') go(position - 1)
@@ -147,147 +174,106 @@ export function Presentation({
   })
 
   if (!story || !slide) return null
-  const chapterOf = (s: Slide) => (s.kind === 'chapter' || s.kind === 'step' ? s.chapter : null)
-  const firstChapter = slides.find((s) => s.kind === 'chapter')
   const ask = (step?: ReviewStep) => (
-    <AskPanel
-      session={session}
-      step={step}
-      questions={review.questions}
-      asking={review.asking}
-      model={review.ask_model}
-      problem={review.ask_problem}
-      task
-    />
+    <AskToggle open={review.questions.some((q) => q.step_key === (step?.key ?? null)) || review.asking.some((a) => a.step === (step?.index ?? null))}>
+      <AskPanel
+        session={session}
+        step={step}
+        questions={review.questions}
+        asking={review.asking}
+        model={review.ask_model}
+        problem={review.ask_problem}
+        task
+      />
+    </AskToggle>
   )
+  const shownStep = slide.kind === 'step' ? review.steps[slide.step] : null
+  const siblings = slide.kind === 'step' ? slides.flatMap((s) => (s.kind === 'step' && s.chapter === slide.chapter ? [s.step] : [])) : []
+  const next = slides[position + 1]
+  const nextName = (() => {
+    if (!next) return null
+    if (next.kind === 'chapter') return story.chapters[next.chapter].title
+    if (next.kind === 'step' && review.steps[next.step]) return stepName(review.steps[next.step])
+    return 'Cierre'
+  })()
 
   return (
-    <div className="flex flex-col gap-4">
-      <ChapterStrip
+    <div className="flex flex-col gap-6">
+      <Trail
         story={story}
         steps={review.steps}
-        active={chapterOf(slide)}
         slide={slide}
-        visible={(chapter) => slides.some((s) => s.kind === 'chapter' && s.chapter === chapter)}
-        onJump={(chapter) => go(slides.findIndex((s) => s.kind === 'chapter' && s.chapter === chapter))}
+        visible={(step) => Boolean(review.steps[step]) && shownBy(filter)(review.steps[step])}
+        position={shownStep ? `paso ${siblings.indexOf(slide.kind === 'step' ? slide.step : -1) + 1} de ${siblings.length}` : null}
+        status={status}
         onCover={() => go(0)}
         onClosing={() => go(slides.length - 1)}
+        onChapter={goToChapter}
+        onStep={goToStep}
       />
 
-      {slide.kind === 'cover' && (
-        <Cover
-          review={review}
-          session={session}
-          story={story}
-          first={firstChapter?.kind === 'chapter' ? story.chapters[firstChapter.chapter].title : null}
-          onStep={goToStep}
-          onStart={() => go(1)}
-        />
-      )}
-      {slide.kind === 'chapter' && <ChapterSlide review={review} story={story} chapter={slide.chapter} onStep={goToStep} />}
-      {slide.kind === 'step' && (
-        <StepSlide
-          key={review.steps[slide.step].key}
-          review={review}
-          session={session}
-          story={story}
-          chapter={slide.chapter}
-          step={review.steps[slide.step]}
-          siblings={slides.flatMap((s) => (s.kind === 'step' && s.chapter === slide.chapter ? [s.step] : []))}
-          ask={ask(review.steps[slide.step])}
-          onDecide={decide}
-          onDetail={onDetail}
-        />
-      )}
-      {slide.kind === 'closing' && <Closing review={review} story={story} onStep={goToStep} />}
-      {slide.kind !== 'step' && ask()}
+      <div key={slideKey} ref={stage} className="slide-enter scroll-mt-32">
+        {slide.kind === 'cover' && <Cover review={review} session={session} story={story} overview={overview} ask={ask()} onStep={goToStep} onChapter={goToChapter} />}
+        {slide.kind === 'chapter' && <ChapterSlide review={review} story={story} chapter={slide.chapter} ask={ask()} onStep={goToStep} />}
+        {slide.kind === 'step' && shownStep && (
+          <StepSlide review={review} session={session} story={story} chapter={slide.chapter} step={shownStep} ask={ask(shownStep)} />
+        )}
+        {slide.kind === 'closing' && <Closing review={review} story={story} ask={ask()} onStep={goToStep} />}
+      </div>
 
-      <nav className="flex items-center gap-2" aria-label="Diapositivas">
-        <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(position - 1)} disabled={position === 0}>
-          <ArrowLeft aria-hidden="true" /> Anterior
+      <nav
+        aria-label="Diapositivas y veredicto"
+        className="sticky bottom-0 z-20 -mx-2 flex flex-wrap items-center gap-2 border-t bg-background/95 px-2 py-2.5 backdrop-blur"
+      >
+        <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(position - 1)} disabled={position === 0} aria-label="Anterior">
+          <ArrowLeft aria-hidden="true" />
         </Button>
-        <span className="flex-1 text-center text-[13px] text-muted-foreground">
-          {position + 1} de {slides.length} · <kbd className="font-mono">←</kbd>/<kbd className="font-mono">→</kbd> para avanzar ·{' '}
-          <kbd className="font-mono">{undoKey}</kbd> quita el último veredicto
+        {shownStep && (
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto del paso">
+            {verdicts.map(({ value, label, icon: Icon, active, key }) => (
+              <Button
+                key={value}
+                size="lg"
+                variant={shownStep.verdict === value ? 'default' : 'outline'}
+                className={cn('min-h-11', shownStep.verdict === value && active)}
+                aria-pressed={shownStep.verdict === value}
+                onClick={() => decide(shownStep, value)}
+              >
+                <Icon aria-hidden="true" /> {label} <kbd className="font-mono text-xs opacity-60">{key}</kbd>
+              </Button>
+            ))}
+          </div>
+        )}
+        <span className="min-w-0 flex-1 text-center text-xs text-muted-foreground max-lg:hidden">
+          <kbd className="font-mono">←</kbd> <kbd className="font-mono">→</kbd> avanzar · <kbd className="font-mono">{undoKey}</kbd> quitar el último veredicto
         </span>
-        <Button size="lg" className="min-h-11" onClick={() => go(position + 1)} disabled={position === slides.length - 1}>
-          Siguiente <ArrowRight aria-hidden="true" />
+        {shownStep && (
+          <Button variant="ghost" size="lg" className="min-h-11" onClick={onDetail}>
+            <Maximize2 aria-hidden="true" /> En detalle
+          </Button>
+        )}
+        <Button size="lg" className="min-h-11 max-w-72 max-lg:ml-auto" onClick={() => go(position + 1)} disabled={!next} title={nextName ?? undefined}>
+          <span className="truncate">{nextName ? `Sigue: ${nextName}` : 'Fin'}</span> <ArrowRight aria-hidden="true" />
         </Button>
       </nav>
     </div>
   )
 }
 
-/** Dónde se está: portada, capítulos con su avance y cierre. */
-function ChapterStrip({
-  story,
-  steps,
-  active,
-  slide,
-  visible,
-  onJump,
-  onCover,
-  onClosing,
-}: {
-  story: Storyline
-  steps: ReviewStep[]
-  active: number | null
-  slide: Slide
-  /** ¿Le queda algún paso con el filtro actual? */
-  visible: (chapter: number) => boolean
-  onJump: (chapter: number) => void
-  onCover: () => void
-  onClosing: () => void
-}) {
-  const pill = 'rounded-full border px-3 py-1 text-[13px] transition-colors hover:border-foreground/40'
+/** Preguntar es para cuando hace falta: plegado, salvo que ya haya algo que leer. */
+function AskToggle({ open, children }: { open: boolean; children: ReactNode }) {
+  const [opened, setOpened] = useState(open)
+  if (opened || open) return children
   return (
-    <ol className="flex flex-wrap items-center gap-1.5" aria-label="Capítulos">
-      <li>
-        <button type="button" onClick={onCover} className={cn(pill, slide.kind === 'cover' && 'border-brand bg-brand-soft')}>
-          Portada
-        </button>
-      </li>
-      {story.chapters.map((chapter, index) => {
-        const done = chapter.steps.filter((step) => steps[step]?.verdict).length
-        return (
-          <li key={index} className="flex items-center gap-1.5">
-            <span aria-hidden="true" className="text-muted-foreground">
-              →
-            </span>
-            <button
-              type="button"
-              onClick={() => onJump(index)}
-              disabled={!visible(index)}
-              title={visible(index) ? undefined : 'Sin pasos con este filtro'}
-              aria-current={active === index}
-              className={cn(
-                pill,
-                !visible(index) && 'cursor-not-allowed opacity-50 hover:border-border',
-                chapter.unnarrated && 'border-warn/60 text-warn',
-                active === index && 'border-brand bg-brand-soft',
-                done === chapter.steps.length && 'text-muted-foreground',
-              )}
-            >
-              {chapter.title} <span className="text-muted-foreground">{done}/{chapter.steps.length}</span>
-            </button>
-          </li>
-        )
-      })}
-      <li className="flex items-center gap-1.5">
-        <span aria-hidden="true" className="text-muted-foreground">
-          →
-        </span>
-        <button type="button" onClick={onClosing} className={cn(pill, slide.kind === 'closing' && 'border-brand bg-brand-soft')}>
-          Cierre
-        </button>
-      </li>
-    </ol>
+    <Button variant="ghost" className="self-start text-muted-foreground" onClick={() => setOpened(true)}>
+      <MessageCircleQuestion aria-hidden="true" /> Preguntar al modelo
+    </Button>
   )
 }
 
-const stepName = (step: ReviewStep) => step.symbol ?? baseName(step.path)
-
+/** El repositorio de un paso, si la tarea toca varios: con uno solo no dice nada. */
 function repoName(review: ReviewResult, step: ReviewStep) {
+  if ((review.task?.repos.length ?? 0) < 2) return null
   return review.task?.repos.find((repo) => repo.repo === step.repo)?.name ?? null
 }
 
@@ -307,42 +293,102 @@ function StepLink({ review, step, onStep }: { review: ReviewResult; step: Review
   )
 }
 
-/** Qué pide la tarea, qué se hizo, el mapa de capítulos y lo que queda fuera. */
+/** Un grupo de la portada o del capítulo: un título discreto sobre una línea. */
+function Block({ title, tone, children }: { title: string; tone?: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-3 border-t pt-4">
+      <h3 className={cn('text-[13px] font-semibold text-muted-foreground', tone)}>{title}</h3>
+      {children}
+    </section>
+  )
+}
+
+/** Los capítulos como un recorrido, con lo que pasa de uno a otro al ejecutarse. */
+function Route({ review, story, onChapter }: { review: ReviewResult; story: Storyline; onChapter: (chapter: number) => void }) {
+  return (
+    <ol className="flex flex-col">
+      {story.chapters.map((chapter, index) => {
+        const repos = [...new Set(chapter.steps.map((step) => review.steps[step] && repoName(review, review.steps[step])).filter(Boolean))]
+        const done = chapter.steps.filter((step) => review.steps[step]?.verdict).length
+        const leaving = story.flow.filter((edge) => edge.from === index)
+        return (
+          <li key={index} className="relative flex gap-3 pb-4 last:pb-0">
+            {index < story.chapters.length - 1 && <span aria-hidden="true" className="absolute top-3 bottom-0 left-[5px] w-px bg-border" />}
+            <span
+              aria-hidden="true"
+              className={cn('z-10 mt-1.5 size-[11px] shrink-0 rounded-full border-2 bg-background', done === chapter.steps.length ? 'border-brand bg-brand' : chapter.unnarrated ? 'border-warn' : 'border-muted-foreground/60')}
+            />
+            <div className="flex min-w-0 flex-col gap-0.5 text-sm">
+              <button type="button" onClick={() => onChapter(index)} className={cn('self-start text-left font-semibold underline-offset-2 hover:underline', chapter.unnarrated && 'text-warn')}>
+                {chapter.title}
+              </button>
+              {chapter.intent && <p className="leading-relaxed text-muted-foreground">{chapter.intent}</p>}
+              <p className="text-xs text-muted-foreground">
+                {done}/{chapter.steps.length} pasos{repos.length > 0 && ` · ${repos.join(' → ')}`}
+              </p>
+              {leaving.map((edge) => (
+                <p key={`${edge.to}${edge.label}`} className="mt-1 font-mono text-xs text-brand">
+                  ↓ {edge.to !== index + 1 && `${story.chapters[edge.to]?.title}: `}
+                  {edge.label}
+                </p>
+              ))}
+            </div>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+/** Qué se hizo, qué pedía la tarea, el recorrido por los capítulos y lo que queda fuera. */
 function Cover({
   review,
   session,
   story,
-  first,
+  overview,
+  ask,
   onStep,
-  onStart,
+  onChapter,
 }: {
   review: ReviewResult
   session: string
   story: Storyline
-  /** El primer capítulo que se va a ver; `null` si el filtro los esconde todos. */
-  first: string | null
+  overview: ReactNode
+  ask: ReactNode
   onStep: (index: number) => void
-  onStart: () => void
+  onChapter: (chapter: number) => void
 }) {
   const write = useStoryline(session)
   const running = review.storylining?.running ?? false
   const model = review.ask_model.replace(/^[^:]+:/, '')
+  const warned = review.task?.repos.some((repo) => repo.warnings.length > 0)
+  const told = story.source === 'declared'
   return (
-    <div className="flex flex-col gap-4">
-      {story.source === 'declared' && (
-        <Panel className={cn('flex flex-wrap items-center gap-3', story.stale && 'border-warn/50')}>
-          <Megaphone className="size-4 text-brand" aria-hidden="true" />
-          <p className="min-w-0 flex-1 text-sm">
-            <span className="font-semibold">Contado por el agente</span> que hizo el cambio
-            {story.recorded_at && <> el {dateTime(story.recorded_at)}</>}: es su versión, contrástala con el código.
-            {story.stale && <span className="text-warn"> El código cambió después de contarlo.</span>}
+    <div className="flex flex-col gap-8">
+      {warned && overview}
+      <header className="flex flex-col gap-3">
+        {(told || story.model) && (
+          <p className="text-[13px] text-muted-foreground">
+            {told ? (
+              <>
+                <span className="font-semibold text-accent-foreground">Lo cuenta el agente que hizo el cambio</span>
+                {story.recorded_at && <> · {dateTime(story.recorded_at)}</>} · es su versión, contrástala con el código
+              </>
+            ) : (
+              <>
+                Lo cuenta <span className="font-semibold text-accent-foreground">{story.model?.replace(/^[^:]+:/, '')}</span>, leyendo el cambio
+              </>
+            )}
+            {told && story.stale && <span className="text-warn"> · el código cambió después de contarlo</span>}
           </p>
-        </Panel>
-      )}
-      {story.source !== 'declared' && (!story.model || story.stale || running || review.storylining?.error) && (
+        )}
+        {story.summary && <p className="max-w-[58ch] text-2xl leading-snug font-medium tracking-tight text-balance">{story.summary}</p>}
+      </header>
+
+      {!told && (!story.model || story.stale || running || review.storylining?.error) && (
         <Panel className="flex flex-wrap items-center gap-3">
           <Sparkles className="size-4 text-brand" aria-hidden="true" />
-          <p className="min-w-0 flex-1 text-sm">
+          <p className="min-w-0 flex-[1_1_20rem] text-sm">
             {running
               ? review.storylining?.part && review.storylining.part[1] > 1
                 ? review.storylining.part[0] === review.storylining.part[1]
@@ -364,256 +410,204 @@ function Cover({
         </Panel>
       )}
 
-      {story.summary && (
-        <Panel className="flex flex-col gap-2 border-brand/30 bg-brand-soft/40">
-          <h2 className="text-[13px] font-semibold text-accent-foreground">
-            El cambio{' '}
-            <span className="font-normal">
-              · {story.source === 'declared' ? 'contado por el agente' : `según ${story.model?.replace(/^[^:]+:/, '') ?? 'el revisor'}`}
-            </span>
-          </h2>
-          <p className="text-[15px] leading-relaxed">{story.summary}</p>
-        </Panel>
-      )}
-
-      {story.requirements.length > 0 && (
-        <Panel className="flex flex-col gap-3">
-          <h2 className="text-[13px] font-semibold text-muted-foreground">Lo que pide la tarea</h2>
-          <ul className="flex flex-col gap-3">
-            {story.requirements.map((requirement, index) => {
-              const view = statusView[requirement.status]
-              const Icon = view.icon
-              return (
-                <li key={index} className="flex gap-2.5 text-sm">
-                  <Icon className={cn('mt-0.5 size-4 shrink-0', view.tone)} aria-label={view.label} />
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <span>{requirement.text}</span>
-                    {requirement.note && <span className="text-muted-foreground">{requirement.note}</span>}
-                    {requirement.steps.length > 0 && (
-                      <span className="flex flex-wrap gap-1.5">
-                        {requirement.steps.map((step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
-                      </span>
-                    )}
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        </Panel>
-      )}
-
-      <Panel className="flex flex-col gap-3">
-        <h2 className="text-[13px] font-semibold text-muted-foreground">Cómo se cuenta</h2>
-        <ol className="flex flex-col gap-2">
-          {story.chapters.map((chapter, index) => {
-            const repos = [...new Set(chapter.steps.map((step) => review.steps[step] && repoName(review, review.steps[step])).filter(Boolean))]
-            return (
-              <li key={index} className="flex gap-3 text-sm">
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{index + 1}</span>
-                <span className="flex min-w-0 flex-col">
-                  <span className="font-semibold">
-                    {chapter.title}
-                    {repos.length > 0 && <span className="font-normal text-muted-foreground"> · {repos.join(' → ')}</span>}
-                  </span>
-                  {chapter.intent && <span className="text-muted-foreground">{chapter.intent}</span>}
-                </span>
-              </li>
-            )
-          })}
-        </ol>
-      </Panel>
-
-      {story.outside.length > 0 && (
-        <Panel className="flex flex-col gap-2 border-warn/40">
-          <h2 className="text-[13px] font-semibold text-warn">Fuera de lo que pide la tarea</h2>
-          <ul className="flex flex-col gap-2 text-sm">
-            {story.outside.map(([step, note]) => (
-              <li key={step} className="flex flex-wrap items-center gap-2">
-                {review.steps[step] && <StepLink review={review} step={review.steps[step]} onStep={onStep} />}
-                <span className="text-muted-foreground">{note}</span>
-              </li>
-            ))}
-          </ul>
-        </Panel>
-      )}
-
-      {story.unverified.length > 0 && (
-        <Panel className="flex flex-col gap-2">
-          <h2 className="text-[13px] font-semibold text-muted-foreground">Sin comprobar</h2>
-          <ul className="flex flex-col gap-1 text-sm">
-            {story.unverified.map((item) => (
-              <li key={item} className="flex gap-2 text-warn">
-                <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {item}
-              </li>
-            ))}
-          </ul>
-        </Panel>
-      )}
-
-      {story.risks.length > 0 && (
-        <Panel className="flex flex-col gap-2">
-          <h2 className="text-[13px] font-semibold text-muted-foreground">Riesgos</h2>
-          <ul className="flex flex-col gap-1 text-sm">
-            {story.risks.map((risk) => (
-              <li key={risk} className="flex gap-2 text-warn">
-                <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {risk}
-              </li>
-            ))}
-          </ul>
-        </Panel>
-      )}
-
-      <Button size="lg" className="min-h-11 self-start" onClick={onStart}>
-        {first ? `Empezar por «${first}»` : 'Ir al cierre'} <ArrowRight aria-hidden="true" />
-      </Button>
+      <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <Block title="El recorrido">
+          <Route review={review} story={story} onChapter={onChapter} />
+        </Block>
+        <div className="flex flex-col gap-8">
+          {story.requirements.length > 0 && (
+            <Block title="Lo que pide la tarea">
+              <ul className="flex flex-col gap-3">
+                {story.requirements.map((requirement, index) => {
+                  const view = statusView[requirement.status]
+                  const Icon = view.icon
+                  return (
+                    <li key={index} className="flex gap-2.5 text-sm">
+                      <Icon className={cn('mt-0.5 size-4 shrink-0', view.tone)} aria-label={view.label} />
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <span>{requirement.text}</span>
+                        {requirement.note && <span className="text-muted-foreground">{requirement.note}</span>}
+                        {requirement.steps.length > 0 && (
+                          <span className="flex flex-wrap gap-1.5">
+                            {requirement.steps.map((step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </Block>
+          )}
+          {story.outside.length > 0 && (
+            <Block title="Fuera de lo que pide la tarea" tone="text-warn">
+              <ul className="flex flex-col gap-3 text-sm">
+                {/* Una misma nota puede tocar varios pasos: se dice una vez. */}
+                {[...new Set(story.outside.map(([, note]) => note))].map((note) => (
+                  <li key={note} className="flex flex-col gap-1.5">
+                    <span className="text-muted-foreground">{note}</span>
+                    <span className="flex flex-wrap gap-1.5">
+                      {story.outside
+                        .filter(([, other]) => other === note)
+                        .map(([step]) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </Block>
+          )}
+          {story.unverified.length > 0 && <Warnings title="Sin comprobar" items={story.unverified} />}
+          {story.risks.length > 0 && <Warnings title="Riesgos" items={story.risks} />}
+        </div>
+      </div>
+      {!warned && overview}
+      {ask}
     </div>
   )
 }
 
-/** Un capítulo: qué hace, para qué, y sus pasos en orden de lectura. */
+function Warnings({ title, items }: { title: string; items: string[] }) {
+  return (
+    <Block title={title}>
+      <ul className="flex flex-col gap-1.5 text-sm">
+        {items.map((item) => (
+          <li key={item} className="flex gap-2 text-warn">
+            <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {item}
+          </li>
+        ))}
+      </ul>
+    </Block>
+  )
+}
+
+/** Un capítulo se lee: qué hace y cómo encaja a un lado, y lo que hay dentro al otro. */
 function ChapterSlide({
   review,
   story,
   chapter,
+  ask,
   onStep,
 }: {
   review: ReviewResult
   story: Storyline
   chapter: number
+  ask: ReactNode
   onStep: (index: number) => void
 }) {
   const current = story.chapters[chapter]
   return (
-    <Panel className={cn('flex flex-col gap-4 py-8', current.unnarrated && 'border-warn/50')}>
-      <p className="text-[13px] font-semibold text-muted-foreground">
-        Capítulo {chapter + 1} de {story.chapters.length}
-      </p>
-      <h2 className="text-2xl font-semibold">{current.title}</h2>
-      {current.intent && <p className="text-[15px] leading-relaxed">{current.intent}</p>}
-      {current.narration && <p className="leading-relaxed text-muted-foreground">{current.narration}</p>}
-      {current.requirements.length > 0 && (
-        <ul className="flex flex-col gap-1 text-sm">
-          {current.requirements.map((index) => (
-            <li key={index} className="flex gap-2">
-              <CircleCheck className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> Cubre: {story.requirements[index]?.text}
-            </li>
-          ))}
-        </ul>
-      )}
-      {current.look_at.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <h3 className="text-[13px] font-semibold text-muted-foreground">No pases por alto</h3>
-          <ul className="flex flex-col gap-1 text-sm">
-            {current.look_at.map((item) => (
-              <li key={item} className="flex gap-2">
-                <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
-              </li>
-            ))}
-          </ul>
+    <div className="flex flex-col gap-8">
+      <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <header className="flex flex-col gap-3">
+          <p className={cn('text-[13px] font-semibold text-muted-foreground', current.unnarrated && 'text-warn')}>
+            Capítulo {chapter + 1} de {story.chapters.length}
+            {current.kind && kindLabel[current.kind] && ` · ${kindLabel[current.kind]}`}
+          </p>
+          <h2 className="text-4xl font-bold tracking-tight text-balance">{current.title}</h2>
+          {current.intent && <p className="text-xl leading-snug font-medium tracking-tight">{current.intent}</p>}
+          {current.narration && <p className="max-w-[62ch] text-[17px] leading-relaxed text-muted-foreground">{current.narration}</p>}
+        </header>
+        <div className="flex flex-col gap-6">
+          <Block title="En este capítulo">
+            <div className="flex flex-wrap gap-1.5">
+              {current.steps.map((step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
+            </div>
+          </Block>
+          {current.requirements.length > 0 && (
+            <Block title="Cubre">
+              <ul className="flex flex-col gap-1.5 text-sm">
+                {current.requirements.map((index) => (
+                  <li key={index} className="flex gap-2">
+                    <CircleCheck className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {story.requirements[index]?.text}
+                  </li>
+                ))}
+              </ul>
+            </Block>
+          )}
+          {current.look_at.length > 0 && (
+            <Block title="No pases por alto">
+              <ul className="flex flex-col gap-1.5 text-sm">
+                {current.look_at.map((item) => (
+                  <li key={item} className="flex gap-2">
+                    <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
+                  </li>
+                ))}
+              </ul>
+            </Block>
+          )}
+          {current.questions.length > 0 && (
+            <Block title="Al acabar deberías poder responder">
+              <ul className="flex flex-col gap-1.5 text-sm">
+                {current.questions.map((question) => (
+                  <li key={question}>{question}</li>
+                ))}
+              </ul>
+            </Block>
+          )}
         </div>
-      )}
-      <div className="flex flex-wrap gap-1.5">
-        {current.steps.map((step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />)}
       </div>
-      {current.questions.length > 0 && (
-        <div className="flex flex-col gap-1 rounded-xl bg-muted px-4 py-3">
-          <h3 className="text-[13px] font-semibold text-muted-foreground">Al acabar el capítulo deberías poder responder</h3>
-          <ul className="flex flex-col gap-1 text-sm">
-            {current.questions.map((question) => (
-              <li key={question}>{question}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </Panel>
+      {ask}
+    </div>
   )
 }
 
-/** Un paso: a un lado lo que hay que saber (lo declarado y la guía), al otro el código. */
+/** Un paso: lo que hay que saber fijo a un lado y el código al otro, para leerlos a la vez. */
 function StepSlide({
   review,
   session,
   story,
   chapter,
   step,
-  siblings,
   ask,
-  onDecide,
-  onDetail,
 }: {
   review: ReviewResult
   session: string
   story: Storyline
   chapter: number
   step: ReviewStep
-  /** Los pasos del capítulo que se presentan con el filtro actual. */
-  siblings: number[]
   ask: ReactNode
-  onDecide: (step: ReviewStep, verdict: Verdict) => void
-  onDetail: () => void
 }) {
   const [focus, setFocus] = useState<LineRange | null>(null)
   const [composing, setComposing] = useState<number | null>(null)
   const anchored = step.guide && !step.guide.stale ? step.guide : null
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-start gap-5">
-        <div className="flex min-w-0 flex-[1_1_340px] flex-col gap-4">
-          <Panel className="flex flex-col gap-2">
-            <p className="text-[13px] text-muted-foreground">
-              {story.chapters[chapter].title} · paso {siblings.indexOf(step.index) + 1} de {siblings.length}
-            </p>
-            <h2 className="font-mono text-xl font-medium">{stepName(step)}</h2>
-            <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
-            <TriageChips triage={step.triage} policy={review.policy} />
-          </Panel>
-          <DeclaredPanel entries={step.declared} />
-          <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
-          {ask}
-        </div>
-        <div className="min-w-0 flex-[1.4_1_480px]">
-          <StepDiff
-            step={step}
-            comments={review.comments.filter((comment) => comment.step_key === step.key)}
-            hints={review.hints}
-            session={session}
-            model={review.ask_model}
-            composing={composing}
-            onCompose={setComposing}
-            stops={anchored?.walkthrough.map((stop) => stop.lines)}
-            focus={anchored ? focus : null}
-          />
-        </div>
+    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
+        <header className="flex flex-col gap-1.5">
+          <p className="text-[13px] text-muted-foreground">{story.chapters[chapter].intent || story.chapters[chapter].title}</p>
+          <h2 className="font-mono text-2xl font-semibold tracking-tight break-words">{stepName(step)}</h2>
+          <Mono className="text-xs break-all text-muted-foreground">{step.display_path}</Mono>
+          <TriageChips triage={step.triage} policy={review.policy} />
+        </header>
+        <DeclaredPanel entries={step.declared} />
+        <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
+        {ask}
       </div>
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Veredicto del paso">
-        {verdicts.map(({ value, label, icon: Icon, active, key }) => (
-          <Button
-            key={value}
-            size="lg"
-            variant={step.verdict === value ? 'default' : 'outline'}
-            className={cn('min-h-11', step.verdict === value && active)}
-            aria-pressed={step.verdict === value}
-            onClick={() => onDecide(step, value)}
-          >
-            <Icon aria-hidden="true" /> {label} <kbd className="font-mono text-xs opacity-60">{key}</kbd>
-          </Button>
-        ))}
-        <Button variant="ghost" size="lg" className="ml-auto min-h-11" onClick={onDetail}>
-          <Maximize2 aria-hidden="true" /> Ver en detalle
-        </Button>
+      <div className="min-w-0">
+        <StepDiff
+          step={step}
+          comments={review.comments.filter((comment) => comment.step_key === step.key)}
+          hints={review.hints}
+          session={session}
+          model={review.ask_model}
+          composing={composing}
+          onCompose={setComposing}
+          stops={anchored?.walkthrough.map((stop) => stop.lines)}
+          focus={anchored ? focus : null}
+        />
       </div>
     </div>
   )
 }
 
 /** Lo que queda: obligatorios sin veredicto, comentarios abiertos y lo que está fuera de la tarea. */
-function Closing({ review, story, onStep }: { review: ReviewResult; story: Storyline; onStep: (index: number) => void }) {
+function Closing({ review, story, ask, onStep }: { review: ReviewResult; story: Storyline; ask: ReactNode; onStep: (index: number) => void }) {
   const pending = review.steps.filter((step) => step.triage.level === 'must' && !step.verdict)
   const open = review.comments.filter((comment) => comment.status === 'open').length
   const missing = story.requirements.filter((requirement) => requirement.status !== 'done')
   return (
-    <Panel className="flex flex-col gap-4 py-8">
-      <h2 className="text-2xl font-semibold">{pending.length === 0 && open === 0 ? 'Todo lo obligatorio está revisado' : 'Lo que queda'}</h2>
+    <div className="flex flex-col gap-5">
+      <h2 className="text-4xl font-bold tracking-tight text-balance">{pending.length === 0 && open === 0 ? 'Todo lo obligatorio está revisado' : 'Lo que queda'}</h2>
       {pending.length > 0 && (
         <div className="flex flex-col gap-2">
           <p className="text-sm">
@@ -650,6 +644,7 @@ function Closing({ review, story, onStep }: { review: ReviewResult; story: Story
         <p className="text-sm text-warn">Hay código que el agente no contó: está en «No lo contó el agente».</p>
       )}
       <p className="text-sm text-muted-foreground">Arriba: «Pedir cambios» o «Aprobar».</p>
-    </Panel>
+      {ask}
+    </div>
   )
 }
