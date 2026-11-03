@@ -341,8 +341,9 @@ fn current_text(review: &SessionReview, step: &FlowStep, anchor: &Anchor) -> Str
     let lines = anchor.range();
     // Si el ancla es una clase y el paso un método suyo, lo declarado son sus líneas.
     let symbol = step.symbol.as_ref().filter(|symbol| {
-        // El constructor de Java se llama como su clase, pero no es ella.
-        anchor.symbol.as_deref().is_none_or(|wanted| {
+        // Sin símbolo, lo declarado son sus líneas (quizá el fichero entero). Y el
+        // constructor de Java se llama como su clase, pero no es ella.
+        anchor.symbol.as_deref().is_some_and(|wanted| {
             same_symbol(wanted, &symbol.qualified_name) && !contains_symbol(wanted, &symbol.qualified_name)
         })
     });
@@ -1381,6 +1382,14 @@ mod tests {
         assert_eq!(found.chapters[0].steps.len(), in_cart, "{found:?}");
         assert!(found.chapters[0].steps.len() > 1, "métodos e imports: {:?}", found.chapters[0]);
         assert!(!found.stale, "un ancla a la clase no desfasa por compararla con un método");
+    }
+
+    #[test]
+    fn an_anchor_to_a_whole_file_is_not_stale_because_of_its_first_step() {
+        let chapter = json!([{"id": "C1", "title": "El fichero", "intent": "i", "anchors": [{}]}]);
+        let (found, _, in_cart) = told_about_cart("file", &chapter);
+        assert_eq!(found.chapters[0].steps.len(), in_cart);
+        assert!(!found.stale, "{found:?}");
     }
 
     #[test]
