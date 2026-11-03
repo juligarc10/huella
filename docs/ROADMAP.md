@@ -39,7 +39,9 @@ guiada del cambio.
 
 1. Instalar `main` y migrar con copia:
    ```sh
-   cargo build --release -p huella-cli && cp target/release/huella ~/.local/bin/huella
+   cargo build --release -p huella-cli
+   rm -f ~/.local/bin/huella   # en macOS, copiar encima invalida la firma y el sistema lo mata
+   cp target/release/huella ~/.local/bin/huella
    huella setup        # copia de la base de datos, migración y skill actualizada
    ```
 2. Poner el contexto real del modelo local en `config.toml`
