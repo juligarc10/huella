@@ -67,12 +67,6 @@ guiada del cambio.
 
 Que el modelo local use el guion como libreto, para que la revisión se lea seguida.
 
-- **La guía de cada diapositiva con el contexto del capítulo**. `guide::step_request` recibe ya `StepContext`. Hay que añadir:
-  - el capítulo (título, intención, narración);
-  - el paso anterior y el siguiente;
-  - qué mirar (`look_at`) y las preguntas del capítulo.
-
-  Así la explicación enlaza con lo anterior y apunta a lo que importa. Al cambiar la petición cambia el hash, así que las guías anteriores quedan desfasadas sin más.
 - **El mapa de la portada** dibujado con `flow`: capítulos como nodos, que cruzan repositorios, y flechas con su etiqueta («llama a POST /filtros»).
 - **Auditar el guion del agente**. Un botón en la portada hace que el modelo revisor contraste lo declarado con el diff y la descripción: requisitos que dice cumplidos y no se ven, capítulos cuyo código no hace lo que cuentan, cambios que no menciona. El resultado se muestra junto al guion, sin sustituirlo.
 
