@@ -389,7 +389,27 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX declared_storyline_by_repo ON declared_storyline_repo(repo, branch);
 ",
+    // 22: los momentos en que se abrió una revisión y su rama había avanzado, con el
+    // commit de cada repositorio: desde ahí se puede ver solo lo nuevo.
+    r"
+    CREATE TABLE review_revision (
+        id              INTEGER PRIMARY KEY,
+        review_id       TEXT NOT NULL,
+        recorded_at     TEXT NOT NULL,
+        heads           TEXT NOT NULL
+    );
+    CREATE INDEX review_revision_by_review ON review_revision(review_id);
+",
 ];
+
+/// Un momento guardado de una revisión.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRevision {
+    pub id: i64,
+    pub recorded_at: String,
+    /// El commit de cada repositorio, en JSON.
+    pub heads: String,
+}
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
@@ -1945,6 +1965,33 @@ impl Store {
             params![review_id, stored.input_hash, stored.model, stored.storyline],
         )?;
         Ok(())
+    }
+
+    /// Guarda un momento de una revisión: el commit de cada repositorio (en JSON).
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_revision(&self, review_id: &str, heads: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO review_revision (review_id, recorded_at, heads)
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?2)",
+            params![review_id, heads],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Los momentos guardados de una revisión, del más antiguo al más reciente.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn revisions(&self, review_id: &str) -> Result<Vec<ReviewRevision>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT id, recorded_at, heads FROM review_revision WHERE review_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map([review_id], |row| {
+            Ok(ReviewRevision { id: row.get(0)?, recorded_at: row.get(1)?, heads: row.get(2)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Guarda un guion declarado (redactado) con los repositorios y ramas que toca.
