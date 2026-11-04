@@ -9,7 +9,7 @@ guiada del cambio.
 
 ## Dónde estamos (2026-11-04)
 
-**Publicada**: v0.5.0.
+**Publicada**: v0.5.0. **En `main`, sin publicar**: modo claro, preguntas sobre lo ya revisado, descartar imports, definición y usos con cmd+clic, historial de revisiones y el mapa de la portada.
 
 - **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
 - **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
@@ -21,7 +21,9 @@ guiada del cambio.
   - el rastro, veredictos siempre a mano y atajos (`r`, `u`);
   - preguntas al modelo desde cualquier diapositiva;
   - el código con colores, y cmd+clic para ver una definición;
-  - columnas ajustables, a todo el ancho.
+  - columnas ajustables, a todo el ancho;
+  - el mapa de la portada: cómo pasa la ejecución de un capítulo a otro;
+  - ver solo lo nuevo desde una revisión anterior o un commit de la rama.
 
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
@@ -53,7 +55,6 @@ La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y s
 
 Que el modelo local use el guion como libreto, para que la revisión se lea seguida.
 
-- **El mapa de la portada** dibujado con `flow`: capítulos como nodos, que cruzan repositorios, y flechas con su etiqueta («llama a POST /filtros»).
 - **Auditar el guion del agente**. Un botón en la portada hace que el modelo revisor contraste lo declarado con el diff y la descripción: requisitos que dice cumplidos y no se ven, capítulos cuyo código no hace lo que cuentan, cambios que no menciona. El resultado se muestra junto al guion, sin sustituirlo.
 
 ### 3. Preguntas activas y aprendizaje
