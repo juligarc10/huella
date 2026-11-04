@@ -122,7 +122,7 @@ function Code({ file, initial }: { file: CodeFile; initial: Selection | null }) 
       {thinking.length > 0 && (
         <div className="flex flex-col gap-2">
           {thinking.map((pending) => (
-            <PendingCodeAskCard key={pending.question} pending={pending} model={model} />
+            <PendingCodeAskCard key={pending.question} pending={pending} model={model} path={file.path} />
           ))}
         </div>
       )}

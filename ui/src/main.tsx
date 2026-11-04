@@ -62,7 +62,7 @@ createRoot(document.getElementById('root')!).render(
         <QueryClientProvider client={queryClient}>
           <TooltipProvider delayDuration={300}>
             <RouterProvider router={router} />
-            <Toaster richColors position="bottom-right" />
+            <Toaster richColors position="bottom-right" offset={{ bottom: 76 }} />
           </TooltipProvider>
         </QueryClientProvider>
       </ProjectProvider>
