@@ -105,15 +105,15 @@
     --accent: #e3f1ef;
     --accent-foreground: #0b3d39;
     --destructive: #b42318;
-    --border: #dcdfd9;
-    --input: #dcdfd9;
+    --border: #c7ccc4;
+    --input: #c7ccc4;
     --ring: #0e6e66;
     --brand: #0e6e66;
     --brand-soft: #e3f1ef;
     --brand-foreground: #ffffff;
     --warn: #9a4a06;
     --warn-soft: #fbebd7;
-    --warn-strong: #c26a0e;
+    --warn-strong: #a85b0b;
     --mark: #d5ece8;
     --chart-1: #0e6e66;
     --chart-2: #5fc2b6;
@@ -145,7 +145,8 @@
     --code-token-link: #1d5cb8;
     --code-foreground: inherit;
     --code-background: transparent;
-    --diff-removed: #fbeceb;
+    --diff-removed: #fbdfdc;
+    --diff-added: #dcefeb;
 }
 
 .dark {
@@ -159,6 +160,7 @@
     --code-token-punctuation: #a9afa9;
     --code-token-link: #8fbcff;
     --diff-removed: #3a2221;
+    --diff-added: #182e2b;
 }
 
 /* Cada diapositiva entra sin saltos. */
