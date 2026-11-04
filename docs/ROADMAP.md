@@ -9,7 +9,7 @@ guiada del cambio.
 
 ## Dónde estamos (2026-11-04)
 
-**Publicada**: v0.5.0. **En `main`, sin publicar**: modo claro, preguntas sobre lo ya revisado, descartar imports, definición y usos con cmd+clic, historial de revisiones y el mapa de la portada.
+**Publicada**: v0.6.0.
 
 - **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
 - **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
