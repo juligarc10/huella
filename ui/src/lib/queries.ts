@@ -23,7 +23,7 @@ import {
   type SessionInfo,
   type StatusResult,
   type SymbolResult,
-  type Definition,
+  type DefinitionResult,
 } from '@/lib/api'
 import { askId, noteAsked } from '@/lib/ask-notices'
 
@@ -281,12 +281,12 @@ export function useImpact(session: string) {
 }
 
 /** Dónde está definido un nombre, visto desde un fichero. */
-export function useDefinition(session: string, name: string, path: string) {
+export function useDefinition(session: string, name: string, path: string, before: string | undefined) {
   return useQuery({
-    queryKey: ['definition', session, name, path],
+    queryKey: ['definition', session, name, path, before],
     queryFn: () =>
-      api.get<{ definitions: Definition[] }>(
-        `review/${session}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}`,
+      api.get<DefinitionResult>(
+        `review/${session}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}&before=${encodeURIComponent(before ?? '')}`,
       ),
     staleTime: 5 * 60_000,
   })

@@ -18,6 +18,7 @@ const tagLabel: Record<TriageTag, string> = {
   docs: 'documentación',
   generated: 'generado',
   formatting: 'solo formato',
+  imports: 'solo imports',
 }
 
 const levelView: Record<TriageLevel, { label: string; chip: string }> = {
