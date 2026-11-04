@@ -1161,7 +1161,7 @@ fn check_guide(app: &mut App, session: &str, body: &str) -> Result<Value> {
 /// Dónde está definido un nombre: en una tarea, en la rama de cada repositorio; en
 /// una sesión, en la copia de trabajo de su proyecto.
 fn definition(app: &mut App, session: &str, params: &HashMap<String, String>) -> Result<Value> {
-    use huella_engine::definition::{SearchRoot, find};
+    use huella_engine::definition::{Lookup, SearchRoot, find};
     let name = non_empty(params.get("name")).context("falta el nombre")?;
     let from = non_empty(params.get("path")).context("falta el fichero")?;
     load_review(app, session)?;
@@ -1176,7 +1176,8 @@ fn definition(app: &mut App, session: &str, params: &HashMap<String, String>) ->
             .into_iter()
             .collect(),
     };
-    Ok(json!({"definitions": find(review, &roots, &name, &from)}))
+    let before = params.get("before").map(String::as_str);
+    Ok(serde_json::to_value(find(review, &roots, Lookup { name: &name, from: &from, before }))?)
 }
 
 fn impact(app: &mut App, session: &str) -> Result<Value> {

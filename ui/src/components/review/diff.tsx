@@ -56,7 +56,7 @@ export function StepDiff({
   const { data: codeQuestions } = useCodeQuestions(step.path, session)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [asking, setAsking] = useState(false)
-  const [peek, setPeek] = useState<{ index: number; name: string } | null>(null)
+  const [peek, setPeek] = useState<{ index: number; name: string; before: string } | null>(null)
   const tokens = useDiffTokens(step.path, step.lines)
   usePeekKey()
   // En una tarea casi nada viene de una edición registrada: marcarlo teñiría todo el diff.
@@ -98,7 +98,7 @@ export function StepDiff({
     // ⌘+clic es para abrir nombres: fuera de uno no selecciona la línea.
     if (event.metaKey || event.ctrlKey) {
       const word = wordAt(event)
-      if (word) setPeek({ index, name: word })
+      if (word) setPeek({ index, ...word })
       return
     }
     setAsking(false)
@@ -180,7 +180,7 @@ export function StepDiff({
               </div>
               {peek?.index === index && (
                 <div className={inline}>
-                  <DefinitionPeek session={session} name={peek.name} from={step.path} onClose={() => setPeek(null)} />
+                  <DefinitionPeek session={session} name={peek.name} before={peek.before} from={step.path} onClose={() => setPeek(null)} />
                 </div>
               )}
               {(placed.get(index) ?? []).map((comment) => (

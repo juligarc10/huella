@@ -24,7 +24,7 @@ function Words({ text }: { text: string }) {
 /** Una línea de código, con color si ya está resaltada. */
 export function CodeText({ text, tokens, className }: { text: string; tokens?: Token[]; className?: string }) {
   return (
-    <span className={cn('whitespace-pre', className)}>
+    <span data-code-line className={cn('whitespace-pre', className)}>
       {!text && ' '}
       {tokens
         ? tokens.map((token, index) => (
@@ -77,9 +77,18 @@ export function useDiffTokens(path: string, lines: { kind: string; text: string 
 }
 
 /** El nombre sobre el que se hizo ⌘+clic, si es eso lo que se hizo. */
-export function wordAt(event: MouseEvent): string | null {
+export function wordAt(event: MouseEvent): { name: string; before: string } | null {
   if (!event.metaKey && !event.ctrlKey) return null
-  return (event.target as HTMLElement).closest<HTMLElement>('[data-word]')?.dataset.word ?? null
+  const word = (event.target as HTMLElement).closest<HTMLElement>('[data-word]')
+  const name = word?.dataset.word
+  if (!word || !name) return null
+  // Lo que hay antes en la línea dice de qué tipo se está llamando: `users.save`.
+  const line = word.closest('[data-code-line]')
+  if (!line) return { name, before: '' }
+  const range = document.createRange()
+  range.setStart(line, 0)
+  range.setEndBefore(word)
+  return { name, before: range.toString() }
 }
 
 /** Mientras ⌘ o Ctrl estén pulsados, los nombres del código se marcan al pasar por encima. */

@@ -22,6 +22,8 @@ const MAX_FILES: usize = 200;
 const MAX_FILE_BYTES: usize = 512 * 1024;
 /// Líneas de código que se devuelven por definición.
 const MAX_LINES: usize = 300;
+/// Usos que se listan; del resto solo se da el número.
+const MAX_USES: usize = 30;
 
 /// Dónde buscar: un repositorio y, si no es la copia de trabajo, en qué rama.
 #[derive(Debug, Clone)]
@@ -140,30 +142,199 @@ fn read(search: &SearchRoot, inside: &str) -> Option<String> {
     (bytes.len() <= MAX_FILE_BYTES).then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Definiciones de `name`, de la más cercana a `from` a la más lejana: primero lo
-/// que cambia la revisión y después cada repositorio.
-#[must_use]
-pub fn find(review: &SessionReview, roots: &[SearchRoot], name: &str, from: &str) -> Vec<Definition> {
-    if !is_identifier(name) {
-        return Vec::new();
-    }
-    let display_of = |path: &str| {
-        roots
-            .iter()
-            .find_map(|search| path.strip_prefix(&format!("{}/", search.root.display())).map(str::to_owned))
-            .unwrap_or_else(|| path.to_owned())
+/// Lo que se busca: un nombre, visto desde un fichero.
+#[derive(Debug, Clone, Copy)]
+pub struct Lookup<'a> {
+    pub name: &'a str,
+    /// Fichero desde el que se busca.
+    pub from: &'a str,
+    /// Lo que hay antes del nombre en su línea: de ahí sale de qué tipo es.
+    pub before: Option<&'a str>,
+}
+
+/// Un uso del nombre en el código.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Use {
+    pub display_path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Found {
+    pub definitions: Vec<Definition>,
+    /// Los primeros usos en el mismo servicio, y cuántos hay.
+    pub uses: Vec<Use>,
+    pub total_uses: usize,
+}
+
+/// A qué se le pide el nombre, según lo que hay antes en la línea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Receiver<'a> {
+    /// `save(x)`, o `this.save(x)`: de este mismo fichero, si está.
+    Own,
+    /// `users.save(x)` o `Audit.log(x)`.
+    Named(&'a str),
+    /// `a().save(x)`, o no se sabe: sin pistas.
+    Unknown,
+}
+
+fn receiver(before: Option<&str>) -> Receiver<'_> {
+    let Some(before) = before else { return Receiver::Unknown };
+    let before = before.trim_end();
+    let Some(rest) =
+        before.strip_suffix('.').or_else(|| before.strip_suffix("::")).or_else(|| before.strip_suffix("->"))
+    else {
+        return Receiver::Own;
     };
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut found: Vec<Definition> = Vec::new();
-    for file in &review.files {
-        seen.insert(file.path.clone());
-        if clearly_generated(&file.path) {
+    let rest = rest.trim_end();
+    let start = rest
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .map_or(0, |at| at + rest[at..].chars().next().map_or(1, char::len_utf8));
+    match &rest[start..] {
+        "" => Receiver::Unknown,
+        "this" | "self" | "Self" | "super" => Receiver::Own,
+        name => Receiver::Named(name),
+    }
+}
+
+fn words(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter(|word| !word.is_empty())
+}
+
+fn is_type_name(word: &str) -> bool {
+    word.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// El tipo con que se declara una variable o un campo en el fichero: `UserRepository
+/// users` (Java, C#, Go al revés) o `users: UserRepository` (TypeScript, Kotlin, Rust).
+fn declared_type<'a>(source: &'a str, variable: &str) -> Option<&'a str> {
+    source.lines().find_map(|line| {
+        let tokens: Vec<&str> = words(line).collect();
+        let at = tokens.iter().position(|token| *token == variable)?;
+        let after = line.split(variable).nth(1).unwrap_or_default().trim_start();
+        // Después del nombre, `: Tipo` o, en Go, `Tipo`.
+        if let Some(next) = tokens.get(at + 1).filter(|next| is_type_name(next))
+            && (after.starts_with(':') || after.starts_with(*next))
+        {
+            return Some(*next);
+        }
+        // Antes del nombre, `Tipo nombre` o `List<Tipo> nombre`: el tipo más cercano.
+        let declares = after.is_empty() || after.starts_with([';', '=', ',', ')']);
+        declares.then(|| tokens[..at].iter().rev().find(|token| is_type_name(token)).copied()).flatten()
+    })
+}
+
+fn container(qualified: &str) -> Option<&str> {
+    let plain = qualified.rsplit_once(['.', ':'])?.0;
+    Some(short_name(plain.trim_end_matches(':')))
+}
+
+/// ¿La clase de esta definición implementa o extiende `wanted`?
+fn extends(source: &str, class: &str, wanted: &str) -> bool {
+    source.lines().any(|line| {
+        let tokens: Vec<&str> = words(line).collect();
+        tokens.iter().any(|token| matches!(*token, "class" | "impl" | "struct" | "interface" | "object"))
+            && tokens.contains(&class)
+            && tokens.contains(&wanted)
+    })
+}
+
+/// Una definición candidata, con el fichero en que está.
+struct Candidate {
+    definition: Definition,
+    source: String,
+}
+
+fn candidates_in_review(review: &SessionReview, name: &str, display_of: impl Fn(&str) -> String) -> Vec<Candidate> {
+    review
+        .files
+        .iter()
+        .filter(|file| !clearly_generated(&file.path))
+        .flat_map(|file| {
+            named(&file.path, &file.after, name)
+                .into_iter()
+                .map(|symbol| Candidate {
+                    definition: definition(&file.path, &display_of(&file.path), &file.after, &symbol, true),
+                    source: file.after.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn root_of<'a>(roots: &'a [SearchRoot], path: &str) -> Option<&'a SearchRoot> {
+    roots.iter().find(|search| path.starts_with(&format!("{}/", search.root.display())))
+}
+
+/// Los usos de `name` en el servicio. Con un tipo conocido, solo en ficheros que lo
+/// nombran o que definen el método: otro `execute` de otra clase no es un uso de este.
+fn uses_of(
+    search: &SearchRoot,
+    name: &str,
+    wanted: Option<&str>,
+    near: Option<&str>,
+    found: &[Definition],
+) -> (Vec<Use>, usize) {
+    let grep = |word: &str, list: bool| {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&search.root).args(["grep", "-I", "-w", "-F"]);
+        command.arg(if list { "-l" } else { "-n" }).args(["-e", word]);
+        if let Some(reference) = &search.reference {
+            command.arg(reference);
+        }
+        command.arg("--");
+        command.output().map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default()
+    };
+    let prefix = search.reference.as_ref().map_or(String::new(), |reference| format!("{reference}:"));
+    let naming: Option<BTreeSet<String>> = wanted.map(|word| {
+        grep(word, true).lines().map(|line| line.strip_prefix(prefix.as_str()).unwrap_or(line).to_owned()).collect()
+    });
+    let mut uses = Vec::new();
+    let mut total = 0;
+    for line in grep(name, false).lines() {
+        let line = line.strip_prefix(prefix.as_str()).unwrap_or(line);
+        let mut parts = line.splitn(3, ':');
+        let (Some(path), Some(number), Some(text)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let Ok(number) = number.parse::<usize>() else { continue };
+        let inside_definition = found.iter().any(|definition| {
+            definition.display_path == path
+                && number >= definition.start_line
+                && number < definition.start_line + definition.lines.len()
+        });
+        let defines_it = found.iter().any(|definition| definition.display_path == path);
+        if inside_definition
+            || clearly_generated(path)
+            || extension(path) != near
+            || naming.as_ref().is_some_and(|files| !files.contains(path) && !defines_it)
+        {
             continue;
         }
-        for symbol in named(&file.path, &file.after, name) {
-            found.push(definition(&file.path, &display_of(&file.path), &file.after, &symbol, true));
+        total += 1;
+        if uses.len() < MAX_USES {
+            uses.push(Use { display_path: path.to_owned(), line: number, text: text.trim().to_owned() });
         }
     }
+    (uses, total)
+}
+
+/// Definiciones de un nombre, de la más cercana a la más lejana, y sus usos. Se
+/// queda en el servicio desde el que se busca, salvo que allí no esté; si se sabe de
+/// qué tipo se llama, solo ese tipo y lo que lo implementa.
+#[must_use]
+pub fn find(review: &SessionReview, roots: &[SearchRoot], lookup: Lookup<'_>) -> Found {
+    let Lookup { name, from, before } = lookup;
+    if !is_identifier(name) {
+        return Found::default();
+    }
+    let display_of = |path: &str| {
+        root_of(roots, path)
+            .and_then(|search| path.strip_prefix(&format!("{}/", search.root.display())))
+            .unwrap_or(path)
+            .to_owned()
+    };
+    let mut seen: BTreeSet<String> = review.files.iter().map(|file| file.path.clone()).collect();
+    let mut all = candidates_in_review(review, name, display_of);
     for search in roots {
         for inside in candidates(search, name, extension(from)) {
             let path = format!("{}/{inside}", search.root.display());
@@ -172,11 +343,54 @@ pub fn find(review: &SessionReview, roots: &[SearchRoot], name: &str, from: &str
             }
             let Some(source) = read(search, &inside) else { continue };
             for symbol in named(&path, &source, name) {
-                found.push(definition(&path, &inside, &source, &symbol, false));
+                all.push(Candidate {
+                    definition: definition(&path, &inside, &source, &symbol, false),
+                    source: source.clone(),
+                });
             }
         }
     }
-    found.sort_by_key(|item| {
+
+    // Del mismo servicio, si lo hay.
+    let home = root_of(roots, from);
+    if let Some(home) = home {
+        let prefix = format!("{}/", home.root.display());
+        if all.iter().any(|candidate| candidate.definition.path.starts_with(&prefix)) {
+            all.retain(|candidate| candidate.definition.path.starts_with(&prefix));
+        }
+    }
+
+    let from_source = review
+        .files
+        .iter()
+        .find(|file| file.path == from)
+        .map(|file| file.after.clone())
+        .or_else(|| {
+            let search = home?;
+            read(search, from.strip_prefix(&format!("{}/", search.root.display()))?)
+        })
+        .unwrap_or_default();
+    let called_on = receiver(before);
+    let wanted = match called_on {
+        Receiver::Named(word) if is_type_name(word) => Some(word.to_owned()),
+        Receiver::Named(word) => declared_type(&from_source, word).map(str::to_owned),
+        Receiver::Own | Receiver::Unknown => None,
+    };
+    if let Some(wanted) = &wanted {
+        let matches = |candidate: &Candidate| {
+            container(&candidate.definition.qualified_name)
+                .is_some_and(|class| class == wanted || extends(&candidate.source, class, wanted))
+        };
+        if all.iter().any(matches) {
+            all.retain(matches);
+        }
+    }
+    if called_on == Receiver::Own && all.iter().any(|candidate| candidate.definition.path == from) {
+        all.retain(|candidate| candidate.definition.path == from);
+    }
+
+    let mut definitions: Vec<Definition> = all.into_iter().map(|candidate| candidate.definition).collect();
+    definitions.sort_by_key(|item| {
         (
             item.path != from,
             extension(&item.path) != extension(from),
@@ -186,8 +400,10 @@ pub fn find(review: &SessionReview, roots: &[SearchRoot], name: &str, from: &str
             item.start_line,
         )
     });
-    found.truncate(MAX_RESULTS);
-    found
+    definitions.truncate(MAX_RESULTS);
+    let (uses, total_uses) =
+        home.map(|search| uses_of(search, name, wanted.as_deref(), extension(from), &definitions)).unwrap_or_default();
+    Found { definitions, uses, total_uses }
 }
 
 #[cfg(test)]
@@ -247,6 +463,10 @@ mod tests {
         huella_review::build("s", &edits, |e| e.path.display().to_string(), |_| None)
     }
 
+    fn defs(review: &SessionReview, roots: &[SearchRoot], name: &str, from: &str) -> Vec<Definition> {
+        find(review, roots, Lookup { name, from, before: None }).definitions
+    }
+
     const SERVICE: &str = "package a;\npublic class UserService {\n  public UserService() {}\n  public void register(String email) {\n    save(email);\n  }\n  private void save(String email) {\n    audit(email);\n  }\n}\n";
 
     #[test]
@@ -259,7 +479,7 @@ mod tests {
         let from = format!("{}/src/Caller.java", dir.display());
         let review = review_of(&[(&from, "class Caller {}\n")]);
 
-        let found = find(&review, &roots, "save", &from);
+        let found = defs(&review, &roots, "save", &from);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].qualified_name, "UserService.save");
         assert_eq!(found[0].display_path, "src/UserService.java");
@@ -268,7 +488,7 @@ mod tests {
         assert!(!found[0].in_change);
 
         // La clase, sin su constructor, que se llama igual.
-        let found = find(&review, &roots, "UserService", &from);
+        let found = defs(&review, &roots, "UserService", &from);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].qualified_name, "UserService");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -283,7 +503,7 @@ mod tests {
         let review = review_of(&[(&path, "export function total() {\n  return 'de la rama';\n}\n")]);
         let roots = [SearchRoot { root: dir.clone(), reference: None }];
         let from = format!("{}/lib/caller.ts", dir.display());
-        let found = find(&review, &roots, "total", &from);
+        let found = defs(&review, &roots, "total", &from);
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].in_change && found[0].lines[1].contains("de la rama"), "{found:?}");
         assert_eq!(found[1].display_path, "lib/total.py", "otro lenguaje, después");
@@ -300,9 +520,91 @@ mod tests {
         commit(&dir, "dist/app.js", "function hidden() {}\n");
         let roots = [SearchRoot { root: dir.clone(), reference: None }];
         let review = review_of(&[]);
-        assert_eq!(find(&review, &roots, "hidden", "/x.js").len(), 0);
-        assert_eq!(find(&review, &roots, "--output=x", "/x.js").len(), 0);
+        assert_eq!(defs(&review, &roots, "hidden", "/x.js").len(), 0);
+        assert_eq!(defs(&review, &roots, "--output=x", "/x.js").len(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const CALLER: &str = "class OrderService {\n  private final PaymentGateway gateway;\n  void pay() {\n    gateway.execute(1);\n    execute(2);\n  }\n  void execute(int x) {}\n}\n";
+    const GATEWAY: &str = "interface PaymentGateway {\n  void execute(int amount);\n}\n";
+    const STRIPE: &str = "class StripeGateway implements PaymentGateway {\n  public void execute(int amount) {}\n}\n";
+    const OTHER_TASK: &str = "class ImportTask {\n  void execute() {}\n}\n";
+
+    fn services(name: &str) -> (PathBuf, PathBuf) {
+        let billing = repo(&format!("{name}-billing"));
+        commit(&billing, "src/OrderService.java", CALLER);
+        commit(&billing, "src/PaymentGateway.java", GATEWAY);
+        commit(&billing, "src/StripeGateway.java", STRIPE);
+        commit(&billing, "src/ImportTask.java", OTHER_TASK);
+        let other = repo(&format!("{name}-other"));
+        commit(&other, "src/PaymentGateway.java", "class PaymentGateway {\n  void execute() {}\n}\n");
+        commit(&other, "src/Elsewhere.java", "class Elsewhere {\n  void execute() {}\n}\n");
+        (billing, other)
+    }
+
+    fn names(found: &Found) -> Vec<&str> {
+        let mut names: Vec<&str> =
+            found.definitions.iter().map(|definition| definition.qualified_name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn a_method_is_looked_up_in_its_own_service_and_on_the_type_it_is_called_on() {
+        let (billing, other) = services("scope");
+        let roots = [
+            SearchRoot { root: billing.clone(), reference: Some("main".into()) },
+            SearchRoot { root: other.clone(), reference: Some("main".into()) },
+        ];
+        let from = format!("{}/src/OrderService.java", billing.display());
+        let review = review_of(&[]);
+
+        // `gateway` es un PaymentGateway: su interfaz y quien la implementa, no ImportTask ni el otro servicio.
+        let found = find(&review, &roots, Lookup { name: "execute", from: &from, before: Some("    gateway.") });
+        assert_eq!(names(&found), ["PaymentGateway.execute", "StripeGateway.execute"], "{found:?}");
+        assert!(found.definitions.iter().all(|definition| definition.path.starts_with(&billing.display().to_string())));
+
+        // Sin receptor: el de este mismo fichero.
+        let found = find(&review, &roots, Lookup { name: "execute", from: &from, before: Some("    ") });
+        assert_eq!(names(&found), ["OrderService.execute"]);
+
+        // Sin pistas: todos los de este servicio, ninguno del otro.
+        let found = find(&review, &roots, Lookup { name: "execute", from: &from, before: None });
+        assert_eq!(names(&found).len(), 4, "{found:?}");
+        assert!(found.definitions.iter().all(|definition| definition.path.starts_with(&billing.display().to_string())));
+
+        // Si en este servicio no está, se busca en los demás.
+        let found = find(&review, &roots, Lookup { name: "Elsewhere", from: &from, before: None });
+        assert_eq!(names(&found), ["Elsewhere"]);
+        std::fs::remove_dir_all(&billing).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    #[test]
+    fn the_uses_are_those_of_the_type_and_not_any_method_with_that_name() {
+        let (billing, other) = services("uses");
+        let roots = [SearchRoot { root: billing.clone(), reference: Some("main".into()) }];
+        let from = format!("{}/src/OrderService.java", billing.display());
+        let found = find(&review_of(&[]), &roots, Lookup { name: "execute", from: &from, before: Some("gateway.") });
+        let uses: Vec<(&str, usize)> = found.uses.iter().map(|one| (one.display_path.as_str(), one.line)).collect();
+        assert!(uses.contains(&("src/OrderService.java", 4)), "{uses:?}");
+        assert!(!uses.iter().any(|(path, _)| *path == "src/ImportTask.java"), "{uses:?}");
+        assert_eq!(found.total_uses, found.uses.len());
+        std::fs::remove_dir_all(&billing).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    #[test]
+    fn the_type_of_a_variable_comes_from_how_it_is_declared() {
+        assert_eq!(declared_type("  private final UserRepository users;", "users"), Some("UserRepository"));
+        assert_eq!(declared_type("  List<User> users = x();", "users"), Some("User"));
+        assert_eq!(declared_type("  private users: UserRepository,", "users"), Some("UserRepository"));
+        assert_eq!(declared_type("users.save(x);", "users"), None);
+        assert_eq!(receiver(Some("  users.")), Receiver::Named("users"));
+        assert_eq!(receiver(Some("this.")), Receiver::Own);
+        assert_eq!(receiver(Some("return ")), Receiver::Own);
+        assert_eq!(receiver(Some("a().")), Receiver::Unknown);
+        assert_eq!(receiver(None), Receiver::Unknown);
     }
 
     #[test]
@@ -311,7 +613,7 @@ mod tests {
         let source = format!("function long() {{\n{body}}}\n");
         let path = "/w/long.ts";
         let review = review_of(&[(path, source.as_str())]);
-        let found = find(&review, &[], "long", path);
+        let found = defs(&review, &[], "long", path);
         assert_eq!(found[0].lines.len(), MAX_LINES);
         assert!(found[0].truncated);
     }

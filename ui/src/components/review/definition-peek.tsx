@@ -9,32 +9,36 @@ import { cn } from '@/lib/utils'
 
 /**
  * La definición de un nombre, abierta debajo de la línea desde la que se pidió.
- * Dentro, ⌘+clic sigue a otro nombre y «Volver» deshace el camino. Solo busca por
- * nombre: si hay varios candidatos, se elige entre ellos.
+ * Dentro, ⌘+clic sigue a otro nombre y «Volver» deshace el camino. Busca en el mismo
+ * servicio y, si se sabe de qué tipo se llama, solo ese tipo y lo que lo implementa;
+ * si aun así hay varios candidatos, se elige entre ellos. Debajo, sus usos.
  */
 export function DefinitionPeek({
   session,
   name,
+  before,
   from,
   onClose,
 }: {
   session: string
   name: string
+  /** Lo que hay antes del nombre en su línea. */
+  before: string
   from: string
   onClose: () => void
 }) {
-  const [trail, setTrail] = useState([{ name, from }])
+  const [trail, setTrail] = useState<{ name: string; from: string; before: string }[]>([{ name, from, before }])
   const [chosen, setChosen] = useState(0)
   const current = trail[trail.length - 1]
-  const { data, isPending, error } = useDefinition(session, current.name, current.from)
+  const { data, isPending, error } = useDefinition(session, current.name, current.from, current.before)
   const found = data?.definitions ?? []
   const shown: Definition | undefined = found[chosen]
 
   // Otro ⌘+clic en el diff abre otro nombre, aunque el panel siguiera abierto.
   useEffect(() => {
-    setTrail([{ name, from }])
+    setTrail([{ name, from, before }])
     setChosen(0)
-  }, [name, from])
+  }, [name, from, before])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -46,7 +50,7 @@ export function DefinitionPeek({
   const follow = (event: MouseEvent) => {
     const word = wordAt(event)
     if (!word || !shown) return
-    setTrail([...trail, { name: word, from: shown.path }])
+    setTrail([...trail, { name: word.name, before: word.before, from: shown.path }])
     setChosen(0)
   }
 
@@ -113,6 +117,24 @@ export function DefinitionPeek({
         </p>
       )}
       {shown && <DefinitionCode definition={shown} onClick={follow} />}
+      {data && data.total_uses > 0 && (
+        <details className="border-t px-3 py-2 text-sm">
+          <summary className="cursor-pointer text-[13px] font-semibold text-muted-foreground">
+            {data.total_uses === 1 ? '1 uso' : `${data.total_uses} usos`} en este servicio
+          </summary>
+          <ul className="mt-2 flex max-h-56 flex-col gap-1.5 overflow-auto">
+            {data.uses.map((use) => (
+              <li key={`${use.display_path}:${use.line}`} className="flex flex-col font-mono text-xs">
+                <span className="text-muted-foreground">
+                  {use.display_path}:{use.line}
+                </span>
+                <span className="break-all">{use.text}</span>
+              </li>
+            ))}
+          </ul>
+          {data.total_uses > data.uses.length && <p className="mt-1 text-xs text-muted-foreground">… y {data.total_uses - data.uses.length} más</p>}
+        </details>
+      )}
     </section>
   )
 }

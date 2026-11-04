@@ -260,6 +260,13 @@ export interface Definition {
   in_change: boolean
 }
 
+/** Dónde está definido un nombre y dónde se usa. */
+export interface DefinitionResult {
+  definitions: Definition[]
+  uses: { display_path: string; line: number; text: string }[]
+  total_uses: number
+}
+
 export interface ReviewStep {
   index: number
   key: string
@@ -383,6 +390,7 @@ export type TriageTag =
   | 'docs'
   | 'generated'
   | 'formatting'
+  | 'imports'
 
 /** Cuánta atención merece un paso según la política. */
 export type TriageLevel = 'must' | 'acknowledge' | 'skip'

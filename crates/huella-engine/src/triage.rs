@@ -34,6 +34,7 @@ pub enum Tag {
     Docs,
     Generated,
     Formatting,
+    Imports,
 }
 
 impl Tag {
@@ -53,10 +54,11 @@ impl Tag {
             Self::Docs => "documentación",
             Self::Generated => "generado",
             Self::Formatting => "solo formato",
+            Self::Imports => "solo imports",
         }
     }
 
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Security,
         Self::Data,
         Self::PublicApi,
@@ -69,6 +71,7 @@ impl Tag {
         Self::Docs,
         Self::Generated,
         Self::Formatting,
+        Self::Imports,
     ];
 }
 
@@ -168,7 +171,7 @@ impl Policy {
         use Level::{Acknowledge, Must, Skip};
         #[allow(clippy::match_same_arms, reason = "se lee mejor como una tabla por preset")]
         let level = |tag: Tag| match (preset, tag) {
-            (_, Tag::Generated | Tag::Formatting) => Skip,
+            (_, Tag::Generated | Tag::Formatting | Tag::Imports) => Skip,
             (Preset::Strict, _) => Must,
             (Preset::Balanced, Tag::Security | Tag::Data | Tag::Unrequested | Tag::Dependencies) => Must,
             (Preset::Balanced, Tag::Docs) => Skip,
@@ -305,6 +308,9 @@ pub fn triage(
             // Lo que produce una herramienta no se lee: lo que contenga no sube su nivel.
             if clearly_generated(&review.files[step.file].path) {
                 findings.retain(|finding| finding.tag == Tag::Generated);
+            } else if only_imports(step) {
+                // Unos imports no aportan nada por sí solos, nombren lo que nombren.
+                findings = vec![Finding { tag: Tag::Imports, reason: "solo cambian imports".into() }];
             }
             StepTriage { level: policy.level_of(&findings), findings }
         })
@@ -395,6 +401,41 @@ const LOCKFILES: [&str; 8] = [
 const CONFIG_NAMES: [&str; 5] = ["dockerfile", "docker-compose.yml", "docker-compose.yaml", "makefile", ".gitignore"];
 const CONFIG_EXTENSIONS: [&str; 6] = ["yml", "yaml", "toml", "ini", "conf", "env"];
 const DOC_EXTENSIONS: [&str; 4] = ["md", "mdx", "rst", "txt"];
+
+/// ¿Este paso solo cambia imports? Solo lo que no pertenece a ningún símbolo, para
+/// no confundir con una línea de código que empiece igual.
+fn only_imports(step: &FlowStep) -> bool {
+    if step.symbol.is_some() {
+        return false;
+    }
+    let mut changed = step.lines.iter().filter_map(|line| match line {
+        DiffLine::Added { text, .. } | DiffLine::Removed(text) => Some(text.trim()),
+        DiffLine::Context(_) => None,
+    });
+    let mut any = false;
+    // Dentro de `import { a, b } from` de varias líneas, cualquier línea vale.
+    let mut open = false;
+    let all = changed.all(|line| {
+        if line.is_empty() {
+            return true;
+        }
+        any = true;
+        if open {
+            open = !line.contains('}') && !line.contains(')');
+            return true;
+        }
+        let opens = is_import_line(line);
+        open = opens && (line.ends_with('{') || line.ends_with('('));
+        opens
+    });
+    all && any
+}
+
+fn is_import_line(line: &str) -> bool {
+    const STARTS: [&str; 9] =
+        ["import ", "import{", "package ", "use ", "pub use ", "using ", "#include", "require ", "from "];
+    STARTS.iter().any(|start| line.starts_with(start))
+}
 
 /// ¿Es seguro que lo produce una herramienta? Lockfiles, minificados, snapshots y
 /// `dist` fuera de `src`. Es más estricto que la etiqueta «generado»: un paquete
@@ -591,6 +632,23 @@ mod tests {
         assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level == Level::Must));
         let (review, plan) = plan_of("/w/src/dist/auth.ts", None, code);
         assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level == Level::Must));
+    }
+
+    #[test]
+    fn a_step_with_only_imports_is_skippable_whatever_they_name() {
+        let imports = "package a;\n\nimport com.acme.security.PasswordEncoder;\nimport java.util.List;\n";
+        let (review, plan) = plan_of("/w/src/main/java/a/Imports.java", None, imports);
+        let found = tags(&review, &plan, &Policy::default());
+        assert!(found.iter().all(|(level, tags)| *level == Level::Skip && tags == &[Tag::Imports]), "{found:?}");
+
+        let several = "import {\n  a,\n  b,\n} from './x';\n";
+        let (review, plan) = plan_of("/w/src/x.ts", None, several);
+        assert!(tags(&review, &plan, &Policy::default()).iter().all(|(level, _)| *level == Level::Skip));
+
+        // Una línea de código en el mismo trozo ya es otra cosa.
+        let mixed = "import a from './a';\nconst password = a();\n";
+        let (review, plan) = plan_of("/w/src/y.ts", None, mixed);
+        assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level != Level::Skip));
     }
 
     #[test]
