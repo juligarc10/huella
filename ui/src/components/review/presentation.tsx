@@ -19,12 +19,14 @@ import { SplitPane } from '@/components/resizable'
 import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
 import { FreshLines, StepDiff } from '@/components/review/diff'
+import { FlowMap } from '@/components/review/flow-map'
 import { GuidePanel } from '@/components/review/guide'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, RevisionPoint, Storyline, Verdict } from '@/lib/api'
+import { hasFlowMap } from '@/lib/flow-layout'
 import { dateTime } from '@/lib/format'
 import { useAskNotices } from '@/lib/ask-notices'
 import { useChanges, useGuide, useRefreshReview, useRevisions, useStoryline } from '@/lib/queries'
@@ -427,14 +429,20 @@ function Block({ title, tone, children }: { title: string; tone?: string; childr
   )
 }
 
+function chapterRepos(review: ReviewResult, chapter: Storyline['chapters'][number]) {
+  return [...new Set(chapter.steps.flatMap((step) => (review.steps[step] ? [repoName(review, review.steps[step])] : [])).filter((repo) => Boolean(repo)))] as string[]
+}
+
 /** Los capítulos como un recorrido, con lo que pasa de uno a otro al ejecutarse. */
 function Route({ review, story, tests = false, onChapter }: { review: ReviewResult; story: Storyline; tests?: boolean; onChapter: (chapter: number) => void }) {
+  const mapped = hasFlowMap(story)
   return (
     <ol className="flex flex-col">
       {story.chapters.map((chapter, index) => {
-        const repos = [...new Set(chapter.steps.map((step) => review.steps[step] && repoName(review, review.steps[step])).filter(Boolean))]
+        const repos = chapterRepos(review, chapter)
         const done = chapter.steps.filter((step) => review.steps[step]?.verdict).length
-        const leaving = story.flow.filter((edge) => edge.from === index)
+        // Con mapa, sus flechas ya están dibujadas; las que tocan un test no salen en él.
+        const leaving = story.flow.filter((edge) => edge.from === index && (!mapped || chapter.kind === 'test' || story.chapters[edge.to]?.kind === 'test'))
         if (Boolean(chapter.kind === 'test') !== tests) return null
         return (
           <li key={index} className="relative flex gap-3 pb-4 last:pb-0">
@@ -565,6 +573,12 @@ function Cover({
           )}
           {review.storylining?.error && <p className="w-full text-sm text-destructive">{review.storylining.error}</p>}
         </Panel>
+      )}
+
+      {hasFlowMap(story) && (
+        <Block title="El mapa">
+          <FlowMap review={review} story={story} reposOf={(chapter) => chapterRepos(review, story.chapters[chapter])} onChapter={onChapter} />
+        </Block>
       )}
 
       <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
