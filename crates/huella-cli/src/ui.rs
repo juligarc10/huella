@@ -324,6 +324,8 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["review", session, "feedback"]) => feedback(app, session)?,
         ("GET", ["review", session, "impact"]) => impact(app, session)?,
         ("GET", ["review", session, "definition"]) => definition(app, session, params)?,
+        ("GET", ["review", session, "revisions"]) => revisions(app, session)?,
+        ("POST", ["review", session, "changes"]) => changes_since(app, session, body)?,
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
         ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
@@ -1158,6 +1160,37 @@ fn check_guide(app: &mut App, session: &str, body: &str) -> Result<Value> {
 }
 
 /// Qué código del proyecto, fuera de la sesión, usa lo que cambió cada paso.
+/// Los momentos desde los que se puede ver solo lo nuevo de una tarea.
+fn revisions(app: &mut App, session: &str) -> Result<Value> {
+    load_review(app, session)?;
+    let (review, _) = app.review.as_ref().context("revisión no cargada")?;
+    let points = match &app.task_repos {
+        Some(repos) => huella_engine::revisions::points(&app.store, &review.session_id, repos)?,
+        None => Vec::new(),
+    };
+    Ok(json!({"points": points}))
+}
+
+/// Lo que cambió desde un momento. Solo vale con los repositorios de la tarea y
+/// con commits: llega a `git show`.
+fn changes_since(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let heads: Vec<huella_engine::revisions::Head> =
+        serde_json::from_value(request["heads"].clone()).context("faltan los commits")?;
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let repos = app.task_repos.as_ref().context("solo las tareas tienen historial")?;
+    for head in &heads {
+        if !repos.iter().any(|repo| repo.repo == head.repo)
+            || !matches!(head.sha.len(), 40 | 64)
+            || !head.sha.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            bail!("punto no válido");
+        }
+    }
+    Ok(json!({"steps": huella_engine::revisions::changes(review, plan, &heads)}))
+}
+
 /// Dónde está definido un nombre: en una tarea, en la rama de cada repositorio; en
 /// una sesión, en la copia de trabajo de su proyecto.
 fn definition(app: &mut App, session: &str, params: &HashMap<String, String>) -> Result<Value> {
@@ -1458,6 +1491,11 @@ fn load_review(app: &mut App, session: &str) -> Result<()> {
             activity.extend(huella_engine::evidence::session_activity(&app.sources, session_id)?);
         }
         app.activity = activity;
+        // Si la rama ha avanzado desde la última vez, este momento queda para poder volver a él.
+        // Perderlo no debe impedir revisar.
+        if let Err(error) = huella_engine::revisions::record(&app.store, &task.review.session_id, &task.repos) {
+            eprintln!("huella: no se pudo guardar el momento de la revisión: {error}");
+        }
         app.task_repos = Some(task.repos);
         task.review
     } else {

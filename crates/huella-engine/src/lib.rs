@@ -22,6 +22,7 @@ pub mod refactor_bench;
 mod render;
 mod review;
 pub mod review_loop;
+pub mod revisions;
 mod sources;
 pub mod storyline;
 pub mod task;

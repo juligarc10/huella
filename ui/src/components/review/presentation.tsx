@@ -18,16 +18,16 @@ import { Mono, Panel } from '@/components/bits'
 import { SplitPane } from '@/components/resizable'
 import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
-import { StepDiff } from '@/components/review/diff'
+import { FreshLines, StepDiff } from '@/components/review/diff'
 import { GuidePanel } from '@/components/review/guide'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
-import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
+import type { LineRange, ReviewResult, ReviewStep, RevisionPoint, Storyline, Verdict } from '@/lib/api'
 import { dateTime } from '@/lib/format'
 import { useAskNotices } from '@/lib/ask-notices'
-import { useGuide, useRefreshReview, useStoryline } from '@/lib/queries'
+import { useChanges, useGuide, useRefreshReview, useRevisions, useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 /** Qué tipo de capítulo es, en palabras. */
@@ -145,12 +145,24 @@ export function Presentation({
 }) {
   const story = review.storyline
   const refresh = useRefreshReview(session)
+  // Viendo solo lo nuevo desde un momento: lo demás se esconde.
+  // Se guarda el id: si el agente reescribe la rama, un punto que ya no existe deja de aplicarse.
+  const [sinceId, setSinceId] = useState<string | null>(null)
+  const { data: revisions } = useRevisions(session)
+  const since = revisions?.points.find((point) => point.id === sinceId) ?? null
+  const setSince = (point: RevisionPoint | null) => setSinceId(point?.id ?? null)
+  const { data: changes, isPending: readingChanges } = useChanges(session, since)
+  const fresh = useMemo(() => (since && changes ? new Map(changes.steps.map((change) => [change.step, change])) : null), [since, changes])
   const everySlide = useMemo(() => (story ? slidesOf(story, review.steps, () => true) : []), [story, review.steps])
   const slides = useMemo(() => {
     if (!story) return []
     const shown = shownBy(filter)
-    return slidesOf(story, review.steps, (step) => Boolean(review.steps[step]) && shown(review.steps[step]))
-  }, [story, review.steps, filter])
+    // Lo nuevo se ve siempre, también si el filtro lo escondería: es lo que se ha pedido ver.
+    return slidesOf(story, review.steps, (step) => {
+      if (!review.steps[step]) return false
+      return fresh ? fresh.has(step) : shown(review.steps[step])
+    })
+  }, [story, review.steps, filter, fresh])
   // Se empieza en la portada, salvo que se venga de un paso (desde la vista por pasos).
   const [place, setPlace] = useState<Slide>(() => {
     const from = slides.find((slide) => showsStep(slide, current))
@@ -194,6 +206,7 @@ export function Presentation({
     // Un enlace a un paso que el filtro esconde: se quita el filtro para poder verlo.
     const target = everySlide.find((s) => showsStep(s, step))
     if (!target) return
+    setSince(null)
     onFilter('all')
     setPlace(target)
     onCurrent(step)
@@ -202,6 +215,7 @@ export function Presentation({
     const at = slides.findIndex((s) => s.kind === 'chapter' && s.chapter === chapter)
     if (at >= 0) return go(at)
     // Un capítulo que el filtro deja vacío: se quita el filtro para poder verlo.
+    setSince(null)
     onFilter('all')
     setPlace({ kind: 'chapter', chapter })
   }
@@ -254,6 +268,7 @@ export function Presentation({
     </AskToggle>
   )
   const shownSteps = stepsOf(slide)
+  const lastSeen = revisions?.points.find((point) => point.kind === 'seen') ?? null
   const shownStep = slide.kind === 'step' ? review.steps[slide.step] : null
   const inChapter = (s: Slide) => s.kind === 'step' || s.kind === 'idea' || s.kind === 'file'
   const siblings = inChapter(slide) ? slides.filter((s) => inChapter(s) && 'chapter' in s && 'chapter' in slide && s.chapter === slide.chapter) : []
@@ -273,7 +288,10 @@ export function Presentation({
         story={story}
         steps={review.steps}
         slide={slide}
-        visible={(step) => Boolean(review.steps[step]) && shownBy(filter)(review.steps[step])}
+        visible={(step) => Boolean(review.steps[step]) && (fresh ? fresh.has(step) : shownBy(filter)(review.steps[step]))}
+        points={revisions?.points ?? []}
+        since={since}
+        onSince={setSince}
         position={siblings.length > 0 ? `parte ${siblings.findIndex((s) => sameSlide(s, slide)) + 1} de ${siblings.length}` : null}
         status={status}
         refreshing={refresh.isPending}
@@ -284,6 +302,36 @@ export function Presentation({
         onStep={goToStep}
       />
 
+      {since && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-[var(--diff-fresh)] px-3 py-2 text-sm">
+          {readingChanges || !changes ? (
+            <span>Buscando qué cambió…</span>
+          ) : changes.steps.length === 0 ? (
+            <span>Nada ha cambiado desde {dateTime(since.at)}.</span>
+          ) : (
+            <span>
+              <strong>{changes.steps.length === 1 ? '1 paso cambió' : `${changes.steps.length} pasos cambiaron`}</strong> desde {dateTime(since.at)}.
+              Lo nuevo está resaltado; lo anterior se ve más apagado.
+            </span>
+          )}
+          <Button size="sm" variant="ghost" className="ml-auto h-7" onClick={() => setSince(null)}>
+            Ver todos los cambios
+          </Button>
+        </div>
+      )}
+      {/* Vuelve a abrirla después de que el agente siguiera trabajando: lo primero, ofrecer lo nuevo. */}
+      {!since && slide.kind === 'cover' && lastSeen && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg bg-[var(--diff-fresh)] px-3 py-2 text-sm">
+          <span>
+            <strong>Hay cambios nuevos</strong> desde tu revisión del {dateTime(lastSeen.at)}.
+          </span>
+          <Button size="sm" variant="outline" className="ml-auto h-7" onClick={() => setSince(lastSeen)}>
+            Ver solo lo nuevo
+          </Button>
+        </div>
+      )}
+
+      <FreshLines.Provider value={fresh}>
       <div key={slideKey} ref={stage} className="slide-enter scroll-mt-32">
         {slide.kind === 'cover' && <Cover review={review} session={session} story={story} overview={overview} ask={ask()} onStep={goToStep} onChapter={goToChapter} />}
         {slide.kind === 'chapter' && <ChapterSlide review={review} story={story} chapter={slide.chapter} ask={ask()} onStep={goToStep} />}
@@ -294,6 +342,7 @@ export function Presentation({
         {slide.kind === 'file' && <FileSlide review={review} session={session} story={story} slide={slide} ask={ask()} />}
         {slide.kind === 'closing' && <Closing review={review} story={story} ask={ask()} onStep={goToStep} />}
       </div>
+      </FreshLines.Provider>
 
       <nav
         aria-label="Diapositivas y veredicto"
