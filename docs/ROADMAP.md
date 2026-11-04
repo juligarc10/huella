@@ -7,33 +7,23 @@ revisar y comprender el código que escribe la IA, por tarea (lo que se va a
 mergear), con lo que el agente declara mientras trabaja y una presentación
 guiada del cambio.
 
-## Dónde estamos (2026-11-02)
+## Dónde estamos (2026-11-04)
 
-- **Publicada**: v0.3.0 (preguntar sobre el código, triaje con `.huella.toml`,
-  revisión guiada por paso, preguntar desde el editor y puntos de control en
-  Claude Code).
-- **En `main`, sin publicar**:
-  - **Revisión por tarea**:
-    - `huella task` y la página Tareas;
-    - una rama por micro contra la rama a la que se mergea, con el remoto traído;
-    - solo lo que está en commits;
-    - búsqueda por clave o por `--branch`;
-    - los worktrees cuentan una vez.
-  - **Registro del agente**:
-    - `huella_record` en el MCP;
-    - la skill `huella-registro`;
-    - `huella agents-md`;
-    - lo declarado en cada paso;
-    - `require_declarations` en el hook de fin de turno.
-  - **Guion y presentación**:
-    - formato común [`huella.storyline/v1`](guion.md);
-    - el agente lo cuenta con `huella_storyline`, si no lo escribe el modelo revisor, y si no hay ninguno es automático;
-    - «No lo contó el agente»;
-    - modos Presentación y Pasos, que comparten el paso actual.
-  - **Contexto de los modelos**:
-    - líneas recortadas a 200 caracteres;
-    - guion por partes cuando no cabe;
-    - `context_tokens` en `[llm]` de `config.toml`.
+**Publicada**: v0.5.0.
+
+- **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
+- **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
+  - mientras escribe, con `huella_record` (decisiones, explicaciones, conceptos…);
+  - al terminar, con `huella_recorded` y `huella_storyline`: antes y ahora, un caso de principio a fin, glosario y capítulos por ideas;
+  - `huella_storyline` responde qué le falta, incluidos los ficheros que ningún capítulo menciona.
+- **La presentación**:
+  - una diapositiva por idea, o por fichero si no hay ideas, con los tests en su propia sección;
+  - el rastro, veredictos siempre a mano y atajos (`r`, `u`);
+  - preguntas al modelo desde cualquier diapositiva;
+  - el código con colores, y cmd+clic para ver una definición;
+  - columnas ajustables, a todo el ancho.
+
+La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
 ## Cómo retomarlo
 
@@ -53,15 +43,11 @@ guiada del cambio.
 
 ## Siguientes pasos, por orden
 
-### 1. Cerrar y publicar v0.4.0
+### 1. Comprobar la calidad con tareas reales
 
-- Probar con el modelo local y una tarea real de trabajo (varios micros, rama de sprint):
-  - el guion del revisor;
-  - la presentación;
-  - el orden de los capítulos;
-  - si los requisitos salen bien troceados.
-- Probar con Claude Code real que la skill registra con criterio, ni de más ni de menos, y que cuenta el guion al terminar. Ajustar el texto de la skill (`crates/huella-cli/src/setup/huella-registro.md`) según lo que salga.
-- Subir la versión a 0.4.0, como en la PR «v0.3.0», y publicar la etiqueta.
+- Volver a contar DUNGEON-1 con la skill de v0.5.0 y ver si las ideas pasan de catálogo a explicación.
+- Probar una tarea real de trabajo (varios micros, rama de sprint) y las guías del modelo local, que aún no se han visto con el contexto nuevo.
+- Ajustar la skill (`crates/huella-cli/src/setup/huella-registro.md`) según lo que salga.
 
 ### 2. La presentación «mágica»
 
