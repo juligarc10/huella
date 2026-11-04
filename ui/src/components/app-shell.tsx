@@ -64,7 +64,7 @@ export function AppShell() {
 
   return (
     <div
-      style={{ '--sidebar': `${sidebar}px` } as CSSProperties}
+      style={{ '--sidebar-width': `${sidebar}px` } as CSSProperties}
       className="relative flex min-h-svh flex-col bg-background lg:flex-row"
     >
       {!hidden && (
@@ -109,7 +109,7 @@ function Sidebar({ onOpenPalette, onHide }: { onOpenPalette: () => void; onHide:
   const { project, setProject } = useProject()
 
   return (
-    <aside className="flex flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:sticky lg:top-0 lg:h-svh lg:w-[var(--sidebar)] lg:shrink-0">
+    <aside className="flex flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:sticky lg:top-0 lg:h-svh lg:w-[var(--sidebar-width)] lg:shrink-0">
       <div className="flex items-center gap-2.5 px-2">
         <Logo />
         <span className="text-lg font-bold tracking-tight">Huella</span>

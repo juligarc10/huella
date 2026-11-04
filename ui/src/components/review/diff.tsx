@@ -143,7 +143,7 @@ export function StepDiff({
                 ref={focus?.[0] === index ? firstFocused : undefined}
                 className={cn(
                   'group flex cursor-pointer pr-4 select-none',
-                  line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-brand-soft/60'),
+                  line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-[var(--diff-added)]'),
                   line.kind === 'removed' && 'bg-[var(--diff-removed)]',
                   focused(index) && 'bg-brand/10 shadow-[inset_3px_0_0_var(--color-brand)]',
                   selected(index) && 'bg-brand/15 shadow-[inset_3px_0_0_var(--color-brand)]',
