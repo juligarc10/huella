@@ -59,6 +59,9 @@ pasos numerados, usa `step`.
 - Al guardarlo, `huella_storyline` le dice al agente lo que le falta para que lo
   entienda alguien sin contexto, para que lo complete mientras aún lo sabe,
   incluidos los ficheros que cambian y ningún capítulo menciona.
+- Cada vez que se abre una tarea y su rama ha avanzado se guarda ese momento. Desde
+  él, o desde cualquier commit de la rama, se puede ver solo lo nuevo: el resto se
+  esconde y, en los pasos que cambiaron, lo anterior queda como contexto.
 - El orden de preferencia es: el guion del agente, el del modelo revisor y, sin
   ninguno, un capítulo por repositorio.
 
