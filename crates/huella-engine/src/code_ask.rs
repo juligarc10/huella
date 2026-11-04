@@ -73,9 +73,35 @@ pub fn locate(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, 
         .map(|start| (start + 1, start + wanted.len()))
 }
 
-/// Pregunta sobre un trozo de `path`. Se identifica por su texto (`quote`) y,
-/// si no se encuentra o viene vacío, por las líneas `lines`. La pregunta y la
-/// respuesta se guardan.
+/// Como [`locate`], para una selección que salta líneas (un diff esconde los
+/// métodos de una clase): de su primera línea a la última que viene después.
+fn locate_span(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, usize)> {
+    let wanted: Vec<&str> = quote.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let (first, last) = (*wanted.first()?, *wanted.last()?);
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    (0..lines.len())
+        .filter(|&start| lines[start] == first)
+        .filter_map(|start| {
+            let end = (start..lines.len()).find(|&end| lines[end] == last)?;
+            Some((start + 1, end + 1))
+        })
+        .min_by_key(|&(start, _)| near.map_or(0, |near| start.abs_diff(near)))
+}
+
+/// Una pregunta sobre un trozo de `path`. Se identifica por su texto (`quote`) y,
+/// si no se encuentra o viene vacío, por las líneas `lines`.
+#[derive(Debug, Clone, Copy)]
+pub struct CodeAsk<'a> {
+    pub path: &'a Path,
+    pub quote: &'a str,
+    pub lines: Option<(usize, usize)>,
+    pub question: &'a str,
+    /// El texto revisado, que puede no ser el del disco (otra rama en la copia de
+    /// trabajo). Sin él se lee el fichero.
+    pub reviewed: Option<&'a str>,
+}
+
+/// Responde una pregunta sobre código y la guarda con su respuesta.
 ///
 /// # Errors
 /// Si el fichero no se puede leer, el trozo no existe, o fallan el modelo o la
@@ -84,20 +110,23 @@ pub fn ask_code(
     store: &Store,
     sources: Option<&crate::Sources>,
     model: &dyn JsonModel,
-    path: &Path,
-    quote: &str,
-    lines: Option<(usize, usize)>,
-    question: &str,
+    ask: CodeAsk<'_>,
 ) -> Result<CodeAnswer> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|error| EngineError::Model(format!("no se pudo leer {}: {error}", path.display())))?;
+    let CodeAsk { path, quote, lines, question, reviewed } = ask;
+    let source = match reviewed {
+        Some(reviewed) => reviewed.to_owned(),
+        None => std::fs::read_to_string(path)
+            .map_err(|error| EngineError::Model(format!("no se pudo leer {}: {error}", path.display())))?,
+    };
     let total = source.lines().count();
-    let (start, end) = locate(&source, quote, lines.map(|(start, _)| start))
+    let near = lines.map(|(start, _)| start);
+    let (start, end) = locate(&source, quote, near)
+        .or_else(|| locate_span(&source, quote, near))
         .or(lines.filter(|&(start, end)| start >= 1 && start <= end && end <= total))
         .ok_or_else(|| EngineError::Model("el código seleccionado ya no está en el fichero".into()))?;
     let end = end.min(start + MAX_SELECTION_LINES - 1);
     let key = normalize_path(path, None);
-    let previous = questions_for(store, path)?;
+    let previous = questions_in(store, path, &source)?;
 
     let context = context(store, sources, path, &source, start, end, &previous)?;
     let request = huella_core::redact::redact(&format!("{context}\n## Pregunta\n\n{}", question.trim())).into_owned();
@@ -349,6 +378,43 @@ fn clip(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_question_is_about_the_reviewed_text_even_if_the_file_is_not_on_disk() {
+        struct Answers;
+        impl huella_decisions::JsonModel for Answers {
+            fn model_id(&self) -> String {
+                "fake:1".into()
+            }
+            fn complete_json(
+                &self,
+                _: &str,
+                request: &str,
+                _: &serde_json::Value,
+            ) -> std::result::Result<String, huella_decisions::ExtractError> {
+                assert!(request.contains("solo_en_la_rama"), "{request}");
+                Ok(r#"{"answer":"Suma."}"#.to_owned())
+            }
+        }
+        let store = huella_store::Store::open_in_memory().unwrap();
+        let ask = super::CodeAsk {
+            path: std::path::Path::new("/no/existe/en/disco.ts"),
+            quote: "solo_en_la_rama();",
+            lines: None,
+            question: "¿Qué hace?",
+            reviewed: Some("function f() {\n  solo_en_la_rama();\n}\n"),
+        };
+        let answer = super::ask_code(&store, None, &Answers, ask).unwrap();
+        assert_eq!((answer.start_line, answer.end_line), (2, 2));
+    }
+
+    #[test]
+    fn a_selection_that_skips_lines_goes_from_its_first_line_to_its_last() {
+        let source = "class Cart {\n  add() {}\n  remove() {}\n}\n";
+        assert_eq!(super::locate(source, "class Cart {\n}", None), None);
+        assert_eq!(super::locate_span(source, "class Cart {\n\n}", None), Some((1, 4)));
+        assert_eq!(super::locate_span(source, "otra cosa\n}", None), None);
+    }
+
     use std::cell::RefCell;
 
     use huella_decisions::ExtractError;
@@ -405,8 +471,19 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let model = Fake { seen: RefCell::new(String::new()) };
 
-        let answer =
-            ask_code(&store, None, &model, &path, "let total = sum();\nsave(total)", None, "¿Qué hace?").unwrap();
+        let answer = ask_code(
+            &store,
+            None,
+            &model,
+            CodeAsk {
+                path: &path,
+                quote: "let total = sum();\nsave(total)",
+                lines: None,
+                question: "¿Qué hace?",
+                reviewed: None,
+            },
+        )
+        .unwrap();
         assert_eq!((answer.start_line, answer.end_line), (4, 5));
         let seen = model.seen.borrow().clone();
         assert!(seen.contains(">    4      let total = sum();"), "{seen}");

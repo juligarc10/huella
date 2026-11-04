@@ -26,6 +26,7 @@ import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
 import { dateTime } from '@/lib/format'
+import { useAskNotices } from '@/lib/ask-notices'
 import { useGuide, useRefreshReview, useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
@@ -91,6 +92,18 @@ const sameSlide = (a: Slide, b: Slide) =>
   (a.kind !== 'idea' || (a.chapter === (b as typeof a).chapter && a.idea === (b as typeof a).idea)) &&
   (a.kind !== 'file' || (a.chapter === (b as typeof a).chapter && a.path === (b as typeof a).path))
 
+/** Identifica una diapositiva. */
+const keyOf = (s: Slide) =>
+  s.kind === 'step'
+    ? `s${s.step}`
+    : s.kind === 'idea'
+      ? `i${s.chapter}-${s.idea}`
+      : s.kind === 'file'
+        ? `f${s.chapter}-${s.path}`
+        : s.kind === 'chapter'
+          ? `c${s.chapter}`
+          : s.kind
+
 /** ¿Esta diapositiva muestra este paso? */
 const showsStep = (slide: Slide, step: number) =>
   (slide.kind === 'step' && slide.step === step) || ((slide.kind === 'idea' || slide.kind === 'file') && slide.steps.includes(step))
@@ -153,23 +166,20 @@ export function Presentation({
   }, [slides, everySlide, place])
   const slide = slides[position]
   // Cada diapositiva se empieza a leer por arriba, justo debajo del rastro.
-  const slideKey = !slide
-    ? ''
-    : slide.kind === 'step'
-      ? `s${slide.step}`
-      : slide.kind === 'idea'
-        ? `i${slide.chapter}-${slide.idea}`
-        : slide.kind === 'file'
-          ? `f${slide.chapter}-${slide.path}`
-        : slide.kind === 'chapter'
-          ? `c${slide.chapter}`
-          : slide.kind
+  const slideKey = slide ? keyOf(slide) : ''
   const stage = useRef<HTMLDivElement>(null)
   const shownKey = useRef(slideKey)
   useEffect(() => {
     if (shownKey.current !== slideKey) stage.current?.scrollIntoView({ block: 'start' })
     shownKey.current = slideKey
   }, [slideKey])
+
+  // Vuelta a una diapositiva desde el aviso de que el modelo ha respondido.
+  const [askOpen, setAskOpen] = useState<string | null>(null)
+  useAskNotices<Slide>(review, slide ?? { kind: 'cover' }, sameSlide, (origin) => {
+    setPlace(origin)
+    setAskOpen(keyOf(origin))
+  })
 
   const go = (to: number) => {
     const target = slides[Math.min(Math.max(to, 0), slides.length - 1)]
@@ -223,7 +233,15 @@ export function Presentation({
 
   if (!story || !slide) return null
   const ask = (step?: ReviewStep) => (
-    <AskToggle open={review.questions.some((q) => q.step_key === (step?.key ?? null)) || review.asking.some((a) => a.step === (step?.index ?? null))}>
+    <AskToggle
+      // La conversación general no se abre en cada diapositiva: solo donde se pide o se vuelve a ella.
+      open={
+        step
+          ? review.questions.some((q) => q.step_key === step.key) || review.asking.some((a) => a.step === step.index)
+          : askOpen === slideKey
+      }
+      count={review.questions.filter((q) => q.step_key === (step?.key ?? null)).length}
+    >
       <AskPanel
         session={session}
         step={step}
@@ -317,12 +335,13 @@ export function Presentation({
 }
 
 /** Preguntar es para cuando hace falta: plegado, salvo que ya haya algo que leer. */
-function AskToggle({ open, children }: { open: boolean; children: ReactNode }) {
+function AskToggle({ open, count, children }: { open: boolean; count: number; children: ReactNode }) {
   const [opened, setOpened] = useState(open)
   if (opened || open) return children
   return (
     <Button variant="ghost" className="self-start text-muted-foreground" onClick={() => setOpened(true)}>
       <MessageCircleQuestion aria-hidden="true" /> Preguntar al modelo
+      {count > 0 && <span className="text-xs">· {count === 1 ? '1 mensaje' : `${count} mensajes`}</span>}
     </Button>
   )
 }

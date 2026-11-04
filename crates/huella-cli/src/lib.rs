@@ -1239,10 +1239,13 @@ fn ask_code(store: &Store, location: &str, question: &str, model: &ModelArgs) ->
         store,
         Some(&sources),
         llm.as_ref(),
-        &path,
-        "",
-        Some((start, end)),
-        question,
+        huella_engine::code_ask::CodeAsk {
+            path: &path,
+            quote: "",
+            lines: Some((start, end)),
+            question,
+            reviewed: None,
+        },
     )?;
     println!("{}", answer.answer);
     Ok(())

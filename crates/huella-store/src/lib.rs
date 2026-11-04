@@ -1498,6 +1498,17 @@ impl Store {
         Ok(self.conn.execute("DELETE FROM code_question WHERE id = ?1", [id])? > 0)
     }
 
+    /// Borra una conversación: la de un paso o, sin él, la general.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn delete_questions(&self, session_id: &str, step_key: Option<&str>) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM review_question WHERE session_id = ?1 AND step_key IS ?2",
+            params![session_id, step_key],
+        )?)
+    }
+
     /// Preguntas hechas a una sesión, de la más antigua a la más reciente.
     ///
     /// # Errors

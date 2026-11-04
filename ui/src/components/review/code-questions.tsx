@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { CodeQuestion, PendingCodeAsk } from '@/lib/api'
 import { dateTime } from '@/lib/format'
-import { useDeleteCodeQuestion } from '@/lib/queries'
+import { useDeleteCodeQuestion, useDismissCodeAsk } from '@/lib/queries'
 
 /** Una pregunta sobre el código y su respuesta, junto a las líneas preguntadas. */
 export function CodeQuestionCard({ question, path }: { question: CodeQuestion; path: string }) {
@@ -41,17 +41,28 @@ export function CodeQuestionCard({ question, path }: { question: CodeQuestion; p
 }
 
 /** Una pregunta que el modelo aún está respondiendo, o que falló. */
-export function PendingCodeAskCard({ pending, model }: { pending: PendingCodeAsk; model: string }) {
+export function PendingCodeAskCard({ pending, model, path, session }: { pending: PendingCodeAsk; model: string; path: string; session?: string }) {
+  const dismiss = useDismissCodeAsk(path, session)
   return (
     <div className="flex flex-col gap-1.5 rounded-xl border px-4 py-3 font-sans text-sm whitespace-normal" role="status">
       <p className="font-semibold">{pending.question}</p>
       {pending.error ? (
-        <p className="flex gap-2 text-destructive">
-          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {pending.error}
-        </p>
+        <div className="flex items-start gap-2 text-destructive">
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <p className="min-w-0 flex-1">{pending.error}</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="-mt-1 h-7 text-muted-foreground"
+            aria-label="Quitar este error"
+            onClick={() => dismiss.mutate(pending.question)}
+          >
+            <Trash2 aria-hidden="true" />
+          </Button>
+        </div>
       ) : (
         <p className="flex items-center gap-2 text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Pensando con {model.replace(/^[^:]+:/, '')}…
+          <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Pensando con {model.replace(/^[^:]+:/, '')}… Puedes seguir revisando: te avisaré.
         </p>
       )}
     </div>

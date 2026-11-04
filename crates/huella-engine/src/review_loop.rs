@@ -256,7 +256,10 @@ fn ask_context(store: &Store, review: &SessionReview, plan: &[FlowStep], step: O
     } else {
         write_session_context(&mut out, review, plan);
     }
-    let previous = store.questions(&review.session_id)?;
+    // Solo la conversación de este paso (o la general): las de otros pasos ensucian.
+    let key = step.and_then(|index| plan.get(index)).map(|step| step.key(review));
+    let mut previous = store.questions(&review.session_id)?;
+    previous.retain(|question| question.step_key == key);
     if !previous.is_empty() {
         out.push_str("\n## Preguntas anteriores\n\n");
         for question in previous.iter().rev().take(3).rev() {
@@ -486,9 +489,15 @@ mod tests {
         assert_eq!(stored[0].answer, answer.answer);
         assert_eq!(stored[0].step_key.as_deref(), Some(plan[index].key(&review).as_str()));
 
-        // La siguiente pregunta ve la anterior.
-        ask(&store, &model, &review, &plan, None, "¿Qué falta por probar?", None).unwrap();
+        // La siguiente pregunta de ese paso ve la anterior; la conversación general, no.
+        ask(&store, &model, &review, &plan, Some(index), "¿Y sin código?", None).unwrap();
         assert!(model.requests.borrow()[1].contains("## Preguntas anteriores"));
+        ask(&store, &model, &review, &plan, None, "¿Qué falta por probar?", None).unwrap();
+        assert!(!model.requests.borrow()[2].contains("## Preguntas anteriores"));
+
+        // Empezar de nuevo borra esa conversación y no las demás.
+        assert_eq!(store.delete_questions("sesion-1", None).unwrap(), 1);
+        assert_eq!(store.questions("sesion-1").unwrap().len(), 2);
     }
 
     #[test]

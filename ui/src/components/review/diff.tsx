@@ -52,8 +52,8 @@ export function StepDiff({
   peekHint?: boolean
 }) {
   const add = useAddComment(session)
-  const ask = useAskCode(step.path)
-  const { data: codeQuestions } = useCodeQuestions(step.path)
+  const ask = useAskCode(step.path, session)
+  const { data: codeQuestions } = useCodeQuestions(step.path, session)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [asking, setAsking] = useState(false)
   const [peek, setPeek] = useState<{ index: number; name: string } | null>(null)
@@ -89,7 +89,10 @@ export function StepDiff({
     const index = question.lines ? placeOf(question.quote) : -1
     if (index >= 0) answered.set(index, [...(answered.get(index) ?? []), question])
   }
-  const thinking = (codeQuestions?.pending ?? []).map((pending) => ({ pending, index: placeOf(pending.quote) }))
+  // Un fichero se reparte en varios pasos: cada pregunta sale solo en el que tiene sus líneas.
+  const thinking = (codeQuestions?.pending ?? [])
+    .map((pending) => ({ pending, index: placeOf(pending.quote) }))
+    .filter(({ pending, index }) => index >= 0 || !pending.quote.trim())
 
   const select = (index: number, event: MouseEvent) => {
     // ⌘+clic es para abrir nombres: fuera de uno no selecciona la línea.
@@ -194,13 +197,14 @@ export function StepDiff({
                 .filter((t) => t.index === index)
                 .map(({ pending }) => (
                   <div key={`p${pending.question}`} className={inline}>
-                    <PendingCodeAskCard pending={pending} model={model} />
+                    <PendingCodeAskCard pending={pending} model={model} path={step.path} session={session} />
                   </div>
                 ))}
               {selection?.to === index && !asking && composing === null && (
                 <div className={inline} onClick={(event) => event.stopPropagation()}>
                   <SelectionBar
                     lines={selection.to - selection.from + 1}
+                    canAsk={selectedCode().trim().length > 0}
                     onAsk={() => setAsking(true)}
                     onComment={() => {
                       onCompose(index)
@@ -249,7 +253,7 @@ export function StepDiff({
           {thinking
             .filter((t) => t.index < 0)
             .map(({ pending }) => (
-              <PendingCodeAskCard key={pending.question} pending={pending} model={model} />
+              <PendingCodeAskCard key={pending.question} pending={pending} model={model} path={step.path} session={session} />
             ))}
           {composing === -1 && (
             <CommentComposer quote={null} onSubmit={submitComment(null)} onCancel={() => onCompose(null)} pending={add.isPending} />
@@ -263,18 +267,21 @@ export function StepDiff({
 /** Lo que se puede hacer con las líneas seleccionadas. */
 function SelectionBar({
   lines,
+  canAsk,
   onAsk,
   onComment,
   onClear,
 }: {
   lines: number
+  /** Lo seleccionado sigue en el código: lo quitado ya no se puede preguntar. */
+  canAsk: boolean
   onAsk: () => void
   onComment: () => void
   onClear: () => void
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 font-sans whitespace-normal">
-      <Button size="sm" onClick={onAsk}>
+      <Button size="sm" onClick={onAsk} disabled={!canAsk} title={canAsk ? undefined : 'Estas líneas ya no están en el código: selecciona alguna que siga'}>
         <MessageCircleQuestion aria-hidden="true" /> Preguntar sobre {lines === 1 ? 'esta línea' : `estas ${lines} líneas`}
       </Button>
       <Button size="sm" variant="outline" onClick={onComment}>

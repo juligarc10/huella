@@ -32,6 +32,7 @@ import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { LineRange, ReviewResult, ReviewStep, Verdict } from '@/lib/api'
+import { useAskNotices } from '@/lib/ask-notices'
 import { baseName, cleanPrompt, clip, dateTime, reviewStatusLabel, shortId } from '@/lib/format'
 import { useOpenInEditor, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
 import { cn, releaseFocus } from '@/lib/utils'
@@ -205,6 +206,9 @@ export function Review({
       setComposing(-1)
     }
   }
+
+  // En la presentación, los avisos los lleva ella, que sabe en qué diapositiva se está.
+  useAskNotices(review, current, (a, b) => a === b, go, !presenting)
 
   // j / k para moverse; r, c y d para el veredicto, como en la revisión de código; u lo quita.
   // En la presentación manda la suya (← y →).

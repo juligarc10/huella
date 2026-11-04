@@ -581,6 +581,8 @@ export interface ReviewResult {
   narrations: Record<string, Narration>
   policy: ReviewPolicy
   comprehension: Comprehension
+  /** Preguntas sobre líneas de esta revisión que el modelo está respondiendo o que fallaron. */
+  code_asking: PendingCodeAsk[]
   /** Guías en cola (la primera, en curso) y las que fallaron. */
   guiding: { pending: string[]; errors: string[] } | null
   /** Si es la revisión de una tarea: lo que pide y cómo está cada repositorio. */

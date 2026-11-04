@@ -25,6 +25,7 @@ import {
   type SymbolResult,
   type Definition,
 } from '@/lib/api'
+import { askId, noteAsked } from '@/lib/ask-notices'
 
 export function useOverview() {
   return useQuery({ queryKey: ['overview'], queryFn: () => api.get<Overview>('overview'), staleTime: 30_000 })
@@ -111,6 +112,7 @@ export function useReview(session: string | undefined) {
     refetchInterval: (state) => {
       const data = state.state.data
       return data?.asking.some((ask) => !ask.error) ||
+        data?.code_asking.some((ask) => !ask.error) ||
         data?.covering?.running ||
         data?.guiding?.pending.length ||
         data?.storylining?.running
@@ -300,19 +302,25 @@ export function useFeedback(session: string, enabled: boolean) {
 }
 
 /** Preguntas sobre el código de un fichero; se consulta a menudo mientras el modelo responde. */
-export function useCodeQuestions(path: string) {
+/** Desde una revisión (`session`), las preguntas se sitúan en el código revisado, no en el del disco. */
+export function useCodeQuestions(path: string, session?: string) {
   return useQuery({
     queryKey: ['code-questions', path],
-    queryFn: () => api.get<CodeQuestionsResult>(`code/questions${query({ path })}`),
+    queryFn: () => api.get<CodeQuestionsResult>(`code/questions${query({ path, session })}`),
     refetchInterval: (state) => (state.state.data?.pending.some((ask) => !ask.error) ? 1500 : false),
   })
 }
 
-export function useAskCode(path: string) {
+export function useAskCode(path: string, session?: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number }) => api.post('code/ask', { path, ...ask }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['code-questions', path] }),
+    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number }) =>
+      api.post('code/ask', { path, session, ...ask }),
+    onSuccess: (_, ask) => {
+      noteAsked(askId.line(path, ask.question), ask.question)
+      client.invalidateQueries({ queryKey: ['code-questions', path] })
+      if (session) client.invalidateQueries({ queryKey: ['review', session] })
+    },
     onError: (error) => toast.error(error.message),
   })
 }
@@ -385,11 +393,37 @@ export function useGuideCheck(session: string) {
   })
 }
 
+/** Olvida una pregunta sobre líneas que falló. */
+export function useDismissCodeAsk(path: string, session?: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (question: string) => api.post('code/ask/dismiss', { path, question }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['code-questions', path] })
+      if (session) client.invalidateQueries({ queryKey: ['review', session] })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Empieza de nuevo la conversación con el modelo: la de un paso o la general. */
+export function useClearQuestions(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (step: number | null) => api.post(`review/${session}/ask/clear`, { step }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
 export function useAsk(session: string) {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (ask: { question: string; step: number | null }) => api.post(`review/${session}/ask`, ask),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onSuccess: (_, ask) => {
+      noteAsked(askId.general(ask.step, ask.question), ask.question)
+      client.invalidateQueries({ queryKey: ['review', session] })
+    },
     onError: (error) => toast.error(error.message),
   })
 }

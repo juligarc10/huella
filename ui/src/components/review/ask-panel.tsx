@@ -1,4 +1,4 @@
-import { CircleAlert, Loader2, MessageCircleQuestion, Send } from 'lucide-react'
+import { CircleAlert, Loader2, MessageCircleQuestion, RotateCcw, Send } from 'lucide-react'
 import { useState, type KeyboardEvent } from 'react'
 
 import { Panel } from '@/components/bits'
@@ -7,7 +7,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { PendingAsk, ReviewQuestion, ReviewStep } from '@/lib/api'
 import { dateTime } from '@/lib/format'
-import { useAsk } from '@/lib/queries'
+import { useAsk, useClearQuestions } from '@/lib/queries'
 
 /** Preguntar al modelo por el paso actual o por todo el cambio (sin `step`, solo por todo). */
 export function AskPanel({
@@ -29,6 +29,7 @@ export function AskPanel({
   task?: boolean
 }) {
   const ask = useAsk(session)
+  const clear = useClearQuestions(session)
   const [chosen, setChosen] = useState<'step' | 'session'>('step')
   const scope = step ? chosen : 'session'
   const whole = task ? 'tarea' : 'sesión'
@@ -53,6 +54,18 @@ export function AskPanel({
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           <MessageCircleQuestion className="size-4 text-brand" aria-hidden="true" /> {task ? 'Preguntar al modelo' : 'Preguntar a la sesión'}
         </h2>
+        {(relevant.length > 0 || pending.some((a) => a.error)) && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-xs text-muted-foreground"
+            onClick={() => clear.mutate(scope === 'step' && step ? step.index : null)}
+            disabled={clear.isPending}
+            title="Borra estos mensajes: el modelo tampoco los tendrá en cuenta"
+          >
+            <RotateCcw aria-hidden="true" /> Empezar de nuevo
+          </Button>
+        )}
         {step && (
           <ToggleGroup
             type="single"
@@ -91,7 +104,7 @@ export function AskPanel({
             </p>
           ) : (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Pensando con {model.replace(/^[^:]+:/, '')}…
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Pensando con {model.replace(/^[^:]+:/, '')}… Puedes seguir revisando: te avisaré.
             </p>
           )}
         </div>

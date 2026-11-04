@@ -329,10 +329,12 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
         ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
+        ("POST", ["review", session, "ask", "clear"]) => clear_questions(app, session, body)?,
         ("POST", ["comments", id]) => update_comment(app, id, body)?,
         ("POST", ["code", "ask"]) => return ask_code(app, body),
         ("GET", ["code", "questions"]) => code_questions(app, params)?,
         ("GET", ["code", "file"]) => code_file(params)?,
+        ("POST", ["code", "ask", "dismiss"]) => dismiss_code_ask(app, body)?,
         ("POST", ["code", "questions", id, "delete"]) => {
             json!({"deleted": app.store.delete_code_question(id.parse().context("id no válido")?)?})
         }
@@ -603,6 +605,16 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     value["asking"] = json!(
         app.asking.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id).cloned().unwrap_or_default()
     );
+    // Lo que se preguntó sobre líneas de esta revisión: se avisa aunque se esté en otra página.
+    let code_asking: Vec<PendingCodeAsk> = app
+        .code_asking
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|pending| review.files.iter().any(|file| file.path == pending.path))
+        .cloned()
+        .collect();
+    value["code_asking"] = json!(code_asking);
     let (follow_ups, hints) = huella_engine::review_loop::follow_up(&app.store, review)?;
     value["follow_ups"] = json!(follow_ups.iter().map(|f| json!({
         "session_id": f.session_id, "paths": f.paths, "last_at": f.last_at, "same_session": f.session_id == review.session_id,
@@ -1229,6 +1241,14 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
     let key = huella_engine::normalize_path(&path, None);
+    // Desde una revisión se pregunta por lo revisado, no por lo que haya en el disco.
+    let content = match text("session") {
+        Some(session) => {
+            load_review(app, &session)?;
+            reviewed_content(app, &session, &path)
+        }
+        None => None,
+    };
     let pending = PendingCodeAsk { path: key, quote: quote.clone(), question: question.clone(), error: None };
     app.code_asking.lock().unwrap_or_else(PoisonError::into_inner).push(pending.clone());
     let (asking, db, model, sources) =
@@ -1237,7 +1257,18 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
             let llm = crate::build_model(&model)?;
-            huella_engine::code_ask::ask_code(&store, Some(&sources), llm.as_ref(), &path, &quote, lines, &question)?;
+            huella_engine::code_ask::ask_code(
+                &store,
+                Some(&sources),
+                llm.as_ref(),
+                huella_engine::code_ask::CodeAsk {
+                    path: &path,
+                    quote: &quote,
+                    lines,
+                    question: &question,
+                    reviewed: content.as_deref(),
+                },
+            )?;
             Ok(())
         })();
         let mut all = asking.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1276,7 +1307,12 @@ fn code_file(params: &HashMap<String, String>) -> Result<Value> {
 fn code_questions(app: &App, params: &HashMap<String, String>) -> Result<Value> {
     let path = PathBuf::from(non_empty(params.get("path")).context("falta el fichero")?);
     let key = huella_engine::normalize_path(&path, None);
-    let questions: Vec<Value> = huella_engine::code_ask::questions_for(&app.store, &path)?
+    let reviewed = non_empty(params.get("session")).and_then(|session| reviewed_content(app, &session, &path));
+    let located = match &reviewed {
+        Some(content) => huella_engine::code_ask::questions_in(&app.store, &path, content)?,
+        None => huella_engine::code_ask::questions_for(&app.store, &path)?,
+    };
+    let questions: Vec<Value> = located
         .into_iter()
         .map(|located| {
             let q = located.question;
@@ -1300,6 +1336,42 @@ fn code_questions(app: &App, params: &HashMap<String, String>) -> Result<Value> 
         .cloned()
         .collect();
     Ok(json!({"questions": questions, "pending": pending, "ask_problem": crate::model_problem(&app.model)}))
+}
+
+/// El contenido de un fichero en la revisión cargada, si es esa.
+fn reviewed_content(app: &App, session: &str, path: &Path) -> Option<String> {
+    let (review, _) = app.review.as_ref().filter(|(review, _)| review.session_id.starts_with(session))?;
+    let key = huella_engine::normalize_path(path, None);
+    review.files.iter().find(|file| file.path == key).map(|file| file.after.clone())
+}
+
+/// Olvida una pregunta sobre líneas que falló.
+fn dismiss_code_ask(app: &App, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let (path, question) = (
+        request["path"].as_str().context("falta el fichero")?,
+        request["question"].as_str().context("falta la pregunta")?,
+    );
+    app.code_asking
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|pending| !(pending.error.is_some() && pending.path == path && pending.question == question));
+    Ok(json!({}))
+}
+
+/// Empieza de nuevo la conversación con el modelo: la de un paso o la general.
+fn clear_questions(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let step = request["step"].as_u64().and_then(|step| usize::try_from(step).ok());
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let key = step.and_then(|index| plan.get(index)).map(|flow| flow.key(review));
+    let deleted = app.store.delete_questions(&review.session_id, key.as_deref())?;
+    // Lo que falló en esa conversación tampoco tiene ya sentido.
+    if let Some(list) = app.asking.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&review.session_id) {
+        list.retain(|pending| pending.error.is_none() || pending.step != step);
+    }
+    Ok(json!({"deleted": deleted}))
 }
 
 fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
