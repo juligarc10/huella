@@ -147,6 +147,7 @@
     --code-background: transparent;
     --diff-removed: #fbdfdc;
     --diff-added: #dcefeb;
+    --diff-fresh: #fdeeb5;
 }
 
 .dark {
@@ -161,6 +162,7 @@
     --code-token-link: #8fbcff;
     --diff-removed: #3a2221;
     --diff-added: #182e2b;
+    --diff-fresh: #3b3212;
 }
 
 /* Cada diapositiva entra sin saltos. */

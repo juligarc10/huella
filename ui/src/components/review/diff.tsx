@@ -1,5 +1,5 @@
 import { MessageCircleQuestion, MessageSquarePlus, X } from 'lucide-react'
-import { Fragment, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { createContext, Fragment, useContext, useEffect, useRef, useState, type MouseEvent } from 'react'
 
 import { CodeText, useDiffTokens, usePeekKey, wordAt } from '@/components/review/code'
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
@@ -7,9 +7,12 @@ import { CommentCard, CommentComposer } from '@/components/review/comments'
 import { DefinitionPeek } from '@/components/review/definition-peek'
 import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
-import type { CodeQuestion, CommentHint, LineRange, ReviewComment, ReviewStep } from '@/lib/api'
+import type { CodeQuestion, CommentHint, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
 import { useAddComment, useAskCode, useCodeQuestions } from '@/lib/queries'
 import { cn } from '@/lib/utils'
+
+/** Viendo solo lo nuevo desde un momento: lo nuevo de cada paso. Sin él, se ve todo igual. */
+export const FreshLines = createContext<Map<number, StepChange> | null>(null)
 
 // Comentarios, preguntas y cajas ocupan el ancho visible del diff aunque haya líneas largas.
 const inline = 'sticky left-0 w-[100cqw] max-w-3xl px-4 py-2'
@@ -58,6 +61,9 @@ export function StepDiff({
   const [asking, setAsking] = useState(false)
   const [peek, setPeek] = useState<{ index: number; name: string; before: string } | null>(null)
   const tokens = useDiffTokens(step.path, step.lines)
+  // Lo nuevo destaca; lo anterior sigue ahí, más apagado, como contexto.
+  const change = useContext(FreshLines)?.get(step.index)
+  const isFresh = (index: number) => change?.fresh.includes(index) ?? false
   usePeekKey()
   // En una tarea casi nada viene de una edición registrada: marcarlo teñiría todo el diff.
   const unexplained = (line: { kind: string; external?: boolean }) =>
@@ -148,6 +154,8 @@ export function StepDiff({
                   'group flex cursor-pointer pr-4 select-none',
                   line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-[var(--diff-added)]'),
                   line.kind === 'removed' && 'bg-[var(--diff-removed)]',
+                  change && !isFresh(index) && 'bg-transparent opacity-60',
+                  isFresh(index) && 'bg-[var(--diff-fresh)] shadow-[inset_3px_0_0_var(--color-warn-strong)]',
                   focused(index) && 'bg-brand/10 shadow-[inset_3px_0_0_var(--color-brand)]',
                   selected(index) && 'bg-brand/15 shadow-[inset_3px_0_0_var(--color-brand)]',
                   composing === index && 'ring-2 ring-brand/50 ring-inset',
@@ -240,6 +248,14 @@ export function StepDiff({
           )}
         </div>
       </div>
+      {change && change.gone.length > 0 && (
+        <details open={change.fresh.length === 0} className="border-t px-4 py-2 text-[13px]">
+          <summary className="cursor-pointer font-semibold text-muted-foreground">
+            {change.gone.length === 1 ? 'Se quitó 1 línea' : `Se quitaron ${change.gone.length} líneas`} desde entonces
+          </summary>
+          <pre className="mt-2 overflow-x-auto font-mono text-xs leading-5 text-muted-foreground">{change.gone.join('\n')}</pre>
+        </details>
+      )}
       {peekHint && (
         <p className="border-t px-4 py-1.5 text-xs text-muted-foreground">
           <kbd className="font-mono">{navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl'}</kbd>+clic en un nombre para ver su definición

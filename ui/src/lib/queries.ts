@@ -24,6 +24,8 @@ import {
   type StatusResult,
   type SymbolResult,
   type DefinitionResult,
+  type RevisionPoint,
+  type StepChange,
 } from '@/lib/api'
 import { askId, noteAsked } from '@/lib/ask-notices'
 
@@ -180,6 +182,8 @@ export function useRefreshReview(session: string) {
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['review', session] })
       client.invalidateQueries({ queryKey: ['task'] })
+      client.invalidateQueries({ queryKey: ['revisions', session] })
+      client.invalidateQueries({ queryKey: ['changes', session] })
     },
     onError: (error) => toast.error(error.message),
   })
@@ -289,6 +293,23 @@ export function useDefinition(session: string, name: string, path: string, befor
         `review/${session}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}&before=${encodeURIComponent(before ?? '')}`,
       ),
     staleTime: 5 * 60_000,
+  })
+}
+
+/** Los momentos desde los que se puede ver solo lo nuevo. */
+export function useRevisions(session: string) {
+  return useQuery({
+    queryKey: ['revisions', session],
+    queryFn: () => api.get<{ points: RevisionPoint[] }>(`review/${session}/revisions`),
+  })
+}
+
+/** Lo que cambió desde un momento. */
+export function useChanges(session: string, point: RevisionPoint | null) {
+  return useQuery({
+    queryKey: ['changes', session, point?.id],
+    queryFn: () => api.post<{ steps: StepChange[] }>(`review/${session}/changes`, { heads: point?.heads }),
+    enabled: Boolean(point),
   })
 }
 

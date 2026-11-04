@@ -260,6 +260,25 @@ export interface Definition {
   in_change: boolean
 }
 
+/** Un momento desde el que se puede ver solo lo nuevo. */
+export interface RevisionPoint {
+  id: string
+  at: string
+  /** `seen`: cuando se abrió la tarea; `commit`: un commit de la rama. */
+  kind: 'seen' | 'commit'
+  label: string | null
+  heads: { repo: string; sha: string }[]
+}
+
+/** Lo nuevo de un paso desde ese momento. */
+export interface StepChange {
+  step: number
+  /** Índices en las líneas del paso. */
+  fresh: number[]
+  /** Líneas que estaban entonces y ya no: no salen en el diff. */
+  gone: string[]
+}
+
 /** Dónde está definido un nombre y dónde se usa. */
 export interface DefinitionResult {
   definitions: Definition[]

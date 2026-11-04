@@ -2,7 +2,8 @@ import { ChevronDown, RefreshCw } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { verdictDot } from '@/components/review/verdicts'
-import type { ReviewStep, Storyline } from '@/lib/api'
+import type { RevisionPoint, ReviewStep, Storyline } from '@/lib/api'
+import { dateTime } from '@/lib/format'
 import { cn, releaseFocus } from '@/lib/utils'
 
 export type Slide =
@@ -76,6 +77,9 @@ export function Trail({
   status,
   refreshing,
   onRefresh,
+  points,
+  since,
+  onSince,
   onCover,
   onClosing,
   onChapter,
@@ -93,6 +97,10 @@ export function Trail({
   refreshing: boolean
   /** Trae el remoto y vuelve a leer la revisión. */
   onRefresh: () => void
+  /** Momentos desde los que ver solo lo nuevo. */
+  points: RevisionPoint[]
+  since: RevisionPoint | null
+  onSince: (point: RevisionPoint | null) => void
   onCover: () => void
   onClosing: () => void
   onChapter: (chapter: number) => void
@@ -195,6 +203,32 @@ export function Trail({
           <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} aria-hidden="true" />
           {refreshing ? 'Buscando…' : 'Refrescar'}
         </button>
+        {points.length > 0 && (
+          <label className="relative flex min-w-0 items-center">
+            <span className="sr-only">Qué cambios ver</span>
+            <select
+              value={since?.id ?? ''}
+              onChange={(event) => {
+                onSince(points.find((point) => point.id === event.target.value) ?? null)
+                releaseFocus()
+              }}
+              className={cn(
+                'max-w-64 cursor-pointer appearance-none truncate rounded-md bg-transparent py-0.5 pr-6 pl-1.5 text-[13px] hover:bg-muted',
+                since ? 'bg-[var(--diff-fresh)] font-semibold' : 'text-muted-foreground',
+              )}
+            >
+              <option value="" className="bg-card">
+                Todos los cambios
+              </option>
+              {points.map((point) => (
+                <option key={point.id} value={point.id} className="bg-card">
+                  Desde {dateTime(point.at)} · {point.kind === 'seen' ? 'tu revisión' : point.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-1 size-3.5 text-muted-foreground" aria-hidden="true" />
+          </label>
+        )}
         <div className="ml-auto">{status}</div>
       </div>
     </div>
