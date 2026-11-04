@@ -1,4 +1,4 @@
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, RefreshCw } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { verdictDot } from '@/components/review/verdicts'
@@ -74,6 +74,8 @@ export function Trail({
   visible,
   position,
   status,
+  refreshing,
+  onRefresh,
   onCover,
   onClosing,
   onChapter,
@@ -88,6 +90,9 @@ export function Trail({
   position: string | null
   /** Contadores y filtro. */
   status: ReactNode
+  refreshing: boolean
+  /** Trae el remoto y vuelve a leer la revisión. */
+  onRefresh: () => void
   onCover: () => void
   onClosing: () => void
   onChapter: (chapter: number) => void
@@ -104,7 +109,7 @@ export function Trail({
   }
   let walked = 0
   return (
-    <div className="sticky top-0 z-20 -mx-2 flex flex-col gap-1.5 border-b bg-background/95 px-2 py-2.5 backdrop-blur">
+    <div className="sticky top-0 z-20 -mx-5 flex flex-col gap-1.5 border-b bg-background px-5 py-2.5 sm:-mx-6 sm:px-6">
       <nav aria-label="Rastro de la revisión" className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
         <button type="button" onClick={onCover} aria-current={slide.kind === 'cover'} className={cn(cap, slide.kind === 'cover' && 'border-brand bg-brand-soft')}>
           Portada
@@ -115,9 +120,8 @@ export function Trail({
               <span className="text-xs text-muted-foreground">tests</span>
             )}
             <div
-              title={chapter.title}
               className={cn(
-                'flex flex-wrap rounded-md px-0.5 transition-colors',
+                'group/chapter relative flex flex-wrap rounded-md px-0.5 transition-colors',
                 active === chapterIndex && 'bg-brand-soft',
                 chapter.unnarrated && 'ring-1 ring-warn/50',
               )}
@@ -137,6 +141,16 @@ export function Trail({
                   />
                 )
               })}
+              {/* Al pasar por encima: de qué trata este grupo de pisadas. */}
+              <span
+                role="tooltip"
+                className={cn(
+                  'pointer-events-none absolute top-full z-30 mt-1 hidden max-w-80 truncate rounded-md bg-foreground px-2 py-1 text-xs font-medium whitespace-nowrap text-background shadow-sm group-hover/chapter:block',
+                  chapterIndex < story.chapters.length / 2 ? 'left-0' : 'right-0',
+                )}
+              >
+                {chapter.title} · {chapter.steps.filter((step) => steps[step]?.verdict).length}/{chapter.steps.length}
+              </span>
             </div>
           </div>
         ))}
@@ -171,6 +185,16 @@ export function Trail({
           <ChevronDown className="pointer-events-none absolute right-1 size-4 text-muted-foreground" aria-hidden="true" />
         </label>
         {position && <span className="text-[13px] text-muted-foreground">{position}</span>}
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          title="Buscar cambios nuevos: trae el remoto y vuelve a leer la tarea"
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
+        >
+          <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} aria-hidden="true" />
+          {refreshing ? 'Buscando…' : 'Refrescar'}
+        </button>
         <div className="ml-auto">{status}</div>
       </div>
     </div>

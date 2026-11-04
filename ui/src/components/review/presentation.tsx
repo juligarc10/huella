@@ -26,7 +26,7 @@ import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, Storyline, Verdict } from '@/lib/api'
 import { dateTime } from '@/lib/format'
-import { useGuide, useStoryline } from '@/lib/queries'
+import { useGuide, useRefreshReview, useStoryline } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 /** Qué tipo de capítulo es, en palabras. */
@@ -131,6 +131,7 @@ export function Presentation({
   onDetail: () => void
 }) {
   const story = review.storyline
+  const refresh = useRefreshReview(session)
   const everySlide = useMemo(() => (story ? slidesOf(story, review.steps, () => true) : []), [story, review.steps])
   const slides = useMemo(() => {
     if (!story) return []
@@ -257,6 +258,8 @@ export function Presentation({
         visible={(step) => Boolean(review.steps[step]) && shownBy(filter)(review.steps[step])}
         position={siblings.length > 0 ? `parte ${siblings.findIndex((s) => sameSlide(s, slide)) + 1} de ${siblings.length}` : null}
         status={status}
+        refreshing={refresh.isPending}
+        onRefresh={() => refresh.mutate()}
         onCover={() => go(0)}
         onClosing={() => go(slides.length - 1)}
         onChapter={goToChapter}
@@ -276,7 +279,7 @@ export function Presentation({
 
       <nav
         aria-label="Diapositivas y veredicto"
-        className="sticky bottom-0 z-20 -mx-2 flex flex-wrap items-center gap-2 border-t bg-background/95 px-2 py-2.5 backdrop-blur"
+        className="sticky bottom-0 z-20 -mx-5 flex flex-wrap items-center gap-2 border-t bg-background px-5 py-2.5 sm:-mx-6 sm:px-6"
       >
         <Button variant="outline" size="lg" className="min-h-11" onClick={() => go(position - 1)} disabled={position === 0} aria-label="Anterior">
           <ArrowLeft aria-hidden="true" />
