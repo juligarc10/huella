@@ -513,6 +513,8 @@ export interface Settings {
   model: { value: string | null; from: SettingFrom; env: string }
   thinking: { value: boolean | null; from: SettingFrom }
   context_tokens: { value: number; from: SettingFrom }
+  /** Idioma de lo que escribe el modelo; `null`: el de la petición o la pregunta. */
+  language: { value: string | null; options: { code: string; label: string }[] }
   /** Nunca la clave: de dónde sale y si se puede leer. */
   key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
   problem: string | null
@@ -525,6 +527,8 @@ export type SettingsChange = Partial<{
   model: string | null
   thinking: boolean | null
   context_tokens: number | null
+  /** `auto`: el de la petición o la pregunta. */
+  language: string
 }>
 
 /** Quién escribió una línea de la rama. */
