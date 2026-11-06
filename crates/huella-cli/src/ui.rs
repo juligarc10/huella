@@ -76,6 +76,8 @@ pub(crate) struct App {
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
     code_asking: Arc<Mutex<Vec<PendingCodeAsk>>>,
+    /// La última prueba de conexión con el modelo, desde Ajustes.
+    probing: crate::settings::Probing,
 }
 
 /// Una pregunta sobre código en curso o que falló.
@@ -161,6 +163,7 @@ impl App {
             storylining: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
+            probing: Arc::default(),
         }
     }
 
@@ -341,6 +344,19 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
             json!({"deleted": app.store.delete_code_question(id.parse().context("id no válido")?)?})
         }
         ("GET", ["status"]) => status(app)?,
+        ("GET", ["settings"]) => crate::settings::view(&app.model, &app.probing),
+        ("POST", ["settings"]) => {
+            crate::settings::save(body)?;
+            crate::settings::view(&app.model, &app.probing)
+        }
+        ("POST", ["settings", "key"]) => {
+            crate::settings::save_key(body)?;
+            crate::settings::view(&app.model, &app.probing)
+        }
+        ("POST", ["settings", "test"]) => {
+            crate::settings::probe(&app.model, &app.probing);
+            crate::settings::view(&app.model, &app.probing)
+        }
         ("GET", ["jobs"]) => json!({"jobs": *app.jobs.lock().unwrap_or_else(PoisonError::into_inner)}),
         ("POST", ["jobs", kind]) => return Ok(start_job(app, kind)),
         ("POST", ["open"]) => open(app, body)?,
@@ -629,6 +645,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     );
     value["ask_model"] = json!(extractor_label(&app.model));
     value["ask_problem"] = json!(crate::model_problem(&app.model));
+    value["ask_thinking"] = crate::settings::thinking_option(&app.model);
     value["coverage"] = serde_json::to_value(coverage)?;
     value["covering"] = match app.covering.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id) {
         Some(None) => json!({"running": true}),
@@ -1275,6 +1292,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     // «¿Por qué se quitó esto?»: lo quitado va aparte, `quote` es el código junto al que estaba.
     let removed = request["removed"].as_str().unwrap_or_default().to_owned();
     let place = huella_engine::code_ask::RemovedPlace::parse(request["place"].as_str().unwrap_or_default());
+    let think = request["think"].as_bool().filter(|think| *think);
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
     let key = huella_engine::normalize_path(&path, None);
@@ -1293,7 +1311,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let llm = crate::build_model(&model)?;
+            let llm = crate::build_model_thinking(&model, think)?;
             huella_engine::code_ask::ask_code(
                 &store,
                 Some(&sources),
@@ -1374,7 +1392,9 @@ fn code_questions(app: &App, params: &HashMap<String, String>) -> Result<Value> 
         .filter(|p| p.path == key)
         .cloned()
         .collect();
-    Ok(json!({"questions": questions, "pending": pending, "ask_problem": crate::model_problem(&app.model)}))
+    Ok(
+        json!({"questions": questions, "pending": pending, "ask_problem": crate::model_problem(&app.model), "ask_thinking": crate::settings::thinking_option(&app.model)}),
+    )
 }
 
 /// El contenido de un fichero en la revisión cargada, si es esa.
@@ -1422,6 +1442,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
         .context("la pregunta está vacía")?
         .to_owned();
     let step = request["step"].as_u64().and_then(|s| usize::try_from(s).ok());
+    let think = request["think"].as_bool().filter(|think| *think);
     if let Some(problem) = crate::model_problem(&app.model) {
         bail!(problem);
     }
@@ -1435,7 +1456,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let extractor = crate::build_model(&model)?;
+            let extractor = crate::build_model_thinking(&model, think)?;
             huella_engine::review_loop::ask(
                 &store,
                 extractor.as_ref(),
