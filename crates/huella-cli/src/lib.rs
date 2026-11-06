@@ -7,6 +7,7 @@
 mod config;
 pub mod desktop;
 mod hook;
+mod language;
 mod mcp;
 mod report;
 mod review;
@@ -1302,7 +1303,7 @@ fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
 /// («pensar más» en una pregunta); `None` deja el de la configuración.
 fn build_model_thinking(args: &ModelArgs, thinking: Option<bool>) -> Result<Box<dyn JsonModel>> {
     let (model, base_url) = (args.model(), args.base_url());
-    Ok(match args.provider() {
+    let built: Box<dyn JsonModel> = match args.provider() {
         Provider::Anthropic => {
             let key = config::api_key("ANTHROPIC_API_KEY")?
                 .context("falta la credencial: define ANTHROPIC_API_KEY o api_key_file en config.toml")?;
@@ -1315,7 +1316,8 @@ fn build_model_thinking(args: &ModelArgs, thinking: Option<bool>) -> Result<Box<
                 OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?).with_thinking(thinking),
             )
         }
-    })
+    };
+    Ok(language::wrap(built))
 }
 
 fn extract(
