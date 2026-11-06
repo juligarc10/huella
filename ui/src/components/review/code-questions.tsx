@@ -16,6 +16,12 @@ export function CodeQuestionCard({ question, path }: { question: CodeQuestion; p
         <MessageCircleQuestion className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" />
         {question.question}
       </p>
+      {question.removed && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">Sobre lo quitado</summary>
+          <pre className="mt-1.5 overflow-x-auto rounded-lg bg-[var(--diff-removed)] px-3 py-2 font-mono leading-5">{question.removed}</pre>
+        </details>
+      )}
       <div className="rounded-lg bg-muted px-3.5 py-2.5 leading-relaxed whitespace-pre-line">{question.answer}</div>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span>
@@ -76,12 +82,15 @@ export function CodeAskComposer({
   onCancel,
   pending,
   problem,
+  removed = false,
 }: {
   lines: number
   onSubmit: (question: string) => void
   onCancel: () => void
   pending: boolean
   problem: string | null
+  /** Solo se pregunta por líneas quitadas. */
+  removed?: boolean
 }) {
   const [question, setQuestion] = useState('')
   const submit = () => {
@@ -98,8 +107,9 @@ export function CodeAskComposer({
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-brand/40 bg-card p-3 font-sans whitespace-normal">
       <p className="text-xs text-muted-foreground">
-        Pregunta sobre {lines === 1 ? 'esta línea' : `estas ${lines} líneas`}: se responde con lo que se pidió, lo que explicó el
-        agente que las escribió y sus commits.
+        {removed
+          ? 'Pregunta por lo quitado: se responde con qué hacía, qué lo sustituye y lo que dicen la petición, el agente y el commit que lo quitó.'
+          : `Pregunta sobre ${lines === 1 ? 'esta línea' : `estas ${lines} líneas`}: se responde con lo que se pidió, lo que explicó el agente que las escribió y sus commits.`}
       </p>
       {problem && (
         <p className="flex gap-2 rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn" role="note">
@@ -116,7 +126,7 @@ export function CodeAskComposer({
         onKeyDown={onKey}
         autoFocus
         disabled={Boolean(problem)}
-        placeholder="¿Por qué está así? ¿Qué pasa si…? ¿Qué falta comprobar?"
+        placeholder={removed ? '¿Por qué se quita? ¿Qué lo sustituye?' : '¿Por qué está así? ¿Qué pasa si…? ¿Qué falta comprobar?'}
         className="min-h-16 text-sm"
       />
       <div className="flex flex-wrap items-center gap-2">

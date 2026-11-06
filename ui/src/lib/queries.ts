@@ -335,7 +335,7 @@ export function useCodeQuestions(path: string, session?: string) {
 export function useAskCode(path: string, session?: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number }) =>
+    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number; removed?: string; place?: 'within' | 'before' | 'after' }) =>
       api.post('code/ask', { path, session, ...ask }),
     onSuccess: (_, ask) => {
       noteAsked(askId.line(path, ask.question), ask.question)
