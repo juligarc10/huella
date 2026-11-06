@@ -26,6 +26,8 @@ import {
   type DefinitionResult,
   type RevisionPoint,
   type StepChange,
+  type Settings,
+  type SettingsChange,
 } from '@/lib/api'
 import { askId, noteAsked } from '@/lib/ask-notices'
 
@@ -335,7 +337,15 @@ export function useCodeQuestions(path: string, session?: string) {
 export function useAskCode(path: string, session?: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { quote: string; question: string; start?: number; end?: number; removed?: string; place?: 'within' | 'before' | 'after' }) =>
+    mutationFn: (ask: {
+      quote: string
+      question: string
+      start?: number
+      end?: number
+      removed?: string
+      place?: 'within' | 'before' | 'after'
+      think?: boolean
+    }) =>
       api.post('code/ask', { path, session, ...ask }),
     onSuccess: (_, ask) => {
       noteAsked(askId.line(path, ask.question), ask.question)
@@ -440,11 +450,61 @@ export function useClearQuestions(session: string) {
 export function useAsk(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { question: string; step: number | null }) => api.post(`review/${session}/ask`, ask),
+    mutationFn: (ask: { question: string; step: number | null; think?: boolean }) => api.post(`review/${session}/ask`, ask),
     onSuccess: (_, ask) => {
       noteAsked(askId.general(ask.step, ask.question), ask.question)
       client.invalidateQueries({ queryKey: ['review', session] })
     },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Los ajustes del modelo; mientras se prueba la conexión, se consultan cada segundo. */
+export function useSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: () => api.get<Settings>('settings'),
+    refetchInterval: (query) => (query.state.data?.probe?.running ? 1000 : false),
+  })
+}
+
+/** Al cambiar el modelo, todo lo que dice si se puede preguntar queda viejo. */
+function afterModelChange(client: ReturnType<typeof useQueryClient>, settings: Settings) {
+  client.setQueryData(['settings'], settings)
+  client.invalidateQueries({ queryKey: ['review'] })
+  client.invalidateQueries({ queryKey: ['code-questions'] })
+  client.invalidateQueries({ queryKey: ['status'] })
+}
+
+export function useSaveSettings() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (change: SettingsChange) => api.post<Settings>('settings', change),
+    onSuccess: (settings) => {
+      afterModelChange(client, settings)
+      toast.success('Ajustes guardados')
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useSaveKey() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (key: string) => api.post<Settings>('settings/key', { key }),
+    onSuccess: (settings) => {
+      afterModelChange(client, settings)
+      toast.success('Clave guardada')
+    },
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useTestModel() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<Settings>('settings/test'),
+    onSuccess: (settings) => client.setQueryData(['settings'], settings),
     onError: (error) => toast.error(error.message),
   })
 }

@@ -265,6 +265,7 @@ export function Presentation({
         asking={review.asking}
         model={review.ask_model}
         problem={review.ask_problem}
+        thinking={review.ask_thinking}
         task
       />
     </AskToggle>
