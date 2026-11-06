@@ -182,6 +182,7 @@ fn answers_to_questions_show_up_in_the_hover_and_lenses() {
             question: "¿Por qué trim?",
             answer: "Para no guardar espacios del formulario.",
             model: "openai-compatible:qwen",
+            removed: "",
         })
         .unwrap();
     let mut client = Client::start(config(&fixture, None), false);

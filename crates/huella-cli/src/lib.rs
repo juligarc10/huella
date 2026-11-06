@@ -1245,6 +1245,7 @@ fn ask_code(store: &Store, location: &str, question: &str, model: &ModelArgs) ->
             lines: Some((start, end)),
             question,
             reviewed: None,
+            removed: None,
         },
     )?;
     println!("{}", answer.answer);

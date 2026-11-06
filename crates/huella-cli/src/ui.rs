@@ -1272,6 +1272,9 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let path = PathBuf::from(text("path").context("falta el fichero")?);
     let question = text("question").context("la pregunta está vacía")?;
     let quote = request["quote"].as_str().unwrap_or_default().to_owned();
+    // «¿Por qué se quitó esto?»: lo quitado va aparte, `quote` es el código junto al que estaba.
+    let removed = request["removed"].as_str().unwrap_or_default().to_owned();
+    let place = huella_engine::code_ask::RemovedPlace::parse(request["place"].as_str().unwrap_or_default());
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
     let key = huella_engine::normalize_path(&path, None);
@@ -1301,6 +1304,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
                     lines,
                     question: &question,
                     reviewed: content.as_deref(),
+                    removed: Some(huella_engine::code_ask::Removed { text: &removed, place }),
                 },
             )?;
             Ok(())
@@ -1357,6 +1361,7 @@ fn code_questions(app: &App, params: &HashMap<String, String>) -> Result<Value> 
                 "model": q.model,
                 "created_at": q.created_at,
                 "quote": q.quote,
+                "removed": q.removed,
                 "lines": located.lines.map(|(start, end)| [start, end]),
             })
         })
