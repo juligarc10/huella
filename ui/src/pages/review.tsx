@@ -576,7 +576,7 @@ export function Review({
 
             <EvidencePanel evidence={step.evidence} path={step.path} />
             <ImpactPanel session={session} step={step} />
-            <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} task={Boolean(review.task)} />
+            <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} thinking={review.ask_thinking} task={Boolean(review.task)} />
             <p className="text-xs text-muted-foreground">Empezó {dateTime(review.turns[0]?.started_at)}</p>
           </article>
         </div>

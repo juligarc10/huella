@@ -18,6 +18,7 @@ import { DecisionsPage } from '@/pages/decisions'
 import { ReviewPage } from '@/pages/review'
 import { SearchPage } from '@/pages/search'
 import { SessionsPage } from '@/pages/sessions'
+import { SettingsPage } from '@/pages/settings'
 import { StatusPage } from '@/pages/status'
 import { SymbolPage } from '@/pages/symbol'
 import { TaskPage, TasksPage } from '@/pages/tasks'
@@ -51,6 +52,7 @@ const router = createHashRouter([
       { path: 'sesiones/:session', element: <ReviewPage /> },
       { path: 'rama', element: <BranchPage /> },
       { path: 'estado', element: <StatusPage /> },
+      { path: 'ajustes', element: <SettingsPage /> },
     ],
   },
 ])

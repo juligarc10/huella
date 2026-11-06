@@ -7,11 +7,13 @@
 mod config;
 pub mod desktop;
 mod hook;
+mod language;
 mod mcp;
 mod report;
 mod review;
 mod sample;
 mod search;
+mod settings;
 mod setup;
 mod task;
 mod ui;
@@ -1245,6 +1247,7 @@ fn ask_code(store: &Store, location: &str, question: &str, model: &ModelArgs) ->
             lines: Some((start, end)),
             question,
             reviewed: None,
+            removed: None,
         },
     )?;
     println!("{}", answer.answer);
@@ -1277,15 +1280,15 @@ fn model_problem(args: &ModelArgs) -> Option<String> {
         Provider::Anthropic => match config::api_key("ANTHROPIC_API_KEY") {
             Ok(Some(_)) => None,
             Ok(None) => Some(format!(
-                "No hay modelo configurado: define ANTHROPIC_API_KEY, o un servidor compatible con OpenAI en [llm] \
-                 de {} (provider = \"openai-compatible\", base_url, model y, si la pide, api_key_file). \
-                 Después vuelve a abrir huella ui.",
+                "No hay modelo configurado: elígelo en Ajustes de huella ui, o define ANTHROPIC_API_KEY, o un \
+                 servidor compatible con OpenAI en [llm] de {} (provider = \"openai-compatible\", base_url, model \
+                 y, si la pide, api_key_file).",
                 config_hint()
             )),
             Err(error) => Some(format!("{error:#}")),
         },
         Provider::OpenaiCompatible if args.model().is_none() => Some(format!(
-            "Falta el modelo: añade model en [llm] de {} (o HUELLA_LLM_MODEL) y vuelve a abrir huella ui.",
+            "Falta el modelo: elígelo en Ajustes de huella ui, o añade model en [llm] de {} (o HUELLA_LLM_MODEL).",
             config_hint()
         )),
         Provider::OpenaiCompatible => config::api_key("HUELLA_LLM_API_KEY").err().map(|error| format!("{error:#}")),
@@ -1293,8 +1296,14 @@ fn model_problem(args: &ModelArgs) -> Option<String> {
 }
 
 fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
+    build_model_thinking(args, None)
+}
+
+/// Como `build_model`, con el razonamiento forzado para una petición concreta
+/// («pensar más» en una pregunta); `None` deja el de la configuración.
+fn build_model_thinking(args: &ModelArgs, thinking: Option<bool>) -> Result<Box<dyn JsonModel>> {
     let (model, base_url) = (args.model(), args.base_url());
-    Ok(match args.provider() {
+    let built: Box<dyn JsonModel> = match args.provider() {
         Provider::Anthropic => {
             let key = config::api_key("ANTHROPIC_API_KEY")?
                 .context("falta la credencial: define ANTHROPIC_API_KEY o api_key_file en config.toml")?;
@@ -1302,12 +1311,13 @@ fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
         }
         Provider::OpenaiCompatible => {
             let model = model.context("con openai-compatible indica el modelo con --model o en config.toml")?;
-            let thinking = config::get().llm.thinking;
+            let thinking = thinking.or(config::get().llm.thinking);
             Box::new(
                 OpenAiCompatible::new(base_url, model, config::api_key("HUELLA_LLM_API_KEY")?).with_thinking(thinking),
             )
         }
-    })
+    };
+    Ok(language::wrap(built))
 }
 
 fn extract(

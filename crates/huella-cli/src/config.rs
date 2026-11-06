@@ -21,6 +21,7 @@ pub struct Config {
     pub llm: Llm,
     pub embed: Embed,
     pub ui: Ui,
+    pub review: Review,
 }
 
 #[derive(Default, Deserialize)]
@@ -44,6 +45,14 @@ pub struct Llm {
 pub struct Embed {
     pub model: Option<String>,
     pub base_url: Option<String>,
+}
+
+/// Cómo se explica la revisión.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Review {
+    /// Idioma de lo que escribe el modelo (`es`, `en`…); sin definir, el de la petición.
+    pub language: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -177,7 +186,7 @@ pub fn write_key_file(path: &Path, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn expand_home(path: &Path) -> PathBuf {
+pub fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), dirs::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => path.to_owned(),

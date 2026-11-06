@@ -117,7 +117,7 @@ export function StepDiff({
     }
   }
   const selected = (index: number) => selection !== null && index >= selection.from && index <= selection.to
-  // Las líneas quitadas ya no existen: no forman parte de lo que se pregunta.
+  // Lo que sigue en el código es lo que se cita; lo quitado va aparte («¿por qué se quitó?»).
   const selectedCode = () =>
     selection
       ? step.lines
@@ -126,11 +126,32 @@ export function StepDiff({
           .map((line) => line.text)
           .join('\n')
       : ''
+  const selectedRemoved = () =>
+    selection
+      ? step.lines
+          .slice(selection.from, selection.to + 1)
+          .filter((line) => line.kind === 'removed')
+          .map((line) => line.text)
+          .join('\n')
+      : ''
+  // Solo líneas quitadas: la pregunta se ancla al código que sigue junto a ellas.
+  const askTarget = (): { quote: string; removed: string; place: 'within' | 'before' | 'after' } | null => {
+    if (!selection) return null
+    const removed = selectedRemoved()
+    if (selectedCode().trim()) return { quote: selectedCode(), removed, place: 'within' }
+    if (!removed.trim()) return null
+    const kept = (line: ReviewStep['lines'][number]) => line.kind !== 'removed' && line.text.trim().length > 0
+    const after = step.lines.slice(selection.to + 1).find(kept)
+    if (after) return { quote: after.text, removed, place: 'before' }
+    const before = step.lines.slice(0, selection.from).findLast(kept)
+    if (before) return { quote: before.text, removed, place: 'after' }
+    return null
+  }
   const submitComment = (quote: string | null) => (body: string) =>
     add.mutate({ key: step.key, quote, body }, { onSuccess: () => onCompose(null) })
-  const submitQuestion = (question: string) =>
+  const submitQuestion = (question: string, think: boolean) =>
     ask.mutate(
-      { quote: selectedCode(), question },
+      { quote: '', removed: '', ...askTarget(), question, think: think || undefined },
       {
         onSuccess: () => {
           setAsking(false)
@@ -212,7 +233,8 @@ export function StepDiff({
                 <div className={inline} onClick={(event) => event.stopPropagation()}>
                   <SelectionBar
                     lines={selection.to - selection.from + 1}
-                    canAsk={selectedCode().trim().length > 0}
+                    canAsk={askTarget() !== null}
+                    removedOnly={!selectedCode().trim() && selectedRemoved().trim().length > 0}
                     onAsk={() => setAsking(true)}
                     onComment={() => {
                       onCompose(index)
@@ -230,6 +252,8 @@ export function StepDiff({
                     onCancel={() => setAsking(false)}
                     pending={ask.isPending}
                     problem={codeQuestions?.ask_problem ?? null}
+                    removed={!selectedCode().trim() && selectedRemoved().trim().length > 0}
+                    thinking={codeQuestions?.ask_thinking}
                   />
                 </div>
               )}
@@ -284,21 +308,30 @@ export function StepDiff({
 function SelectionBar({
   lines,
   canAsk,
+  removedOnly,
   onAsk,
   onComment,
   onClear,
 }: {
   lines: number
-  /** Lo seleccionado sigue en el código: lo quitado ya no se puede preguntar. */
+  /** Hay algo por lo que preguntar: código o líneas quitadas con código al lado. */
   canAsk: boolean
+  /** Solo hay líneas quitadas: la pregunta es por qué se quitaron. */
+  removedOnly: boolean
   onAsk: () => void
   onComment: () => void
   onClear: () => void
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 font-sans whitespace-normal">
-      <Button size="sm" onClick={onAsk} disabled={!canAsk} title={canAsk ? undefined : 'Estas líneas ya no están en el código: selecciona alguna que siga'}>
-        <MessageCircleQuestion aria-hidden="true" /> Preguntar sobre {lines === 1 ? 'esta línea' : `estas ${lines} líneas`}
+      <Button
+        size="sm"
+        onClick={onAsk}
+        disabled={!canAsk}
+        title={canAsk ? undefined : removedOnly ? 'Se quitó el fichero entero: no queda código junto al que guardar la pregunta' : 'Son líneas en blanco: selecciona alguna con código'}
+      >
+        <MessageCircleQuestion aria-hidden="true" />{' '}
+        {removedOnly ? (lines === 1 ? 'Preguntar por qué se quitó' : `Preguntar por qué se quitaron estas ${lines} líneas`) : `Preguntar sobre ${lines === 1 ? 'esta línea' : `estas ${lines} líneas`}`}
       </Button>
       <Button size="sm" variant="outline" onClick={onComment}>
         <MessageSquarePlus aria-hidden="true" /> Comentar

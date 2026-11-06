@@ -466,6 +466,8 @@ export interface CodeQuestion {
   model: string
   created_at: string
   quote: string
+  /** Las líneas quitadas sobre las que se preguntó; vacío si no hay. */
+  removed: string
   /** Líneas actuales del trozo; `null` si ya no está en el fichero. */
   lines: [number, number] | null
 }
@@ -490,7 +492,44 @@ export interface CodeQuestionsResult {
   pending: PendingCodeAsk[]
   /** Qué falta para poder preguntar, o `null`. */
   ask_problem: string | null
+  ask_thinking: AskThinking
 }
+
+/** Si una pregunta puede pedir «pensar más», y qué hace el modelo si no (`null`: lo decide el servidor). */
+export interface AskThinking {
+  available: boolean
+  default: boolean | null
+}
+
+/** De dónde sale un ajuste: una variable de entorno (manda), config.toml o el valor por defecto. */
+type SettingFrom = 'env' | 'file' | 'default'
+
+export interface Settings {
+  path: string | null
+  /** config.toml no se pudo leer: se sigue con lo anterior. */
+  invalid: string | null
+  provider: { value: 'anthropic' | 'openai-compatible'; from: SettingFrom; env: string }
+  base_url: { value: string | null; from: SettingFrom; env: string }
+  model: { value: string | null; from: SettingFrom; env: string }
+  thinking: { value: boolean | null; from: SettingFrom }
+  context_tokens: { value: number; from: SettingFrom }
+  /** Idioma de lo que escribe el modelo; `null`: el de la petición o la pregunta. */
+  language: { value: string | null; options: { code: string; label: string }[] }
+  /** Nunca la clave: de dónde sale y si se puede leer. */
+  key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
+  problem: string | null
+  probe: { running: boolean; ok?: boolean; millis?: number; model?: string; error?: string } | null
+}
+
+export type SettingsChange = Partial<{
+  provider: 'anthropic' | 'openai-compatible'
+  base_url: string | null
+  model: string | null
+  thinking: boolean | null
+  context_tokens: number | null
+  /** `auto`: el de la petición o la pregunta. */
+  language: string
+}>
 
 /** Quién escribió una línea de la rama. */
 export type LineOrigin =
@@ -602,6 +641,7 @@ export interface ReviewResult {
   ask_model: string
   /** Qué falta para poder preguntar (sin credencial, sin modelo), o `null`. */
   ask_problem: string | null
+  ask_thinking: AskThinking
   /** Cobertura de la petición por turno. */
   coverage: Record<string, Coverage>
   covering: { running: boolean; error?: string } | null
