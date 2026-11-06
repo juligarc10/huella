@@ -1,11 +1,13 @@
 import { CircleAlert, Loader2, MessageCircleQuestion, RotateCcw, Send } from 'lucide-react'
 import { useState, type KeyboardEvent } from 'react'
+import { Link } from 'react-router'
 
 import { Panel } from '@/components/bits'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { ThinkMore } from '@/components/review/think-more'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { PendingAsk, ReviewQuestion, ReviewStep } from '@/lib/api'
+import type { AskThinking, PendingAsk, ReviewQuestion, ReviewStep } from '@/lib/api'
 import { dateTime } from '@/lib/format'
 import { useAsk, useClearQuestions } from '@/lib/queries'
 
@@ -17,6 +19,7 @@ export function AskPanel({
   asking,
   model,
   problem,
+  thinking,
   task = false,
 }: {
   session: string
@@ -25,6 +28,7 @@ export function AskPanel({
   asking: PendingAsk[]
   model: string
   problem: string | null
+  thinking?: AskThinking
   /** Es una tarea: se pregunta por toda la tarea, no por la sesión. */
   task?: boolean
 }) {
@@ -34,12 +38,16 @@ export function AskPanel({
   const scope = step ? chosen : 'session'
   const whole = task ? 'tarea' : 'sesión'
   const [question, setQuestion] = useState('')
+  const [think, setThink] = useState(false)
   const relevant = questions.filter((q) => (scope === 'step' ? q.step_key === step?.key : q.step_key === null))
   const pending = asking.filter((a) => (scope === 'step' ? a.step === step?.index : a.step === null))
 
   const send = () => {
     if (!question.trim()) return
-    ask.mutate({ question: question.trim(), step: scope === 'step' && step ? step.index : null }, { onSuccess: () => setQuestion('') })
+    ask.mutate(
+      { question: question.trim(), step: scope === 'step' && step ? step.index : null, think: think || undefined },
+      { onSuccess: () => setQuestion('') },
+    )
   }
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -113,7 +121,12 @@ export function AskPanel({
       {problem && (
         <p className="flex gap-2 rounded-lg bg-warn-soft px-3.5 py-2.5 text-sm leading-relaxed text-warn" role="note">
           <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <span>{problem}</span>
+          <span>
+            {problem}{' '}
+            <Link to="/ajustes" className="font-semibold underline underline-offset-2">
+              Abrir Ajustes
+            </Link>
+          </span>
         </p>
       )}
       <label htmlFor="pregunta" className="sr-only">
@@ -128,13 +141,18 @@ export function AskPanel({
         placeholder={scope === 'step' ? '¿Por qué lo hizo así? ¿Qué pasa si…?' : '¿Qué falta por probar? ¿Hay algo que no pedí?'}
         className="min-h-16 text-sm"
       />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Button size="sm" onClick={send} disabled={Boolean(problem) || !question.trim() || ask.isPending}>
           <Send aria-hidden="true" /> Preguntar
         </Button>
         <span className="text-xs text-muted-foreground">
           {problem ? 'Sin modelo configurado' : `Responde ${model.replace(/^[^:]+:/, '')} con el contexto de la ${whole} · ⌘⏎`}
         </span>
+        {!problem && (
+          <span className="ml-auto">
+            <ThinkMore option={thinking} checked={think} onChange={setThink} />
+          </span>
+        )}
       </div>
     </Panel>
   )

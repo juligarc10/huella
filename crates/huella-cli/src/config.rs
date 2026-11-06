@@ -177,7 +177,7 @@ pub fn write_key_file(path: &Path, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn expand_home(path: &Path) -> PathBuf {
+pub fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), dirs::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => path.to_owned(),

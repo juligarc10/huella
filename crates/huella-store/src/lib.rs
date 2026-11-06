@@ -400,6 +400,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX review_revision_by_review ON review_revision(review_id);
 ",
+    // 23: lo quitado sobre lo que se preguntó («¿por qué se quitó esto?»): ya no
+    // está en el fichero, así que se guarda con la pregunta para enseñarlo.
+    r"
+    ALTER TABLE code_question ADD COLUMN removed TEXT NOT NULL DEFAULT '';
+",
 ];
 
 /// Un momento guardado de una revisión.
@@ -638,6 +643,8 @@ pub struct CodeQuestion {
     pub answer: String,
     pub model: String,
     pub created_at: String,
+    /// Las líneas quitadas sobre las que se preguntó; vacío si no hay.
+    pub removed: String,
 }
 
 /// Lo que se guarda de una pregunta nueva sobre código.
@@ -650,6 +657,8 @@ pub struct NewCodeQuestion<'a> {
     pub question: &'a str,
     pub answer: &'a str,
     pub model: &'a str,
+    /// Las líneas quitadas sobre las que se pregunta; vacío si no hay.
+    pub removed: &'a str,
 }
 
 /// Worktree de git con el estado previo de la sesión en un commit y su
@@ -1469,8 +1478,8 @@ impl Store {
     /// Si falla la escritura.
     pub fn add_code_question(&self, new: &NewCodeQuestion<'_>) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO code_question (path, start_line, end_line, quote, question, answer, model, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            "INSERT INTO code_question (path, start_line, end_line, quote, question, answer, model, created_at, removed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?8)",
             params![
                 new.path,
                 i64::try_from(new.start_line).unwrap_or(i64::MAX),
@@ -1478,7 +1487,8 @@ impl Store {
                 redact(new.quote),
                 redact(new.question),
                 redact(new.answer),
-                new.model
+                new.model,
+                redact(new.removed)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1490,7 +1500,7 @@ impl Store {
     /// Si falla la consulta.
     pub fn code_questions(&self, path: &str) -> Result<Vec<CodeQuestion>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT id, path, start_line, end_line, quote, question, answer, model, created_at
+            "SELECT id, path, start_line, end_line, quote, question, answer, model, created_at, removed
              FROM code_question WHERE path = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([path], |row| {
@@ -1505,6 +1515,7 @@ impl Store {
                 answer: row.get(6)?,
                 model: row.get(7)?,
                 created_at: row.get(8)?,
+                removed: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -3635,6 +3646,7 @@ mod tests {
             question: "¿Por qué está aquí la clave?",
             answer: "Porque API_KEY=a8f3k2j9d0s7q1w4e6r5 se leía antes del entorno.",
             model: "fake:1",
+            removed: "",
         };
         let id = store.add_code_question(&new).unwrap();
         store.add_code_question(&NewCodeQuestion { path: "/r/b.ts", ..new }).unwrap();

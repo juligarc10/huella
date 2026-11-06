@@ -11,6 +11,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  Settings,
   Sun,
 } from 'lucide-react'
 import { useEffect, useState, type CSSProperties } from 'react'
@@ -35,6 +36,7 @@ const nav = [
   { to: '/buscar', label: 'Buscar', icon: Search, end: false },
   { to: '/decisiones', label: 'Decisiones y ADRs', icon: BookMarked, end: false },
   { to: '/estado', label: 'Estado', icon: Activity, end: false },
+  { to: '/ajustes', label: 'Ajustes', icon: Settings, end: false },
 ]
 
 const SIDEBAR_INITIAL = 256

@@ -37,6 +37,8 @@ líneas (lo que se pidió y lo que explicó el agente que las escribió) y sus c
   tú leyendo el código. Si es deducción, dilo.
 - Si el contexto no basta para responder, dilo y explica qué habría que mirar.
 - Si ves un problema real relacionado con la pregunta (un caso límite, un error), señálalo.
+- Si se pregunta por líneas quitadas, explica qué hacían, qué las sustituye en el código actual (o si nada) y \
+  qué dice la historia sobre quitarlas: la petición, la explicación del agente o el commit que las quitó.
 - Responde y termina: no ofrezcas hacer cambios ni acabes con preguntas, desde aquí no se puede editar.
 - Escribe en el idioma de la pregunta, en markdown breve.";
 
@@ -99,6 +101,37 @@ pub struct CodeAsk<'a> {
     /// El texto revisado, que puede no ser el del disco (otra rama en la copia de
     /// trabajo). Sin él se lee el fichero.
     pub reviewed: Option<&'a str>,
+    /// Líneas quitadas sobre las que también se pregunta: ya no están en el
+    /// fichero, así que `quote` es el código junto al que estaban.
+    pub removed: Option<Removed<'a>>,
+}
+
+/// Lo quitado sobre lo que se pregunta y dónde estaba respecto a `quote`.
+#[derive(Debug, Clone, Copy)]
+pub struct Removed<'a> {
+    pub text: &'a str,
+    pub place: RemovedPlace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovedPlace {
+    /// Entre las líneas seleccionadas.
+    Within,
+    /// Justo antes de las líneas marcadas.
+    Before,
+    /// Justo después.
+    After,
+}
+
+impl RemovedPlace {
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "before" => Self::Before,
+            "after" => Self::After,
+            _ => Self::Within,
+        }
+    }
 }
 
 /// Responde una pregunta sobre código y la guarda con su respuesta.
@@ -112,7 +145,8 @@ pub fn ask_code(
     model: &dyn JsonModel,
     ask: CodeAsk<'_>,
 ) -> Result<CodeAnswer> {
-    let CodeAsk { path, quote, lines, question, reviewed } = ask;
+    let CodeAsk { path, quote, lines, question, reviewed, removed } = ask;
+    let removed = removed.filter(|removed| !removed.text.trim().is_empty());
     let source = match reviewed {
         Some(reviewed) => reviewed.to_owned(),
         None => std::fs::read_to_string(path)
@@ -128,7 +162,10 @@ pub fn ask_code(
     let key = normalize_path(path, None);
     let previous = questions_in(store, path, &source)?;
 
-    let context = context(store, sources, path, &source, start, end, &previous)?;
+    let mut context = context(store, sources, path, &source, start, end, &previous)?;
+    if let Some(removed) = removed {
+        context = format!("{}{context}", removed_context(path, removed));
+    }
     let request = huella_core::redact::redact(&format!("{context}\n## Pregunta\n\n{}", question.trim())).into_owned();
     let schema = json!({
         "type": "object",
@@ -152,6 +189,7 @@ pub fn ask_code(
         question: question.trim(),
         answer: &answer,
         model: &model_id,
+        removed: removed.map_or("", |removed| removed.text),
     })?;
     Ok(CodeAnswer { id, answer, model: model_id, start_line: start, end_line: end })
 }
@@ -273,6 +311,51 @@ fn context(
         }
     }
     Ok(clip(&out, MAX_CHARS))
+}
+
+/// Lo quitado, dónde estaba y los commits que lo quitaron: va antes del resto
+/// porque es de lo que trata la pregunta.
+fn removed_context(path: &Path, removed: Removed<'_>) -> String {
+    let mut out = String::from("# Líneas quitadas por las que se pregunta\n\n");
+    out.push_str(match removed.place {
+        RemovedPlace::Within => "Estaban entre las líneas marcadas con > más abajo y ya no están en el fichero.\n\n",
+        RemovedPlace::Before => {
+            "Estaban justo antes de la línea marcada con > más abajo y ya no están en el fichero.\n\n"
+        }
+        RemovedPlace::After => {
+            "Estaban justo después de la línea marcada con > más abajo y ya no están en el fichero.\n\n"
+        }
+    });
+    out.push_str("```\n");
+    for line in removed.text.lines().take(MAX_SELECTION_LINES) {
+        let _ = writeln!(out, "-{}", crate::storyline::clip_line(line));
+    }
+    out.push_str("```\n\n");
+    let commits = removing_commits(path, removed.text);
+    if !commits.is_empty() {
+        let _ = writeln!(out, "## Commits que añadieron o quitaron este código\n\n{}\n", commits.join("\n"));
+    }
+    out
+}
+
+/// Commits que tocaron la línea quitada más reconocible (`git log -S`), de
+/// cualquier rama: en una tarea, la que se revisa puede no ser la del disco.
+fn removing_commits(path: &Path, removed: &str) -> Vec<String> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return Vec::new();
+    };
+    let Some(probe) = removed.lines().map(str::trim).filter(|line| line.len() >= 4).max_by_key(|line| line.len())
+    else {
+        return Vec::new();
+    };
+    let probe: String = probe.chars().take(200).collect();
+    let pickaxe = format!("-S{probe}");
+    let Ok(log) =
+        git(dir, &["log", "--all", "-n", "6", "--date=short", "--format=%h · %an · %ad · %s", &pickaxe, "--", name])
+    else {
+        return Vec::new();
+    };
+    log.lines().map(str::to_owned).collect()
 }
 
 /// Cada edición del símbolo con lo que se pidió y lo que explicó el agente,
@@ -402,6 +485,7 @@ mod tests {
             lines: None,
             question: "¿Qué hace?",
             reviewed: Some("function f() {\n  solo_en_la_rama();\n}\n"),
+            removed: None,
         };
         let answer = super::ask_code(&store, None, &Answers, ask).unwrap();
         assert_eq!((answer.start_line, answer.end_line), (2, 2));
@@ -438,6 +522,68 @@ mod tests {
         let source = "x = 1\ny\nx = 1\ny\nx = 1\n";
         assert_eq!(locate(source, "x = 1", Some(5)), Some((5, 5)));
         assert_eq!(locate(source, "x = 1", Some(2)), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_question_about_removed_lines_shows_them_with_the_commit_that_removed_them() {
+        struct Sees(RefCell<String>);
+        impl JsonModel for Sees {
+            fn model_id(&self) -> String {
+                "fake:1".into()
+            }
+            fn complete_json(&self, _: &str, user: &str, _: &Value) -> std::result::Result<String, ExtractError> {
+                user.clone_into(&mut self.0.borrow_mut());
+                Ok(json!({"answer": "Se quitó al pasar a céntimos."}).to_string())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("huella-code-ask-removed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let path = dir.join("total.ts");
+        run(&["init", "-q"]);
+        std::fs::write(&path, "function total(p) {\n  const rounded = Math.round(p);\n  return rounded;\n}\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "Redondea el total"]);
+        std::fs::write(&path, "function total(p) {\n  return p;\n}\n").unwrap();
+        run(&["commit", "-q", "-am", "Quita el redondeo: ya llega en céntimos"]);
+
+        let store = Store::open_in_memory().unwrap();
+        let model = Sees(RefCell::new(String::new()));
+        let answer = ask_code(
+            &store,
+            None,
+            &model,
+            CodeAsk {
+                path: &path,
+                quote: "  return p;",
+                lines: None,
+                question: "¿Por qué se quita?",
+                reviewed: None,
+                removed: Some(Removed {
+                    text: "  const rounded = Math.round(p);\n  return rounded;",
+                    place: RemovedPlace::Before,
+                }),
+            },
+        )
+        .unwrap();
+        assert_eq!((answer.start_line, answer.end_line), (2, 2), "se ancla a la línea que sigue");
+        let seen = model.0.borrow().clone();
+        assert!(seen.contains("-  const rounded = Math.round(p);"), "{seen}");
+        assert!(seen.contains("justo antes de la línea marcada"), "{seen}");
+        assert!(seen.contains("Quita el redondeo"), "el commit que lo quitó: {seen}");
+        let stored = store.code_questions(&normalize_path(&path, None)).unwrap();
+        assert_eq!(stored[0].removed, "  const rounded = Math.round(p);\n  return rounded;");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -481,6 +627,7 @@ mod tests {
                 lines: None,
                 question: "¿Qué hace?",
                 reviewed: None,
+                removed: None,
             },
         )
         .unwrap();
