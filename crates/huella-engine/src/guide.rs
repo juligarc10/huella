@@ -223,8 +223,24 @@ fn write_concepts(out: &mut String, story: &Storyline) {
 #[must_use]
 pub fn render_overview(story: &Storyline) -> String {
     let mut out = format!("Lo que hace el cambio: {}\n", clip(&one_line(&story.summary), 1000));
+    for (label, text) in [("El problema", &story.problem), ("Impacto", &story.impact), ("La solución", &story.solution)]
+    {
+        if !text.trim().is_empty() {
+            let _ = writeln!(out, "{label}: {}", clip(&one_line(text), 1000));
+        }
+    }
     if !story.before.is_empty() {
         let _ = writeln!(out, "Antes: {}\nAhora: {}", one_line(&story.before), one_line(&story.after));
+    }
+    for scenario in &story.scenarios {
+        let _ = writeln!(
+            out,
+            "Escenario «{}»: {} · antes: {} · ahora: {}",
+            one_line(&scenario.title),
+            one_line(&scenario.situation),
+            one_line(&scenario.before),
+            one_line(&scenario.after)
+        );
     }
     if let Some(example) = &story.example {
         let _ = writeln!(out, "Un caso: {}", one_line(&example.scenario));

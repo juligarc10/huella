@@ -61,6 +61,8 @@ Escribe para **alguien que llega de nuevas al código y al dominio**, y que debe
 Qué lleva:
 
 - **`summary`, `before` y `after`**: qué hace el cambio, y cómo se comportaba el sistema antes y cómo ahora. Comportamiento, no código.
+- **`problem`, `impact` y `solution`**: el punto de partida contado para alguien de fuera. Qué fallaba o faltaba (como lo viviría quien usa el sistema), a quién o a qué afectaba y con qué consecuencias, y la idea de la solución en lenguaje llano con por qué se hizo así.
+- **`scenarios`**: 2 a 4 casos concretos con datos de verdad, el normal y los límites o errores («se paga un carrito vacío»): qué pasaba antes, qué pasa ahora y el código donde se decide. Huella los enseña lado a lado.
 - **`example`**: un caso concreto con datos de verdad, de principio a fin («llega un alta con el correo ` A@B.com `, se normaliza aquí, se rechaza allí si…»), con el código donde ocurre cada cosa. Es el mapa para entender todo lo demás.
 - **`concepts`**: el glosario. Empieza por lo que registraste con `kind: "concept"`.
 - **`chapters`, en orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Cada capítulo es una intención («Endpoint del filtro»), con su `narration` y qué debería saber responder quien revisa (`questions`).
