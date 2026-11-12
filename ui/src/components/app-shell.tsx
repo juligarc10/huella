@@ -15,7 +15,7 @@ import {
   Sun,
 } from 'lucide-react'
 import { useEffect, useState, type CSSProperties } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useLocation } from 'react-router'
 
 import { Logo } from '@/components/brand'
 import { CommandPalette } from '@/components/command-palette'
@@ -48,6 +48,7 @@ export function AppShell() {
   const [sidebar, setSidebar] = useStoredNumber('huella-sidebar', SIDEBAR_INITIAL)
   const [hidden, setHidden] = useStoredNumber('huella-sidebar-hidden', 0)
   const toggleSidebar = () => setHidden(hidden ? 0 : 1)
+  const location = useLocation()
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -69,6 +70,17 @@ export function AppShell() {
       style={{ '--sidebar-width': `${sidebar}px` } as CSSProperties}
       className="relative flex min-h-svh flex-col bg-background lg:flex-row"
     >
+      {/* Con teclado, lo primero es poder saltarse la barra lateral. */}
+      <a
+        href="#contenido"
+        onClick={(event) => {
+          event.preventDefault()
+          document.getElementById('contenido')?.focus()
+        }}
+        className="sr-only z-50 rounded-lg bg-primary px-4 py-2 text-primary-foreground focus:not-sr-only focus:fixed focus:top-3 focus:left-3"
+      >
+        Saltar al contenido
+      </a>
       {!hidden && (
         <>
           <Sidebar onOpenPalette={() => setPaletteOpen(true)} onHide={toggleSidebar} />
@@ -96,8 +108,13 @@ export function AppShell() {
           <PanelLeftOpen className="size-4" aria-hidden="true" />
         </button>
       )}
-      <main className={cn('min-w-0 flex-1 px-5 py-8 has-[[data-wide]]:sm:px-6 sm:px-10 lg:py-10', hidden && 'lg:pl-14!')}>
-        <div className="mx-auto flex max-w-6xl flex-col gap-7 has-[[data-wide]]:max-w-none">
+      <main
+        id="contenido"
+        tabIndex={-1}
+        className={cn('min-w-0 flex-1 px-5 py-8 outline-none has-[[data-wide]]:sm:px-6 sm:px-10 lg:py-10', hidden && 'lg:pl-14!')}
+      >
+        {/* Cada página entra con un leve fundido; con «reducir movimiento», sin él. */}
+        <div key={location.pathname} className="page-enter mx-auto flex max-w-6xl flex-col gap-7 has-[[data-wide]]:max-w-none">
           <Outlet />
         </div>
       </main>
