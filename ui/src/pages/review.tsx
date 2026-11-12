@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
+import { RefreshButton } from '@/components/refresh-button'
 import { AskPanel } from '@/components/review/ask-panel'
 import { EvidencePanel } from '@/components/review/evidence'
 import { CoveragePanel } from '@/components/review/coverage'
@@ -34,7 +35,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { LineRange, ReviewResult, ReviewStep, Verdict } from '@/lib/api'
 import { useAskNotices } from '@/lib/ask-notices'
 import { baseName, cleanPrompt, clip, dateTime, reviewStatusLabel, shortId } from '@/lib/format'
-import { useOpenInEditor, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
+import { useOpenInEditor, useRefreshReview, useReview, useSetReviewStatus, useSetVerdict } from '@/lib/queries'
 import { cn, releaseFocus } from '@/lib/utils'
 
 const isUnexplained = (step: ReviewStep) => step.lines.some((line) => line.kind === 'added' && line.external)
@@ -96,6 +97,7 @@ export function Review({
   const [focus, setFocus] = useState<LineRange | null>(null)
   const setVerdict = useSetVerdict(session)
   const setStatus = useSetReviewStatus(session)
+  const refresh = useRefreshReview(session)
   const open = useOpenInEditor()
   const step = steps[current]
   const decided = steps.filter((s) => s.verdict).length
@@ -287,6 +289,10 @@ export function Review({
                   Pasos
                 </ToggleGroupItem>
               </ToggleGroup>
+            )}
+            {/* En la presentación, refrescar está en su barra. */}
+            {!(review.task && review.storyline && mode === 'presentation') && (
+              <RefreshButton onRefresh={() => refresh.mutateAsync()} refreshing={refresh.isPending} />
             )}
             <FeedbackDialog session={session} openComments={openComments.length} />
             <Button

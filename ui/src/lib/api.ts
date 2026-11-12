@@ -371,6 +371,8 @@ export interface TaskSummary {
   status: ReviewStatus
   steps: number | null
   reviewed: number
+  /** La rama avanzó desde la última vez que se abrió: hay algo nuevo que revisar. */
+  advanced: boolean
 }
 
 export interface TaskDetail {

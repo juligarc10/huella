@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 
 import { EmptyState, PageHeader } from '@/components/bits'
+import { RefreshButton } from '@/components/refresh-button'
 import { BlurFade } from '@/components/ui/blur-fade'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -41,6 +42,8 @@ export function SessionsPage() {
         title="Sesiones"
         description="Cada sesión del agente con ediciones, según en qué punto de la revisión está. Ábrela para revisarla paso a paso."
         actions={
+          <>
+          <RefreshButton keys={[['inbox']]} />
           <ToggleGroup
             type="single"
             value={filter}
@@ -55,6 +58,7 @@ export function SessionsPage() {
               Todas
             </ToggleGroupItem>
           </ToggleGroup>
+          </>
         }
       />
       {isPending ? (
