@@ -500,7 +500,6 @@ enum Provider {
 }
 
 /// La orden `huella` con los argumentos de la línea de órdenes.
-#[must_use]
 pub fn run_cli() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
