@@ -163,8 +163,8 @@ fn tools() -> Value {
 /// común del guion. El esquema es el publicado, con las anclas en línea.
 fn storyline_tool() -> Value {
     let mut schema: Value = serde_json::from_str(huella_engine::storyline::SCHEMA).unwrap_or_default();
-    let anchor = schema["$defs"]["anchor"].clone();
-    inline(&mut schema, &anchor);
+    let defs = schema["$defs"].clone();
+    inline(&mut schema, &defs);
     if let Some(object) = schema.as_object_mut() {
         for key in ["$schema", "$id", "$defs", "title"] {
             object.remove(key);
@@ -174,24 +174,30 @@ fn storyline_tool() -> Value {
         "name": "huella_storyline",
         "description": "Cuenta el cambio al terminar una tarea (o una parte grande) para alguien sin contexto del \
                         código ni del dominio: el guion con el que se le presentará a quien lo revise. Antes y ahora, \
-                        un caso concreto de principio a fin, un glosario y capítulos en el orden en que conviene \
+                        el problema, a quién afecta y la solución, escenarios, un caso concreto de principio a fin, un glosario y capítulos en el orden en que conviene \
                         ENTENDERLO (de la entrada a la lógica, los datos y los efectos, cruzando repositorios), no en \
-                        el que lo escribiste; cada capítulo, con su código explicado por ideas (anclas con ruta \
-                        absoluta y símbolo). Incluye lo que hiciste fuera de la tarea y lo que no comprobaste: lo que \
+                        el que lo escribiste; cada capítulo, con su código explicado por ideas (qué hace, por qué, \
+                        qué comprobar y puntos anclados a líneas) y, si aclaran, bloques (tablas, esquemas, secuencias).\
+                         Las anclas, con ruta absoluta y símbolo. Incluye lo que hiciste fuera de la tarea y lo que no comprobaste: lo que \
                         no cuentes aparecerá igualmente, marcado como no contado. La respuesta dice qué le falta: \
                         complétalo y vuelve a llamarla con el guion completo, igual que si el cambio sigue.",
         "inputSchema": schema
     })
 }
 
-/// Sustituye las referencias al ancla por su definición.
-fn inline(value: &mut Value, anchor: &Value) {
-    match value {
-        Value::Object(object) if object.get("$ref").and_then(Value::as_str) == Some("#/$defs/anchor") => {
-            *value = anchor.clone();
+/// Sustituye las referencias a las definiciones (`#/$defs/…`) por su contenido:
+/// no todos los agentes las siguen.
+fn inline(value: &mut Value, defs: &Value) {
+    let target =
+        value.get("$ref").and_then(Value::as_str).and_then(|path| path.strip_prefix("#/$defs/")).map(str::to_owned);
+    match (target, &mut *value) {
+        (Some(name), _) => {
+            let mut definition = defs[name.as_str()].clone();
+            inline(&mut definition, defs);
+            *value = definition;
         }
-        Value::Object(object) => object.values_mut().for_each(|child| inline(child, anchor)),
-        Value::Array(items) => items.iter_mut().for_each(|child| inline(child, anchor)),
+        (None, Value::Object(object)) => object.values_mut().for_each(|child| inline(child, defs)),
+        (None, Value::Array(items)) => items.iter_mut().for_each(|child| inline(child, defs)),
         _ => {}
     }
 }
