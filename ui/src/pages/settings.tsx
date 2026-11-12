@@ -1,9 +1,10 @@
-import { CheckCircle2, CircleAlert, KeyRound, Loader2, PlugZap } from 'lucide-react'
+import { CheckCircle2, CircleAlert, KeyRound, Languages, Loader2, PlugZap } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Mono, PageHeader, Panel } from '@/components/bits'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { Settings, SettingsChange } from '@/lib/api'
@@ -183,6 +184,8 @@ export function SettingsPage() {
         </div>
       </Panel>
 
+      <LanguagePanel settings={settings} />
+
       <KeyPanel settings={settings} provider={form.provider} />
     </>
   )
@@ -205,6 +208,44 @@ function ProbeResult({ probe }: { probe: Settings['probe'] }) {
     <span className="flex min-w-0 basis-full gap-2 text-sm text-destructive" role="alert">
       <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> No responde: {probe.error}
     </span>
+  )
+}
+
+const AUTO = 'auto'
+
+/** El idioma se guarda al elegirlo: no depende del resto del formulario. */
+function LanguagePanel({ settings }: { settings: Settings }) {
+  const save = useSaveSettings()
+  const { language } = settings
+  return (
+    <Panel className="flex flex-col gap-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold">
+        <Languages className="size-4 text-muted-foreground" aria-hidden="true" /> Idioma de las explicaciones
+      </h2>
+      <div className="flex flex-wrap items-center gap-3">
+        <label htmlFor="ajuste-idioma" className="sr-only">
+          Idioma de las explicaciones
+        </label>
+        <Select value={language.value ?? AUTO} onValueChange={(value) => save.mutate({ language: value })} disabled={save.isPending}>
+          <SelectTrigger id="ajuste-idioma" className="w-72">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AUTO}>Automático: el de la petición</SelectItem>
+            {language.options.map((option) => (
+              <SelectItem key={option.code} value={option.code}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {save.isPending && <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden="true" />}
+      </div>
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        En el que el modelo escribe las guías, el guion, las respuestas a tus preguntas y las decisiones. Lo ya escrito se queda en su
+        idioma: usa «Rehacer el guion» para volver a escribirlo. Al agente se lo pide al empezar cada sesión.
+      </p>
+    </Panel>
   )
 }
 

@@ -75,6 +75,10 @@ pub(crate) fn view(args: &ModelArgs, probing: &Probing) -> Value {
         "model": {"value": args.model(), "from": source(args.model.is_some(), llm.model.is_some()), "env": "HUELLA_LLM_MODEL"},
         "thinking": {"value": llm.thinking, "from": source(false, llm.thinking.is_some())},
         "context_tokens": {"value": llm.context_tokens.unwrap_or(DEFAULT_CONTEXT), "from": source(false, llm.context_tokens.is_some())},
+        "language": {
+            "value": config.review.language,
+            "options": crate::language::LANGUAGES.iter().map(|(code, label, _)| json!({"code": code, "label": label})).collect::<Vec<_>>(),
+        },
         "key": key_view(provider),
         "problem": crate::model_problem(args),
         "probe": probing.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -118,7 +122,7 @@ pub(crate) fn save(body: &str) -> Result<()> {
 fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
     let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
     let Some(fields) = request.as_object() else { bail!("faltan los ajustes") };
-    let mut edits: Vec<(&str, Option<toml_edit::Value>)> = Vec::new();
+    let mut edits: Vec<(&str, &str, Option<toml_edit::Value>)> = Vec::new();
     for (name, value) in fields {
         let edit = match name.as_str() {
             "provider" => match plain(value, "el proveedor", 40)?.as_deref() {
@@ -139,6 +143,13 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
                 Value::Bool(enabled) => Some((*enabled).into()),
                 _ => bail!("thinking debe ser sí, no o sin definir"),
             },
+            "language" => match plain(value, "el idioma", 10)?.as_deref() {
+                None | Some("auto") => None,
+                Some(code) if crate::language::LANGUAGES.iter().any(|(known, _, _)| *known == code) => {
+                    Some(code.into())
+                }
+                Some(_) => bail!("idioma desconocido"),
+            },
             "context_tokens" if value.is_null() => None,
             "context_tokens" => {
                 let tokens = value.as_i64().filter(|tokens| (1024..=10_000_000).contains(tokens));
@@ -146,22 +157,23 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
             }
             other => bail!("ajuste desconocido: {other}"),
         };
-        let key = match name.as_str() {
-            "provider" => "provider",
-            "base_url" => "base_url",
-            "model" => "model",
-            "thinking" => "thinking",
-            _ => "context_tokens",
+        let (table, key) = match name.as_str() {
+            "provider" => ("llm", "provider"),
+            "base_url" => ("llm", "base_url"),
+            "model" => ("llm", "model"),
+            "thinking" => ("llm", "thinking"),
+            "language" => ("review", "language"),
+            _ => ("llm", "context_tokens"),
         };
-        edits.push((key, edit));
+        edits.push((table, key, edit));
     }
     config::update(path, |document| {
-        let llm = config::table(document.as_table_mut(), "llm");
-        for (key, value) in edits {
+        for (table, key, value) in edits {
+            let section = config::table(document.as_table_mut(), table);
             match value {
-                Some(value) => llm[key] = toml_edit::Item::Value(value),
+                Some(value) => section[key] = toml_edit::Item::Value(value),
                 None => {
-                    llm.remove(key);
+                    section.remove(key);
                 }
             }
         }
@@ -260,6 +272,11 @@ mod tests {
             assert_eq!(llm.model.as_deref(), Some("qwen"));
             assert_eq!(llm.context_tokens, Some(65_536));
             assert!(matches!(llm.provider, Some(Provider::OpenaiCompatible)));
+            save_in(path, r#"{"language": "en"}"#).unwrap();
+            assert_eq!(config::get().review.language.as_deref(), Some("en"));
+            assert!(std::fs::read_to_string(path).unwrap().contains("[review]\nlanguage = \"en\""));
+            save_in(path, r#"{"language": "auto"}"#).unwrap();
+            assert_eq!(config::get().review.language, None, "automático quita el campo");
         });
     }
 
@@ -272,6 +289,7 @@ mod tests {
                 r#"{"context_tokens": 10}"#,
                 r#"{"model": "a\nb"}"#,
                 r#"{"api_key_file": "/tmp/x"}"#,
+                r#"{"language": "klingon"}"#,
             ] {
                 assert!(save_in(path, body).is_err(), "{body}");
             }
