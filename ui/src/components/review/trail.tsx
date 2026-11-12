@@ -1,5 +1,5 @@
 import { ChevronDown, RefreshCw } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import { verdictDot } from '@/components/review/verdicts'
 import type { RevisionPoint, ReviewStep, Storyline } from '@/lib/api'
@@ -33,6 +33,13 @@ function Footprint({
   onClick: () => void
 }) {
   const state = step.verdict ? verdictName[step.verdict] : step.triage.level === 'must' ? 'obligatorio, sin veredicto' : 'sin veredicto'
+  // Al cambiar el veredicto, la huella hace un pequeño «pop»; al cargar la página, no.
+  const [last, setLast] = useState(step.verdict)
+  const [pops, setPops] = useState(0)
+  if (last !== step.verdict) {
+    setLast(step.verdict)
+    if (step.verdict) setPops(pops + 1)
+  }
   return (
     <button
       type="button"
@@ -45,9 +52,11 @@ function Footprint({
       className="group/step flex h-6 items-center px-[1.5px]"
     >
       <span
+        key={pops}
         aria-hidden="true"
         className={cn(
-          'block h-3 w-[5px] rounded-full transition-transform group-hover/step:scale-125',
+          'block h-3 w-[5px] rounded-full transition-[transform,background-color,opacity,outline-color] duration-300 ease-out group-hover/step:scale-125',
+          pops > 0 && 'verdict-pop',
           // Se alternan a los dos lados de la línea, como un rastro.
           odd ? 'translate-y-[2px]' : '-translate-y-[2px]',
           step.verdict

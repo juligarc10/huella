@@ -6,14 +6,20 @@ import { ThinkMore } from '@/components/review/think-more'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { AskThinking, CodeQuestion, PendingCodeAsk } from '@/lib/api'
-import { dateTime } from '@/lib/format'
+import { dateTime, justNow } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { useDeleteCodeQuestion, useDismissCodeAsk } from '@/lib/queries'
 
 /** Una pregunta sobre el código y su respuesta, junto a las líneas preguntadas. */
 export function CodeQuestionCard({ question, path }: { question: CodeQuestion; path: string }) {
   const remove = useDeleteCodeQuestion(path)
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-brand/30 bg-card px-4 py-3 font-sans text-sm whitespace-normal">
+    <div
+      className={cn(
+        'flex flex-col gap-2 rounded-xl border border-brand/30 bg-card px-4 py-3 font-sans text-sm whitespace-normal',
+        justNow(question.created_at) && 'answer-enter',
+      )}
+    >
       <p className="flex gap-2 font-semibold">
         <MessageCircleQuestion className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" />
         {question.question}
