@@ -2,6 +2,8 @@
 //! un símbolo. Los usan tanto la CLI como el servidor del editor.
 
 pub mod adr;
+pub mod audit;
+pub mod blocks;
 pub mod branch;
 pub mod checkpoint;
 pub mod code_ask;
