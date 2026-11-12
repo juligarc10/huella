@@ -1,6 +1,7 @@
 // Piezas pequeñas que comparten las pantallas.
 
 import { Sparkles, Type } from 'lucide-react'
+import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 
 import { AnimatedShinyText } from '@/components/ui/animated-shiny-text'
@@ -82,6 +83,10 @@ export function Chip({ children, className }: { children: ReactNode; className?:
 }
 
 export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+  // La pestaña dice dónde se está: también lo anuncian los lectores de pantalla al cambiar de página.
+  useEffect(() => {
+    if (typeof title === 'string') document.title = `${title} · Huella`
+  }, [title])
   return (
     <header className="flex flex-wrap items-end gap-4">
       <div className="flex min-w-0 flex-[999_1_320px] flex-col gap-1.5">

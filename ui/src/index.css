@@ -177,7 +177,19 @@
     animation: slide-enter 180ms ease-out;
 }
 
+@keyframes page-enter {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+}
+
+.page-enter {
+    animation: page-enter 220ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
+    .page-enter,
     .slide-enter {
         animation: none;
     }

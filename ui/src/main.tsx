@@ -1,6 +1,7 @@
 import './index.css'
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MotionConfig } from 'motion/react'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createHashRouter, Navigate, RouterProvider } from 'react-router'
@@ -63,7 +64,10 @@ createRoot(document.getElementById('root')!).render(
       <ProjectProvider>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider delayDuration={300}>
-            <RouterProvider router={router} />
+            {/* Las animaciones de motion respetan «reducir movimiento» del sistema. */}
+            <MotionConfig reducedMotion="user">
+              <RouterProvider router={router} />
+            </MotionConfig>
             <Toaster richColors position="bottom-right" offset={{ bottom: 76 }} />
           </TooltipProvider>
         </QueryClientProvider>

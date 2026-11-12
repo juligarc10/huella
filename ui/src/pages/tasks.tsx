@@ -1,8 +1,9 @@
-import { CircleAlert, ClipboardList, FolderPlus, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { CircleAlert, ClipboardList, FolderPlus, Loader2, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
+import { RefreshButton } from '@/components/refresh-button'
 import { BlurFade } from '@/components/ui/blur-fade'
 import { Button } from '@/components/ui/button'
 import {
@@ -18,6 +19,7 @@ import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { ReviewStatus, TaskDetail, TaskSummary } from '@/lib/api'
 import { dateTime, reviewStatusLabel } from '@/lib/format'
 import { useAddTaskRepo, useCreateTask, useRemoveTaskRepo, useReview, useSetTaskTarget, useTask, useTasks } from '@/lib/queries'
@@ -33,17 +35,86 @@ const tone: Record<ReviewStatus, string> = {
 
 const firstLine = (text: string) => text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
 
+/** Los filtros de la lista: por estado de la revisión, y lo que ha avanzado desde la última vez. */
+const filters = [
+  { id: 'all', label: 'Todas', test: () => true },
+  { id: 'todo', label: 'Por revisar', test: (task: TaskSummary) => task.status === 'pending' || task.status === 'in_review' },
+  { id: 'changes', label: 'Cambios pedidos', test: (task: TaskSummary) => task.status === 'changes_requested' },
+  { id: 'approved', label: 'Aprobadas', test: (task: TaskSummary) => task.status === 'approved' },
+  { id: 'news', label: 'Con cambios nuevos', test: (task: TaskSummary) => task.advanced },
+] as const
+type FilterId = (typeof filters)[number]['id']
+
+const matches = (task: TaskSummary, text: string) => {
+  const wanted = text.trim().toLocaleLowerCase('es')
+  if (!wanted) return true
+  return [task.key, task.title ?? '', task.description, ...task.repos.map((repo) => repo.name ?? repo.repo)].some((field) =>
+    field.toLocaleLowerCase('es').includes(wanted),
+  )
+}
+
 /** Tareas: lo que se va a mergear, en todos los repositorios que toca. */
 export function TasksPage() {
   const { data, isPending } = useTasks()
   const tasks = data?.tasks ?? []
+  // El filtro va en la dirección: se puede volver atrás o compartirlo.
+  const [params, setParams] = useSearchParams()
+  const filter = (filters.find((item) => item.id === params.get('estado'))?.id ?? 'all') as FilterId
+  const text = params.get('q') ?? ''
+  const update = (key: string, value: string) => {
+    const next = new URLSearchParams(params)
+    if (value && value !== 'all') next.set(key, value)
+    else next.delete(key)
+    setParams(next, { replace: true })
+  }
+  const active = filters.find((item) => item.id === filter) ?? filters[0]
+  const shown = tasks.filter((task) => active.test(task) && matches(task, text))
   return (
     <>
       <PageHeader
         title="Tareas"
         description="Cada tarea se revisa entera: la rama de cada repositorio que toca, contra la rama a la que se va a mergear."
-        actions={<NewTaskDialog />}
+        actions={
+          <>
+            <RefreshButton keys={[['tasks'], ['task']]} />
+            <NewTaskDialog />
+          </>
+        }
       />
+      {tasks.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          <ToggleGroup
+            type="single"
+            value={filter}
+            onValueChange={(value) => value && update('estado', value)}
+            variant="outline"
+            aria-label="Qué tareas mostrar"
+            className="flex-wrap justify-start"
+          >
+            {filters.map((item) => {
+              const count = tasks.filter(item.test).length
+              return (
+                <ToggleGroupItem key={item.id} value={item.id} className="min-h-10 gap-1.5 px-3" disabled={item.id !== 'all' && count === 0}>
+                  {item.id === 'news' && <Sparkles className="size-3.5 text-warn" aria-hidden="true" />}
+                  {item.label}
+                  <span className="rounded-full bg-muted px-1.5 text-xs tabular-nums text-muted-foreground">{count}</span>
+                </ToggleGroupItem>
+              )
+            })}
+          </ToggleGroup>
+          <label className="relative ml-auto flex min-w-0 flex-[1_1_14rem] items-center sm:max-w-72">
+            <span className="sr-only">Buscar tareas</span>
+            <Search className="pointer-events-none absolute left-3 size-4 text-muted-foreground" aria-hidden="true" />
+            <Input
+              type="search"
+              value={text}
+              onChange={(event) => update('q', event.target.value)}
+              placeholder="Clave, título o repositorio"
+              className="min-h-10 pl-9"
+            />
+          </label>
+        </div>
+      )}
       {isPending ? (
         <div className="flex flex-col gap-2">
           {Array.from({ length: 4 }, (_, index) => (
@@ -54,9 +125,21 @@ export function TasksPage() {
         <EmptyState icon={<ClipboardList className="size-8" />} title="Aún no hay tareas">
           Crea una con su clave (la que llevan las ramas, p. ej. DENMS-1234) y pega lo que pide.
         </EmptyState>
+      ) : shown.length === 0 ? (
+        <EmptyState icon={<Search className="size-8" />} title="Ninguna tarea con ese filtro">
+          <Button
+            variant="outline"
+            className="mt-2"
+            onClick={() => {
+              setParams(new URLSearchParams(), { replace: true })
+            }}
+          >
+            Ver todas
+          </Button>
+        </EmptyState>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {tasks.map((task, index) => (
+        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2" aria-label={`${shown.length} tareas`}>
+          {shown.map((task, index) => (
             <li key={task.key}>
               <BlurFade delay={Math.min(index, 12) * 0.03}>
                 <TaskCard task={task} />
@@ -74,11 +157,16 @@ function TaskCard({ task }: { task: TaskSummary }) {
   return (
     <Link
       to={`/tareas/${encodeURIComponent(task.key)}`}
-      className="flex min-h-11 flex-col gap-2 rounded-2xl border bg-card px-5 py-4 text-foreground no-underline transition-colors hover:border-foreground/40"
+      className="flex h-full min-h-11 flex-col gap-2 rounded-2xl border bg-card px-5 py-4 text-foreground no-underline transition-[border-color,box-shadow,translate] duration-200 hover:border-foreground/40 hover:shadow-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-safe:hover:-translate-y-0.5"
     >
-      <span className="flex items-baseline gap-3">
+      <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="font-mono text-base font-semibold">{task.key}</span>
         <span className={cn('rounded-md px-2 py-0.5 text-xs font-medium', tone[task.status])}>{reviewStatusLabel[task.status]}</span>
+        {task.advanced && (
+          <span className="flex items-center gap-1 rounded-md bg-warn-soft px-2 py-0.5 text-xs font-medium text-warn">
+            <Sparkles className="size-3" aria-hidden="true" /> Cambios nuevos
+          </span>
+        )}
         <span className="ml-auto text-xs text-muted-foreground">{dateTime(task.updated_at)}</span>
       </span>
       <span className="line-clamp-2 text-sm">{title}</span>
