@@ -1,10 +1,10 @@
+import { AnimatePresence, motion } from 'motion/react'
 import { CircleAlert, ClipboardList, FolderPlus, Loader2, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import { EmptyState, Mono, PageHeader, Panel } from '@/components/bits'
 import { RefreshButton } from '@/components/refresh-button'
-import { BlurFade } from '@/components/ui/blur-fade'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -139,13 +139,20 @@ export function TasksPage() {
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 md:grid-cols-2" aria-label={`${shown.length} tareas`}>
-          {shown.map((task, index) => (
-            <li key={task.key}>
-              <BlurFade delay={Math.min(index, 12) * 0.03}>
+          <AnimatePresence mode="popLayout" initial={false}>
+            {shown.map((task, index) => (
+              <motion.li
+                key={task.key}
+                layout
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0, transition: { delay: Math.min(index, 12) * 0.03 } }}
+                exit={{ opacity: 0, scale: 0.97, transition: { duration: 0.15 } }}
+                transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+              >
                 <TaskCard task={task} />
-              </BlurFade>
-            </li>
-          ))}
+              </motion.li>
+            ))}
+          </AnimatePresence>
         </ul>
       )}
     </>

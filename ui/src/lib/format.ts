@@ -88,6 +88,12 @@ export const statusLabel: Record<string, string> = {
   proposed: 'Propuesta',
 }
 
+/** Una fecha de hace menos de medio minuto: lo que acaba de llegar y merece llamar la atención. */
+export const justNow = (iso: string, seconds = 30) => {
+  const at = Date.parse(iso)
+  return Number.isFinite(at) && Date.now() - at < seconds * 1000
+}
+
 export const reviewStatusLabel: Record<ReviewStatus, string> = {
   pending: 'Sin revisar',
   in_review: 'En revisión',
