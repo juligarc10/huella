@@ -660,6 +660,9 @@ export interface ReviewResult {
   storyline?: Storyline
   /** El guion que se está escribiendo; `part` es [parte, de cuántas] si va por partes. */
   storylining?: { running: boolean; part: [number, number] | null; error: string | null } | null
+  /** El último contraste del guion con el código. */
+  audit?: { findings: AuditFinding[]; model: string; recorded_at: string; stale: boolean } | null
+  auditing?: { running: boolean; error: string | null } | null
 }
 
 export interface StoryChapter {
@@ -676,10 +679,54 @@ export interface StoryChapter {
   look_at: string[]
   /** Lo que quien revisa debería saber responder al acabar el capítulo. */
   questions: string[]
+  /** Preguntas con respuesta para comprobar que se ha entendido. */
+  checks: { question: string; answer: string }[]
+  blocks: StoryBlock[]
   /** Cada idea es una diapositiva con todo su código; los pasos fuera de ellas salen sueltos. */
-  ideas: { title: string; explanation: string; look_at: string[]; steps: number[] }[]
+  ideas: StoryIdea[]
   /** Código que el guion del agente no menciona. */
   unnarrated: boolean
+}
+
+/** La forma que el generador eligió para explicar algo: tabla, esquema, secuencia… */
+export interface StoryBlock {
+  type: 'text' | 'list' | 'steps' | 'table' | 'flow' | 'sequence' | 'callout' | 'code' | string
+  title: string
+  text: string
+  items: string[]
+  columns: string[]
+  rows: string[][]
+  nodes: { id: string; label: string }[]
+  edges: { from: string; to: string; label: string }[]
+  tone: 'info' | 'tip' | 'warn' | 'risk' | string
+  language: string
+}
+
+/** Una idea: una diapositiva con su código. */
+export interface StoryIdea {
+  title: string
+  explanation: string
+  /** Qué hace, por qué así y qué se rompería sin ello. */
+  what: string
+  why: string
+  breaks: string
+  /** Lo que tiene que comprobar quien revisa. */
+  look_at: string[]
+  steps: number[]
+  /** La explicación punto a punto, con la línea del diff de la que habla (si se encontró). */
+  points: { text: string; step: number | null; line: number | null }[]
+  /** Riesgos (`risk`) o cosas sin comprobar (`unverified`) de este código. */
+  warnings: { kind: string; text: string }[]
+  blocks: StoryBlock[]
+}
+
+/** Lo que no cuadra entre el guion del agente y el código. */
+export interface AuditFinding {
+  /** `mismatch`: no hace lo que dice; `missing`: lo da por hecho y no se ve; `untold`: no lo cuenta. */
+  kind: 'mismatch' | 'missing' | 'untold'
+  step: number | null
+  claim: string
+  finding: string
 }
 
 /** El cambio contado como una presentación. */
@@ -704,6 +751,8 @@ export interface Storyline {
   solution: string
   /** Casos concretos: qué pasaba antes y qué pasa ahora, con los pasos donde se decide. */
   scenarios: { title: string; situation: string; before: string; after: string; steps: number[] }[]
+  /** Esquemas, tablas… del cambio en conjunto. */
+  blocks: StoryBlock[]
   /** Términos que hay que conocer. */
   concepts: { term: string; meaning: string }[]
   /** Lo que se contó de código que no entra en esta revisión. */

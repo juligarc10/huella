@@ -247,7 +247,71 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "Lo que no hay que pasar por alto aquí."
+                  "description": "Lo que tiene que COMPROBAR quien revisa en este código: 1 a 3 cosas concretas. Sale arriba de la diapositiva."
+                },
+                "what": {
+                  "type": "string",
+                  "description": "Qué hace este código, en 1 o 2 frases."
+                },
+                "why": {
+                  "type": "string",
+                  "description": "Por qué así y no de otra forma."
+                },
+                "breaks": {
+                  "type": "string",
+                  "description": "Qué se rompería o pasaría sin ello."
+                },
+                "points": {
+                  "type": "array",
+                  "description": "La explicación punto a punto (2 a 5). Cada punto se marca con un número en la línea de código que cita, y el resto del diff se pliega.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "text",
+                      "quote"
+                    ],
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "description": "Qué hay que entender aquí."
+                      },
+                      "quote": {
+                        "type": "string",
+                        "description": "Una línea del código copiada tal cual (sin el + del diff), para encontrarla."
+                      }
+                    }
+                  }
+                },
+                "warnings": {
+                  "type": "array",
+                  "description": "Riesgos o cosas sin comprobar de este código: salen en su diapositiva.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "text"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "risk",
+                          "unverified"
+                        ]
+                      },
+                      "text": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "blocks": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/block"
+                  },
+                  "description": "Esquemas, tablas, secuencias… cuando explican mejor que un párrafo. Como mucho 6."
                 }
               }
             }
@@ -279,6 +343,33 @@
               "type": "string"
             },
             "description": "Preguntas que quien revisa debería saber responder al acabar el capítulo si lo ha entendido."
+          },
+          "checks": {
+            "type": "array",
+            "description": "1 o 2 preguntas con su respuesta, para que quien revisa compruebe que lo ha entendido. La respuesta se oculta hasta que la pide.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "question",
+                "answer"
+              ],
+              "properties": {
+                "question": {
+                  "type": "string"
+                },
+                "answer": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/block"
+            },
+            "description": "Esquemas, tablas, secuencias… cuando explican mejor que un párrafo. Como mucho 6."
           }
         }
       }
@@ -342,6 +433,13 @@
         "type": "string"
       },
       "description": "Riesgos concretos del cambio."
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/block"
+      },
+      "description": "Esquemas, tablas… del cambio en conjunto, para la portada. Como mucho 6."
     }
   },
   "$defs": {
@@ -367,6 +465,108 @@
         },
         "step": {
           "type": "integer"
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "description": "La forma que mejor explica algo cuando un párrafo no basta. Úsalo solo si aporta. Cada tipo usa sus campos y deja los demás vacíos.",
+      "properties": {
+        "type": {
+          "enum": [
+            "text",
+            "list",
+            "steps",
+            "table",
+            "flow",
+            "sequence",
+            "callout",
+            "code"
+          ],
+          "description": "text: un párrafo. list: enumeración sin orden (items). steps: proceso en orden (items). table: comparar valores o casos (columns y rows). flow: esquema de cajas y flechas, qué llama a qué (nodes y edges). sequence: quién habla con quién y en qué orden (nodes son los participantes, edges los mensajes en orden). callout: aviso destacado (text y tone). code: ejemplo literal, como un JSON o un comando (text y language)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "label"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "from",
+              "to"
+            ],
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "tone": {
+          "enum": [
+            "info",
+            "tip",
+            "warn",
+            "risk"
+          ]
+        },
+        "language": {
+          "type": "string"
         }
       }
     }

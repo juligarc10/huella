@@ -22,6 +22,7 @@ use huella_store::{Store, StoredStoryline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::blocks::StoryBlock;
 use crate::coverage::RequirementStatus;
 use crate::declared::DeclaredView;
 use crate::declared::plain_symbol;
@@ -33,7 +34,7 @@ use crate::{EngineError, Result};
 pub const SCHEMA: &str = include_str!("../../../docs/huella-storyline-v1.schema.json");
 pub const VERSION: &str = "huella.storyline/v1";
 
-pub const SYSTEM_PROMPT: &str = "\
+const SYSTEM_TEMPLATE: &str = "\
 Preparas la presentación de un cambio para que una persona desarrolladora lo entienda antes de aceptarlo. Recibes lo \
 que pide la tarea y los pasos del cambio, numerados, en todos los repositorios que toca: su diff, su nivel de \
 riesgo y lo que declaró el agente que los escribió. Devuelves el guion en el formato huella.storyline/v1; donde \
@@ -56,7 +57,14 @@ comando, evento) a la lógica, los datos y los efectos, cruzando repositorios si
 configuración al final. Cada uno: id C1, C2…; title corto; kind (entry, logic, data, effect, integration, test, \
 config u other); intent (qué y para qué); narration (2 a 5 frases que lo enlacen con el anterior); anchors (sus \
 pasos en orden de lectura; cada paso en un solo capítulo, y todos los pasos en alguno); requirements (ids que \
-cubre); look_at (lo que no hay que pasar por alto); questions (lo que quien revisa debería saber responder).
+cubre); look_at (lo que no hay que pasar por alto); questions (lo que quien revisa debería saber responder); \
+checks (1 o 2 preguntas con su respuesta, para que compruebe que lo ha entendido); blocks.
+- ideas de cada capítulo: cada una es una diapositiva que agrupa los pasos que se entienden juntos (anchors). \
+Lleva title; what (qué hace, 1 o 2 frases); why (por qué así y no de otra forma); breaks (qué se rompería sin \
+ello); look_at (qué tiene que COMPROBAR quien revisa en ese código, 1 a 3 cosas concretas); points (2 a 5 puntos \
+de la explicación, cada uno con quote: una línea del código copiada tal cual, para marcarla en el diff); warnings \
+(riesgos o cosas sin comprobar de ese código, con kind risk o unverified); blocks.
+- {BLOCKS}
 - flow: cómo se conectan los capítulos al ejecutarse (from, to, label con qué pasa entre ellos).
 - outside: pasos que la tarea no pide ni se deducen de ella, con why. Los tests, la configuración y los imports \
 que lo pedido necesita no cuentan.
@@ -64,6 +72,10 @@ que lo pedido necesita no cuentan.
 
 Juzga solo por el diff, la descripción y lo declarado; lo declarado es la versión del agente, contrástala. Escribe \
 en el idioma de la descripción.";
+
+/// Las instrucciones al modelo revisor, con los bloques que sabe dibujar la presentación.
+pub static SYSTEM_PROMPT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| SYSTEM_TEMPLATE.replace("{BLOCKS}", &crate::blocks::guide()));
 
 /// Presupuesto aproximado de líneas de diff para toda la petición.
 const DIFF_BUDGET: usize = 2400;
@@ -97,6 +109,8 @@ pub struct Story {
     pub solution: String,
     /// Casos concretos: qué pasaba antes y qué pasa ahora.
     pub scenarios: Vec<StoryScenario>,
+    /// Esquemas, tablas… del cambio en conjunto, para la portada.
+    pub blocks: Vec<StoryBlock>,
     /// Términos del dominio y del código que hay que conocer.
     pub concepts: Vec<StoryConcept>,
     pub requirements: Vec<StoryRequirement>,
@@ -146,8 +160,42 @@ pub struct StoryConcept {
 pub struct StoryIdea {
     pub title: String,
     pub explanation: String,
+    /// Qué hace, por qué así y qué se rompería sin ello: la explicación con forma fija.
+    pub what: String,
+    pub why: String,
+    pub breaks: String,
     pub anchors: Vec<Anchor>,
+    /// Lo que tiene que comprobar quien revisa.
     pub look_at: Vec<String>,
+    /// La explicación punto a punto, cada uno con la línea de código de la que habla.
+    pub points: Vec<StoryPoint>,
+    /// Riesgos o cosas sin comprobar de este código.
+    pub warnings: Vec<StoryWarning>,
+    pub blocks: Vec<StoryBlock>,
+}
+
+/// Un punto de la explicación y la línea de código (copiada tal cual) de la que habla.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryPoint {
+    pub text: String,
+    pub quote: String,
+}
+
+/// `risk` o `unverified`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryWarning {
+    pub kind: String,
+    pub text: String,
+}
+
+/// Una pregunta para comprobar que se ha entendido, con su respuesta.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryCheck {
+    pub question: String,
+    pub answer: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +222,8 @@ pub struct StoryChapter {
     pub requirements: Vec<String>,
     pub look_at: Vec<String>,
     pub questions: Vec<String>,
+    pub checks: Vec<StoryCheck>,
+    pub blocks: Vec<StoryBlock>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +316,8 @@ pub struct Chapter {
     pub steps: Vec<usize>,
     pub look_at: Vec<String>,
     pub questions: Vec<String>,
+    pub checks: Vec<StoryCheck>,
+    pub blocks: Vec<StoryBlock>,
     /// Las ideas del capítulo, en orden de lectura; los pasos que no estén en
     /// ninguna se muestran sueltos.
     pub ideas: Vec<Idea>,
@@ -277,9 +329,24 @@ pub struct Chapter {
 pub struct Idea {
     pub title: String,
     pub explanation: String,
+    pub what: String,
+    pub why: String,
+    pub breaks: String,
     pub look_at: Vec<String>,
     /// Índices en el plan.
     pub steps: Vec<usize>,
+    pub points: Vec<Point>,
+    pub warnings: Vec<StoryWarning>,
+    pub blocks: Vec<StoryBlock>,
+}
+
+/// Un punto de la explicación con la línea del diff de la que habla, si se encontró.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Point {
+    pub text: String,
+    /// Índice del paso en el plan y de la línea dentro de él.
+    pub step: Option<usize>,
+    pub line: Option<usize>,
 }
 
 /// Un capítulo cuyo código no entra en la revisión (ya está en la rama de destino),
@@ -315,6 +382,8 @@ impl Chapter {
             steps,
             look_at: Vec::new(),
             questions: Vec::new(),
+            checks: Vec::new(),
+            blocks: Vec::new(),
             ideas: Vec::new(),
             unnarrated,
         }
@@ -352,6 +421,7 @@ pub struct Storyline {
     pub impact: String,
     pub solution: String,
     pub scenarios: Vec<Scenario>,
+    pub blocks: Vec<StoryBlock>,
     pub concepts: Vec<StoryConcept>,
     /// Lo que se contó de código que no entra en esta revisión.
     pub context: Vec<Context>,
@@ -583,6 +653,8 @@ fn place_chapters(
             steps,
             look_at: chapter.look_at.clone(),
             questions: chapter.questions.clone(),
+            checks: chapter.checks.iter().filter(|check| !check.question.trim().is_empty()).cloned().collect(),
+            blocks: crate::blocks::sanitize(&chapter.blocks),
             ideas: Vec::new(),
             unnarrated: false,
         });
@@ -769,14 +841,59 @@ fn place_ideas(
                 }
                 continue;
             }
+            let points = idea
+                .points
+                .iter()
+                .filter(|point| !point.text.trim().is_empty())
+                .map(|point| {
+                    let at = locate_point(&point.quote, &steps, plan);
+                    Point { text: point.text.clone(), step: at.map(|(step, _)| step), line: at.map(|(_, line)| line) }
+                })
+                .collect();
             chapter.ideas.push(Idea {
                 title: idea.title.clone(),
                 explanation: idea.explanation.clone(),
+                what: idea.what.clone(),
+                why: idea.why.clone(),
+                breaks: idea.breaks.clone(),
                 look_at: idea.look_at.clone(),
                 steps,
+                points,
+                warnings: idea.warnings.iter().filter(|warning| !warning.text.trim().is_empty()).cloned().collect(),
+                blocks: crate::blocks::sanitize(&idea.blocks),
             });
         }
     }
+}
+
+/// La línea de `steps` de la que habla `quote`: primero la que es igual, luego la
+/// que la contiene; las que siguen en el código antes que las quitadas.
+fn locate_point(quote: &str, steps: &[usize], plan: &[FlowStep]) -> Option<(usize, usize)> {
+    let wanted = quote.trim();
+    if wanted.chars().count() < 3 {
+        return None;
+    }
+    for pass in 0..4 {
+        for &step in steps {
+            for (index, line) in plan[step].lines.iter().enumerate() {
+                let (text, removed) = match line {
+                    DiffLine::Added { text, .. } | DiffLine::Context(text) => (text, false),
+                    DiffLine::Removed(text) => (text, true),
+                };
+                let text = text.trim();
+                let found = match pass {
+                    0 => !removed && text == wanted,
+                    1 => !removed && text.contains(wanted),
+                    2 => removed && text == wanted,
+                    _ => removed && text.contains(wanted),
+                };
+                if found {
+                    return Some((step, index));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Lo que le falta a un guion para que lo entienda alguien sin contexto. Se le
@@ -831,7 +948,17 @@ pub fn gaps(story: &Story) -> Vec<String> {
             found.push(format!("ideas de «{}»: explica su código por ideas", chapter.title));
         }
         for idea in &chapter.ideas {
-            if idea.explanation.trim().len() < MIN_EXPLANATION {
+            let told = idea.explanation.trim().len() + idea.what.trim().len() + idea.why.trim().len();
+            if idea.what.trim().is_empty() || idea.why.trim().is_empty() {
+                found.push(format!("what y why de «{}»: qué hace y por qué así, en frases cortas", idea.title));
+            }
+            if idea.points.is_empty() {
+                found.push(format!(
+                    "points de «{}»: la explicación punto a punto, cada uno con quote (una línea del código tal cual)",
+                    idea.title
+                ));
+            }
+            if told < MIN_EXPLANATION {
                 found.push(format!(
                     "explanation de «{}»: es demasiado breve para quien no conoce el código",
                     idea.title
@@ -1007,6 +1134,7 @@ pub fn resolve(
         impact: story.impact,
         solution: story.solution,
         scenarios,
+        blocks: crate::blocks::sanitize(&story.blocks),
         concepts: story.concepts,
         context,
         requirements,
@@ -1176,6 +1304,7 @@ fn merge(mut stories: Vec<Story>) -> Story {
             }
         }
         merged.scenarios.extend(story.scenarios);
+        merged.blocks.extend(story.blocks);
         for concept in story.concepts {
             if !merged.concepts.iter().any(|known| known.term.eq_ignore_ascii_case(&concept.term)) {
                 merged.concepts.push(concept);
@@ -1223,6 +1352,24 @@ fn output_schema() -> Value {
     let strings = json!({"type": "array", "items": {"type": "string"}});
     let anchor = json!({"type": "object", "properties": {"step": {"type": "integer"}}, "required": ["step"], "additionalProperties": false});
     let anchors = json!({"type": "array", "items": anchor});
+    let blocks = crate::blocks::output_schema();
+    let checks = json!({"type": "array", "items": {
+        "type": "object", "properties": {"question": {"type": "string"}, "answer": {"type": "string"}},
+        "required": ["question", "answer"], "additionalProperties": false}});
+    let points = json!({"type": "array", "items": {
+        "type": "object", "properties": {"text": {"type": "string"}, "quote": {"type": "string"}},
+        "required": ["text", "quote"], "additionalProperties": false}});
+    let warnings = json!({"type": "array", "items": {
+        "type": "object", "properties": {"kind": {"type": "string", "enum": ["risk", "unverified"]}, "text": {"type": "string"}},
+        "required": ["kind", "text"], "additionalProperties": false}});
+    let idea = json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}, "what": {"type": "string"}, "why": {"type": "string"},
+                       "breaks": {"type": "string"}, "anchors": anchors, "look_at": strings, "points": points,
+                       "warnings": warnings, "blocks": blocks},
+        "required": ["title", "what", "why", "breaks", "anchors", "look_at", "points", "warnings", "blocks"],
+        "additionalProperties": false});
+    let ideas = json!({"type": "array", "items": idea});
     json!({
         "type": "object",
         "properties": {
@@ -1241,13 +1388,15 @@ fn output_schema() -> Value {
                                "status": {"type": "string", "enum": ["done", "partial", "missing"]},
                                "where": anchors, "note": {"type": "string"}},
                 "required": ["id", "text", "status", "where", "note"], "additionalProperties": false}},
+            "blocks": blocks,
             "chapters": {"type": "array", "items": {
                 "type": "object",
                 "properties": {"id": {"type": "string"}, "title": {"type": "string"},
                                "kind": {"type": "string", "enum": ["entry", "logic", "data", "effect", "integration", "test", "config", "other"]},
                                "intent": {"type": "string"}, "narration": {"type": "string"}, "anchors": anchors,
-                               "requirements": strings, "look_at": strings, "questions": strings},
-                "required": ["id", "title", "kind", "intent", "narration", "anchors", "requirements", "look_at", "questions"],
+                               "requirements": strings, "look_at": strings, "questions": strings,
+                               "checks": checks, "blocks": blocks, "ideas": ideas},
+                "required": ["id", "title", "kind", "intent", "narration", "anchors", "requirements", "look_at", "questions", "checks", "blocks", "ideas"],
                 "additionalProperties": false}},
             "flow": {"type": "array", "items": {
                 "type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "label": {"type": "string"}},
@@ -1258,7 +1407,7 @@ fn output_schema() -> Value {
             "unverified": strings,
             "risks": strings
         },
-        "required": ["summary", "problem", "impact", "solution", "scenarios", "requirements", "chapters", "flow", "outside", "unverified", "risks"],
+        "required": ["summary", "problem", "impact", "solution", "scenarios", "requirements", "blocks", "chapters", "flow", "outside", "unverified", "risks"],
         "additionalProperties": false
     })
 }
@@ -1295,6 +1444,7 @@ look_at y questions.
 - requirements: une los repetidos; done si alguna parte lo cumple del todo, partial si a medias, missing si ninguna.
 - summary, problem, impact y solution del conjunto; scenarios sin repetir (los mejores, como mucho 4); flow \
 entre los capítulos finales, y outside, unverified y risks sin repetir.
+- Conserva las ideas de cada capítulo con sus points, warnings y checks, y los blocks que sigan aportando.
 
 Escribe en el idioma de la descripción.";
 
@@ -1451,7 +1601,7 @@ fn generate_within(
     };
     let text = if request.len() <= budget {
         progress(1, 1);
-        ask(SYSTEM_PROMPT, &request)?
+        ask(&SYSTEM_PROMPT, &request)?
     } else {
         let head = header(input);
         let segments = segments(&blocks(review, plan, input), budget.saturating_sub(head.len() + STEPS_INTRO.len()));
@@ -1465,7 +1615,7 @@ fn generate_within(
                 number + 1,
                 segment.concat()
             );
-            let text = ask(SYSTEM_PROMPT, &huella_core::redact::redact(&user))?;
+            let text = ask(&SYSTEM_PROMPT, &huella_core::redact::redact(&user))?;
             parts.push(serde_json::from_str::<Story>(&text).map_err(|error| EngineError::Model(error.to_string()))?);
         }
         progress(total + 1, total + 1);
@@ -1522,6 +1672,10 @@ fn merge_request(head: &str, parts: &[Story]) -> String {
             }
             if !chapter.questions.is_empty() {
                 let _ = writeln!(out, "  Preguntas: {}", chapter.questions.join("; "));
+            }
+            if !chapter.ideas.is_empty() || !chapter.checks.is_empty() || !chapter.blocks.is_empty() {
+                let extra = json!({"ideas": chapter.ideas, "checks": chapter.checks, "blocks": chapter.blocks});
+                let _ = writeln!(out, "  Ideas, comprobaciones y bloques: {extra}");
             }
         }
         for requirement in &part.requirements {
@@ -1608,6 +1762,7 @@ pub fn fallback(review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) ->
         impact: String::new(),
         solution: String::new(),
         scenarios: Vec::new(),
+        blocks: Vec::new(),
         concepts: Vec::new(),
         context: Vec::new(),
         requirements: Vec::new(),
@@ -1642,7 +1797,7 @@ mod tests {
         }
 
         fn complete_json(&self, system: &str, user: &str, schema: &Value) -> std::result::Result<String, ExtractError> {
-            assert_eq!(system, SYSTEM_PROMPT);
+            assert_eq!(system, SYSTEM_PROMPT.as_str());
             assert!(
                 schema["required"]
                     .as_array()
@@ -1793,7 +1948,7 @@ mod tests {
         let systems = model.systems.borrow();
         assert!(systems.len() > 2, "varias partes y la que las junta: {}", systems.len());
         assert_eq!(systems.last().unwrap(), MERGE_PROMPT);
-        assert!(systems[..systems.len() - 1].iter().all(|system| system == SYSTEM_PROMPT));
+        assert!(systems[..systems.len() - 1].iter().all(|system| system == SYSTEM_PROMPT.as_str()));
         assert_eq!(seen.last(), Some(&(systems.len(), systems.len())));
         assert!(*model.longest.borrow() < 400, "ninguna línea enorme llega al modelo");
 
@@ -2073,7 +2228,7 @@ mod tests {
             "scenarios": [{"title": "a", "situation": "x", "before": "b", "after": "a"}, {"title": "b", "situation": "y", "before": "b", "after": "a"}],
             "example": {"scenario": "x", "walk": [{"what": "y"}]}, "concepts": [{"term": "t", "meaning": "m"}],
             "chapters": [{"id": "C1", "title": "T", "intent": "i", "narration": "n", "ideas": [
-                {"title": "I", "explanation": "Una explicación con suficiente detalle para alguien que no conoce nada de este código.", "anchors": [{"file": "a.ts"}]}
+                {"title": "I", "explanation": "Una explicación con suficiente detalle para alguien que no conoce nada de este código.", "what": "w", "why": "y", "points": [{"text": "t", "quote": "q"}], "anchors": [{"file": "a.ts"}]}
             ]}]}))
         .unwrap();
         assert_eq!(gaps(&full), Vec::<String>::new());
@@ -2110,6 +2265,45 @@ mod tests {
         assert_eq!(example.walk[0].step, Some(position(&plan, "Cart.add")));
         assert_eq!(example.walk[1].step, None);
         assert_eq!(found.concepts[0].term, "Carrito");
+    }
+
+    #[test]
+    fn an_idea_reaches_the_slide_with_its_points_on_lines_its_warnings_blocks_and_checks() {
+        const TOTAL: &str = "export function total(prices) {\n  let sum = 0;\n  for (const p of prices) sum += Math.round(p * 100);\n  return sum / 100;\n}\n";
+        let guion = json!({"summary": "s",
+            "blocks": [{"type": "flow", "nodes": [{"id": "a", "label": "Pago"}, {"id": "b", "label": "Total"}], "edges": [{"from": "a", "to": "b", "label": "pide"}]}],
+            "chapters": [{"id": "C1", "title": "Total", "intent": "i", "anchors": [{"file": "total.ts", "symbol": "total"}],
+                "checks": [{"question": "¿Por qué se divide al final?", "answer": "Para sumar enteros."}, {"question": " ", "answer": "x"}],
+                "blocks": [{"type": "hologram"}, {"type": "table", "columns": ["Precio", "Céntimos"], "rows": [["19,99", "1999"]]}],
+                "ideas": [{"title": "Sumar en céntimos", "what": "Suma enteros.", "why": "Sin errores de coma flotante.",
+                    "breaks": "Totales con decimales sueltos.", "anchors": [{"file": "total.ts", "symbol": "total"}],
+                    "look_at": ["Que se divide una sola vez"],
+                    "points": [{"text": "Se pasa a céntimos", "quote": "sum += Math.round(p * 100);"},
+                               {"text": "Se vuelve a euros", "quote": "return sum / 100;"},
+                               {"text": "Un punto sin código", "quote": "no existe"}],
+                    "warnings": [{"kind": "unverified", "text": "Precios negativos"}],
+                    "blocks": [{"type": "callout", "text": "Redondea cada precio", "tone": "warn"}]}]}]});
+        let (found, plan, _) = told("idea-rich", &[("total.ts", TOTAL)], &guion);
+        assert_eq!(found.blocks.len(), 1, "los bloques de la portada");
+        let chapter = &found.chapters[0];
+        assert_eq!(chapter.checks.len(), 1, "una comprobación sin pregunta no se enseña");
+        let kinds: Vec<&str> = chapter.blocks.iter().map(|block| block.kind.as_str()).collect();
+        assert_eq!(kinds, ["table"], "un tipo desconocido se descarta");
+        let idea = &chapter.ideas[0];
+        assert_eq!((idea.what.as_str(), idea.breaks.as_str()), ("Suma enteros.", "Totales con decimales sueltos."));
+        let line_of = |index: usize| {
+            let point = &idea.points[index];
+            point.step.zip(point.line).map(|(step, line)| match &plan[step].lines[line] {
+                DiffLine::Added { text, .. } | DiffLine::Context(text) | DiffLine::Removed(text) => {
+                    text.trim().to_owned()
+                }
+            })
+        };
+        assert_eq!(line_of(0).as_deref(), Some("for (const p of prices) sum += Math.round(p * 100);"));
+        assert_eq!(line_of(1).as_deref(), Some("return sum / 100;"));
+        assert_eq!(line_of(2), None, "un punto cuya línea no está se enseña sin marca");
+        assert_eq!(idea.warnings[0].kind, "unverified");
+        assert_eq!(idea.blocks[0].tone, "warn");
     }
 
     /// Una revisión con estos ficheros y un guion declarado, ya resueltos.

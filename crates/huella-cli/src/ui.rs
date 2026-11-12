@@ -72,6 +72,8 @@ pub(crate) struct App {
     guiding: Arc<Mutex<HashMap<String, Guiding>>>,
     /// Guiones en curso por revisión: `None` mientras se escribe, o el error.
     storylining: Arc<Mutex<HashMap<String, Storylining>>>,
+    /// Contrastes del guion con el código en curso, por revisión.
+    auditing: Arc<Mutex<HashMap<String, Storylining>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
@@ -161,6 +163,7 @@ impl App {
             covering: Arc::new(Mutex::new(HashMap::new())),
             guiding: Arc::new(Mutex::new(HashMap::new())),
             storylining: Arc::new(Mutex::new(HashMap::new())),
+            auditing: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
             probing: Arc::default(),
@@ -332,6 +335,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
         ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
+        ("POST", ["review", session, "audit"]) => return start_audit(app, session),
         ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["review", session, "ask", "clear"]) => clear_questions(app, session, body)?,
@@ -588,6 +592,9 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     drop(context);
     // En una tarea: lo que pide, cómo está cada repositorio, el repositorio de cada paso y el guion.
     add_task(app, review, plan, story.as_ref(), &mut value)?;
+    if let Some(story) = &story {
+        add_audit(app, review, plan, story, &triage, &declared, &mut value)?;
+    }
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
@@ -1099,6 +1106,97 @@ fn ask_background(app: &App, review: &SessionReview, plan: &[FlowStep], step: Op
         || huella_engine::guide::render_overview(&story),
         |place| huella_engine::guide::render_story(review, plan, &place),
     )))
+}
+
+/// El título y lo que pide una tarea, y sus repositorios.
+type TaskInput = (Option<String>, String, Vec<huella_engine::storyline::RepoRef>);
+
+/// Lo que se le cuenta al modelo de una tarea: su título y lo que pide, y sus repositorios.
+fn task_input_parts(app: &App, review: &SessionReview) -> Result<Option<TaskInput>> {
+    let (Some(key), Some(repos)) = (review.session_id.strip_prefix("task:"), &app.task_repos) else {
+        return Ok(None);
+    };
+    let task = app.store.task(key)?;
+    let refs = repos.iter().map(|repo| huella_engine::storyline::RepoRef::new(&repo.repo)).collect();
+    Ok(Some((
+        task.as_ref().and_then(|task| task.title.clone()),
+        task.map(|task| task.description).unwrap_or_default(),
+        refs,
+    )))
+}
+
+/// El último contraste del guion con el código, y si hay uno en curso.
+fn add_audit(
+    app: &App,
+    review: &SessionReview,
+    plan: &[FlowStep],
+    story: &huella_engine::storyline::Storyline,
+    triage: &[huella_engine::triage::StepTriage],
+    declared: &BTreeMap<usize, Vec<huella_engine::declared::DeclaredView>>,
+    value: &mut Value,
+) -> Result<()> {
+    let Some((title, description, refs)) = task_input_parts(app, review)? else { return Ok(()) };
+    let input = huella_engine::storyline::StoryInput {
+        title: title.as_deref(),
+        description: &description,
+        repos: &refs,
+        triage,
+        declared,
+    };
+    let context_tokens = crate::config::get().llm.context_tokens;
+    value["audit"] = json!(huella_engine::audit::stored(&app.store, review, plan, input, story, context_tokens)?);
+    value["auditing"] = json!(app.auditing.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
+    Ok(())
+}
+
+/// Contrasta el guion de la tarea con su código en otro hilo: puede tardar.
+fn start_audit(app: &mut App, session: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let project = review_project(app, &review.session_id)?;
+    let points = huella_review::attention::attention(&review, &plan);
+    let Assessment { triage, .. } = assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
+    let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
+    let told = task_story(app, &review, &plan, &triage, &declared)?.context("contrastar el guion es de las tareas")?;
+    let (title, description, refs) = task_input_parts(app, &review)?.context("contrastar el guion es de las tareas")?;
+    let review_id = review.session_id.clone();
+    {
+        let mut running = app.auditing.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.get(&review_id).is_some_and(|state| state.running) {
+            return Ok((202, json!({"running": true})));
+        }
+        running.insert(review_id.clone(), Storylining { running: true, ..Storylining::default() });
+    }
+    let (auditing, db, model) = (Arc::clone(&app.auditing), app.db.clone(), app.model.clone());
+    let context_tokens = crate::config::get().llm.context_tokens;
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model(&model)?;
+            let input = huella_engine::storyline::StoryInput {
+                title: title.as_deref(),
+                description: &description,
+                repos: &refs,
+                triage: &triage,
+                declared: &declared,
+            };
+            huella_engine::audit::run(&store, &review, &plan, input, &told, llm.as_ref(), context_tokens)?;
+            Ok(())
+        })();
+        let mut all = auditing.lock().unwrap_or_else(PoisonError::into_inner);
+        match outcome {
+            Ok(()) => {
+                all.remove(&review_id);
+            }
+            Err(error) => {
+                all.insert(review_id, Storylining { running: false, part: None, error: Some(format!("{error:#}")) });
+            }
+        }
+    });
+    Ok((202, json!({"running": true})))
 }
 
 /// Guion de la tarea: lo escribe un hilo con el modelo configurado; la revisión

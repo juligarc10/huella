@@ -66,6 +66,23 @@ Qué lleva:
 - **`example`**: un caso concreto con datos de verdad, de principio a fin («llega un alta con el correo ` A@B.com `, se normaliza aquí, se rechaza allí si…»), con el código donde ocurre cada cosa. Es el mapa para entender todo lo demás.
 - **`concepts`**: el glosario. Empieza por lo que registraste con `kind: "concept"`.
 - **`chapters`, en orden de lectura, no de escritura**: de la entrada (endpoint, pantalla, comando, evento) a la lógica, los datos y los efectos; si un repositorio llama a otro, crúzalos en ese orden. Cada capítulo es una intención («Endpoint del filtro»), con su `narration` y qué debería saber responder quien revisa (`questions`).
+- **Cada idea, con forma fija**, porque así se lee rápido:
+  - `what`: qué hace, en 1 o 2 frases.
+  - `why`: por qué así y no de otra forma.
+  - `breaks`: qué se rompería sin ello.
+  - `look_at`: qué tiene que **comprobar** quien revisa en ese código, de 1 a 3 cosas concretas. Sale arriba de la diapositiva.
+  - `points`: la explicación punto a punto, cada uno con `quote` (una línea del código copiada tal cual). Huella la numera en el diff y pliega el resto, así que elige las líneas que importan.
+  - `warnings`: los riesgos (`risk`) o lo no comprobado (`unverified`) de ese código.
+- **`blocks`, cuando un párrafo no basta**, en la portada, en un capítulo o en una idea:
+  - `table`: comparar valores o casos.
+  - `flow`: un esquema de qué llama a qué.
+  - `sequence`: quién habla con quién y en qué orden.
+  - `steps`: un proceso.
+  - `callout`: un aviso.
+  - `code`: un ejemplo literal, como un JSON o un comando.
+
+  Elige la forma que mejor lo explique; si no aporta, no pongas ninguno.
+- **`checks` de cada capítulo**: 1 o 2 preguntas con su respuesta, para que quien revisa compruebe que lo ha entendido.
 - **`ideas` de cada capítulo**: cada una es una diapositiva. Agrupa los trozos de código que se entienden juntos, aunque estén en varios ficheros, en vez de uno por función: nadie asimila cien diapositivas. Cada idea lleva `title`, `explanation` y `anchors` (ruta absoluta y símbolo). Todo el código debería estar en alguna idea; `anchors` del capítulo queda para configuración sin nada que explicar.
 - **Tests, en sus propios capítulos con `kind: "test"`**: Huella los presenta en una sección aparte, después de la implementación, y saca de los demás capítulos los tests que encuentre. Explícalos también por ideas: qué comportamiento protegen y qué fallaría sin ellos, no test a test.
 - **Código de apoyo que ya está en la rama de destino**: si ayuda a entender el cambio (el modelo de dominio que usa), cuéntalo en un capítulo con su `narration`. No entra en la revisión, pero se muestra como contexto.
