@@ -405,7 +405,28 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE code_question ADD COLUMN removed TEXT NOT NULL DEFAULT '';
 ",
+    // 24: lo que no cuadra entre el guion de una tarea y su código, según el
+    // modelo revisor; input_hash dice si el cambio sigue siendo el mismo.
+    r"
+    CREATE TABLE review_audit (
+        review_id       TEXT PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        input_hash      TEXT NOT NULL,
+        findings        TEXT NOT NULL
+    );
+",
 ];
+
+/// Lo que no cuadra entre un guion y su código, guardado.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAudit {
+    pub recorded_at: String,
+    pub model: String,
+    pub input_hash: String,
+    /// Los hallazgos, en JSON.
+    pub findings: String,
+}
 
 /// Un momento guardado de una revisión.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1976,6 +1997,44 @@ impl Store {
             params![review_id, stored.input_hash, stored.model, stored.storyline],
         )?;
         Ok(())
+    }
+
+    /// Guarda lo que no cuadra entre el guion y el código (en JSON), sustituyendo
+    /// lo anterior de esa revisión.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_audit(&self, review_id: &str, model: &str, input_hash: &str, findings: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_audit (review_id, recorded_at, model, input_hash, findings)
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?2, ?3, ?4)
+             ON CONFLICT(review_id) DO UPDATE SET recorded_at = excluded.recorded_at, model = excluded.model,
+                 input_hash = excluded.input_hash, findings = excluded.findings",
+            params![review_id, model, input_hash, redact(findings)],
+        )?;
+        Ok(())
+    }
+
+    /// La última auditoría del guion de una revisión.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn audit(&self, review_id: &str) -> Result<Option<StoredAudit>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT recorded_at, model, input_hash, findings FROM review_audit WHERE review_id = ?1",
+                [review_id],
+                |row| {
+                    Ok(StoredAudit {
+                        recorded_at: row.get(0)?,
+                        model: row.get(1)?,
+                        input_hash: row.get(2)?,
+                        findings: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Guarda un momento de una revisión: el commit de cada repositorio (en JSON).
