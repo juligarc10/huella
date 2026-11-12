@@ -694,6 +694,14 @@ export interface Storyline {
   after: string
   /** Un caso concreto, de principio a fin. */
   example: { scenario: string; walk: { what: string; step: number | null }[] } | null
+  /** Qué fallaba o faltaba antes del cambio. */
+  problem: string
+  /** A quién o a qué afecta y con qué consecuencias. */
+  impact: string
+  /** La idea de la solución y por qué así. */
+  solution: string
+  /** Casos concretos: qué pasaba antes y qué pasa ahora, con los pasos donde se decide. */
+  scenarios: { title: string; situation: string; before: string; after: string; steps: number[] }[]
   /** Términos que hay que conocer. */
   concepts: { term: string; meaning: string }[]
   /** Lo que se contó de código que no entra en esta revisión. */
