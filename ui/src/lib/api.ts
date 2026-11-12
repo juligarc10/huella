@@ -466,6 +466,8 @@ export interface CodeQuestion {
   model: string
   created_at: string
   quote: string
+  /** Las líneas quitadas sobre las que se preguntó; vacío si no hay. */
+  removed: string
   /** Líneas actuales del trozo; `null` si ya no está en el fichero. */
   lines: [number, number] | null
 }
