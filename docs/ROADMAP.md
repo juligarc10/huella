@@ -7,23 +7,25 @@ revisar y comprender el código que escribe la IA, por tarea (lo que se va a
 mergear), con lo que el agente declara mientras trabaja y una presentación
 guiada del cambio.
 
-## Dónde estamos (2026-11-04)
+## Dónde estamos (2026-11-12)
 
-**Publicada**: v0.6.0.
+**Publicada**: v0.7.0.
 
 - **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
 - **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
   - mientras escribe, con `huella_record` (decisiones, explicaciones, conceptos…);
-  - al terminar, con `huella_recorded` y `huella_storyline`: antes y ahora, un caso de principio a fin, glosario y capítulos por ideas;
+  - al terminar, con `huella_recorded` y `huella_storyline`: el problema, a quién afecta y la solución, escenarios antes y ahora, un caso de principio a fin, glosario y capítulos por ideas;
   - `huella_storyline` responde qué le falta, incluidos los ficheros que ningún capítulo menciona.
 - **La presentación**:
   - una diapositiva por idea, o por fichero si no hay ideas, con los tests en su propia sección;
   - el rastro, veredictos siempre a mano y atajos (`r`, `u`);
-  - preguntas al modelo desde cualquier diapositiva;
+  - preguntas al modelo desde cualquier diapositiva, también por qué se quitaron unas líneas, y «Pensar más» para una pregunta;
   - el código con colores, y cmd+clic para ver una definición;
   - columnas ajustables, a todo el ancho;
   - el mapa de la portada: cómo pasa la ejecución de un capítulo a otro;
   - ver solo lo nuevo desde una revisión anterior o un commit de la rama.
+- **Tareas** filtradas por estado, con las que tienen cambios nuevos y un buscador; refrescar en cada vista.
+- **Ajustes** en la aplicación: el modelo, la clave (en su fichero 600), probar la conexión y el idioma de las explicaciones.
 
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
@@ -36,8 +38,8 @@ La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y s
    cp target/release/huella ~/.local/bin/huella
    huella setup        # copia de la base de datos, migración y skill actualizada
    ```
-2. Poner el contexto real del modelo local en `config.toml`
-   (`[llm] context_tokens = 65536`, o 131072 si se sube el de llama.cpp).
+2. En **Ajustes** de `huella ui`, poner el modelo local, su contexto real (65536, o
+   131072 si se sube el de llama.cpp), la clave y el idioma, y «Probar conexión».
 3. Abrir una sesión **nueva** de Claude Code, para que cargue las herramientas de
    Huella (`huella_record`, `huella_storyline`) y la skill. Trabajar con ellas es
    también la prueba real de todo lo anterior: la tarea siguiente debería verse
@@ -47,7 +49,7 @@ La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y s
 
 ### 1. Comprobar la calidad con tareas reales
 
-- Volver a contar DUNGEON-1 con la skill de v0.5.0 y ver si las ideas pasan de catálogo a explicación.
+- Volver a contar DUNGEON-1 con la skill de v0.7.0 y ver si las ideas pasan de catálogo a explicación, y si el problema y los escenarios se entienden sin leer el código.
 - Probar una tarea real de trabajo (varios micros, rama de sprint) y las guías del modelo local, que aún no se han visto con el contexto nuevo.
 - Ajustar la skill (`crates/huella-cli/src/setup/huella-registro.md`) según lo que salga.
 
