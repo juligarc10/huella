@@ -107,7 +107,7 @@ export function StatusPage() {
           kind="extract"
           job={jobs.extract}
           rows={[['Modelo', <Mono key="m">{status.extractor}</Mono>]]}
-          hint="Se elige al arrancar: huella ui --provider openai-compatible --base-url … --model …"
+          hint="Se cambia en Ajustes."
           action="Extraer ahora"
         />
         <JobCard

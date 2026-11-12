@@ -1,9 +1,11 @@
 import { CircleAlert, Loader2, MessageCircleQuestion, Send, Trash2 } from 'lucide-react'
 import { useState, type KeyboardEvent } from 'react'
+import { Link } from 'react-router'
 
+import { ThinkMore } from '@/components/review/think-more'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import type { CodeQuestion, PendingCodeAsk } from '@/lib/api'
+import type { AskThinking, CodeQuestion, PendingCodeAsk } from '@/lib/api'
 import { dateTime } from '@/lib/format'
 import { useDeleteCodeQuestion, useDismissCodeAsk } from '@/lib/queries'
 
@@ -83,18 +85,22 @@ export function CodeAskComposer({
   pending,
   problem,
   removed = false,
+  thinking,
 }: {
   lines: number
-  onSubmit: (question: string) => void
+  /** `think`: que el modelo razone para esta pregunta («pensar más»). */
+  onSubmit: (question: string, think: boolean) => void
   onCancel: () => void
   pending: boolean
   problem: string | null
   /** Solo se pregunta por líneas quitadas. */
   removed?: boolean
+  thinking?: AskThinking
 }) {
   const [question, setQuestion] = useState('')
+  const [think, setThink] = useState(false)
   const submit = () => {
-    if (question.trim() && !problem) onSubmit(question.trim())
+    if (question.trim() && !problem) onSubmit(question.trim(), think)
   }
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -113,7 +119,13 @@ export function CodeAskComposer({
       </p>
       {problem && (
         <p className="flex gap-2 rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn" role="note">
-          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> {problem}
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>
+            {problem}{' '}
+            <Link to="/ajustes" className="font-semibold underline underline-offset-2">
+              Abrir Ajustes
+            </Link>
+          </span>
         </p>
       )}
       <label className="sr-only" htmlFor="pregunta-codigo">
@@ -136,6 +148,7 @@ export function CodeAskComposer({
         <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancelar
         </Button>
+        <ThinkMore option={thinking} checked={think} onChange={setThink} />
         <span className="ml-auto text-xs text-muted-foreground">⌘⏎ para enviar</span>
       </div>
     </div>

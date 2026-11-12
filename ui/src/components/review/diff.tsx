@@ -149,9 +149,9 @@ export function StepDiff({
   }
   const submitComment = (quote: string | null) => (body: string) =>
     add.mutate({ key: step.key, quote, body }, { onSuccess: () => onCompose(null) })
-  const submitQuestion = (question: string) =>
+  const submitQuestion = (question: string, think: boolean) =>
     ask.mutate(
-      { quote: '', removed: '', ...askTarget(), question },
+      { quote: '', removed: '', ...askTarget(), question, think: think || undefined },
       {
         onSuccess: () => {
           setAsking(false)
@@ -253,6 +253,7 @@ export function StepDiff({
                     pending={ask.isPending}
                     problem={codeQuestions?.ask_problem ?? null}
                     removed={!selectedCode().trim() && selectedRemoved().trim().length > 0}
+                    thinking={codeQuestions?.ask_thinking}
                   />
                 </div>
               )}

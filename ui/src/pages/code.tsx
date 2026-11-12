@@ -86,11 +86,11 @@ function Code({ file, initial }: { file: CodeFile; initial: Selection | null }) 
     setComposing(true)
   }
   const selected = (number: number) => selection !== null && number >= selection.from && number <= selection.to
-  const submit = (question: string) => {
+  const submit = (question: string, think: boolean) => {
     if (!selection) return
     const quote = file.lines.slice(selection.from - 1, selection.to).join('\n')
     ask.mutate(
-      { quote, question, start: selection.from, end: selection.to },
+      { quote, question, start: selection.from, end: selection.to, think: think || undefined },
       { onSuccess: () => setComposing(false) },
     )
   }
@@ -163,6 +163,7 @@ function Code({ file, initial }: { file: CodeFile; initial: Selection | null }) 
                           onCancel={() => setComposing(false)}
                           pending={ask.isPending}
                           problem={questions?.ask_problem ?? null}
+                          thinking={questions?.ask_thinking}
                         />
                       ) : (
                         <div className="flex flex-wrap items-center gap-2 font-sans">
