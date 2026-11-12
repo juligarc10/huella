@@ -37,6 +37,8 @@ export function StepDiff({
   stops = [],
   focus = null,
   peekHint = true,
+  marks,
+  essentials,
 }: {
   step: ReviewStep
   comments: ReviewComment[]
@@ -53,7 +55,12 @@ export function StepDiff({
   focus?: LineRange | null
   /** Recuerda que ⌘+clic abre definiciones: basta una vez por diapositiva. */
   peekHint?: boolean
+  /** Los puntos de la explicación: su número sale en el margen de su línea. */
+  marks?: Map<number, number>
+  /** Las líneas que importan: lo que queda lejos de ellas se pliega. Sin ellas, se ve todo. */
+  essentials?: number[]
 }) {
+  const [unfolded, setUnfolded] = useState<Set<number>>(() => new Set())
   const add = useAddComment(session)
   const ask = useAskCode(step.path, session)
   const { data: codeQuestions } = useCodeQuestions(step.path, session)
@@ -160,17 +167,56 @@ export function StepDiff({
       },
     )
 
+  // Tramos lejos de lo que importa (4 líneas o más), plegados: el código de la idea se ve de un vistazo.
+  const keep = (index: number) =>
+    (essentials ?? []).some((line) => Math.abs(line - index) <= 3) || placed.has(index) || answered.has(index) || selected(index) || composing === index
+  const hidden = new Set<number>()
+  const folds = new Map<number, number>()
+  if (essentials && essentials.length > 0) {
+    let start = 0
+    while (start < step.lines.length) {
+      if (keep(start)) {
+        start += 1
+        continue
+      }
+      let end = start
+      while (end < step.lines.length && !keep(end)) end += 1
+      if (end - start >= 4 && !unfolded.has(start)) {
+        for (let line = start; line < end; line += 1) hidden.add(line)
+        folds.set(start, end - start)
+      }
+      start = end
+    }
+  }
+  const margin = stops.length > 0 || (marks?.size ?? 0) > 0
+  const badgeOf = (index: number) => {
+    const mark = marks?.get(index)
+    if (mark !== undefined) return mark
+    const stop = stops.findIndex((range) => range[0] === index)
+    return stop >= 0 ? stop + 1 : null
+  }
+
   return (
-    <div className="overflow-hidden rounded-2xl border bg-card">
+    <div className="overflow-hidden rounded-2xl border bg-card" data-diff-step={step.index}>
       <div className="@container overflow-x-auto">
         <div className="min-w-max py-2 font-mono text-[13px] leading-6">
           {step.lines.map((line, index) =>
-            // En una clase, los huecos de los métodos que son otros pasos dejan
+            folds.has(index) ? (
+              <button
+                key={`fold${index}`}
+                type="button"
+                onClick={() => setUnfolded(new Set([...unfolded, index]))}
+                className="sticky left-0 flex w-[100cqw] items-center gap-2 px-4 py-0.5 font-sans text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <span aria-hidden="true">⋯</span> Ver {folds.get(index)} líneas que no cambian lo importante
+              </button>
+            ) : hidden.has(index) ? null : // En una clase, los huecos de los métodos que son otros pasos dejan
             // tiradas de líneas en blanco: basta con una.
             !line.text.trim() && index > 0 && !step.lines[index - 1].text.trim() && !selected(index) ? null : (
             <Fragment key={index}>
               <div
                 ref={focus?.[0] === index ? firstFocused : undefined}
+                data-diff-line={index}
                 className={cn(
                   'group flex cursor-pointer pr-4 select-none',
                   line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-[var(--diff-added)]'),
@@ -183,11 +229,9 @@ export function StepDiff({
                 )}
                 onClick={(event) => select(index, event)}
               >
-                {stops.length > 0 && (
+                {margin && (
                   <span className="flex w-7 shrink-0 items-center justify-end">
-                    {stops.findIndex((stop) => stop[0] === index) >= 0 && (
-                      <StopBadge number={stops.findIndex((stop) => stop[0] === index) + 1} className="size-4 text-[10px]" />
-                    )}
+                    {badgeOf(index) !== null && <StopBadge number={badgeOf(index) ?? 0} className="size-4 text-[10px]" />}
                   </span>
                 )}
                 <span
