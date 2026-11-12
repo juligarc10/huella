@@ -21,6 +21,7 @@ import { DeclaredPanel } from '@/components/review/declared'
 import { FreshLines, StepDiff } from '@/components/review/diff'
 import { FlowMap } from '@/components/review/flow-map'
 import { GuidePanel } from '@/components/review/guide'
+import { ProblemToSolution, Scenarios } from '@/components/review/problem'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
@@ -519,7 +520,16 @@ function Cover({
         {story.summary && <p className="max-w-[58ch] text-2xl leading-snug font-medium tracking-tight text-balance">{story.summary}</p>}
       </header>
 
-      {story.before && story.after && (
+      <ProblemToSolution story={story} />
+
+      {story.scenarios.length > 0 && (
+        <Block title="Escenarios: antes y ahora">
+          <Scenarios story={story} stepLink={(step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />} />
+        </Block>
+      )}
+
+      {/* Sin problema ni solución (guiones anteriores), el antes y el ahora van solos. */}
+      {story.before && story.after && !story.problem && !story.solution && (
         <div className="grid gap-px overflow-hidden rounded-2xl border bg-border sm:grid-cols-2">
           <div className="flex flex-col gap-1.5 bg-card p-5">
             <h3 className="text-[13px] font-semibold text-muted-foreground">Antes</h3>

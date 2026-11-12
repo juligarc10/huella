@@ -25,6 +25,56 @@
       "type": "string",
       "description": "Cómo se comporta ahora."
     },
+    "problem": {
+      "type": "string",
+      "description": "Qué fallaba o faltaba antes del cambio, como lo viviría quien usa el sistema: el punto de partida."
+    },
+    "impact": {
+      "type": "string",
+      "description": "A quién o a qué afectaba (usuarios, datos, otros servicios), con qué consecuencias, y qué cambia para ellos ahora."
+    },
+    "solution": {
+      "type": "string",
+      "description": "La idea de la solución en lenguaje llano y por qué se resolvió así y no de otra forma."
+    },
+    "scenarios": {
+      "type": "array",
+      "description": "2 a 4 casos concretos con datos de verdad, el normal y los límites o errores: qué pasaba antes y qué pasa ahora. Es lo que hace tangible el cambio.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "situation",
+          "after"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Corto: «Carrito vacío», «Correo con mayúsculas»."
+          },
+          "situation": {
+            "type": "string",
+            "description": "Qué llega o qué hace alguien, con datos («se paga un carrito sin productos»)."
+          },
+          "before": {
+            "type": "string",
+            "description": "Qué pasaba antes del cambio (vacío si el caso es nuevo)."
+          },
+          "after": {
+            "type": "string",
+            "description": "Qué pasa ahora."
+          },
+          "anchors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/anchor"
+            },
+            "description": "El código donde se decide este caso."
+          }
+        }
+      }
+    },
     "example": {
       "type": "object",
       "additionalProperties": false,

@@ -43,6 +43,12 @@ Quien lo lee no conoce este código ni la tarea: no des nada por sabido y di qu�
 la nombres.
 
 - summary: 2 a 4 frases que cuenten qué hace el cambio en conjunto y por qué, como un flujo.
+- problem: qué fallaba o faltaba antes del cambio, contado como lo viviría quien usa el sistema, no como código.
+- impact: a quién o a qué afectaba ese problema y con qué consecuencias (usuarios, datos, otros servicios), y qué \
+cambia para ellos ahora.
+- solution: la idea de la solución en lenguaje llano y por qué se resolvió así y no de otra forma.
+- scenarios: 2 a 4 casos concretos con datos de verdad (title, situation: qué llega o qué hace alguien; before: qué \
+pasaba; after: qué pasa ahora; anchors: los pasos donde ocurre). Incluye el caso normal y los límites o errores.
 - requirements: lo que pide la tarea troceado en requisitos comprobables, en su orden, con id R1, R2…; status \
 done, partial o missing (si no se ve en el diff, no es done); where, los pasos que lo cumplen; note, qué falta.
 - chapters: el cambio en capítulos en el orden en que conviene ENTENDERLO: de la entrada (endpoint, pantalla, \
@@ -83,6 +89,14 @@ pub struct Story {
     pub after: String,
     /// Un caso concreto, de principio a fin.
     pub example: StoryExample,
+    /// Qué fallaba o faltaba antes del cambio.
+    pub problem: String,
+    /// A quién o a qué afecta y con qué consecuencias.
+    pub impact: String,
+    /// La idea de la solución y por qué así.
+    pub solution: String,
+    /// Casos concretos: qué pasaba antes y qué pasa ahora.
+    pub scenarios: Vec<StoryScenario>,
     /// Términos del dominio y del código que hay que conocer.
     pub concepts: Vec<StoryConcept>,
     pub requirements: Vec<StoryRequirement>,
@@ -106,6 +120,17 @@ pub struct StoryWalk {
     pub what: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
+}
+
+/// Un caso concreto con datos de verdad: qué llega, qué pasaba antes y qué pasa ahora.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoryScenario {
+    pub title: String,
+    pub situation: String,
+    pub before: String,
+    pub after: String,
+    pub anchors: Vec<Anchor>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +226,7 @@ impl Story {
             }))
             .chain(self.outside.iter_mut().map(|outside| &mut outside.anchor))
             .chain(self.example.walk.iter_mut().filter_map(|walk| walk.anchor.as_mut()))
+            .chain(self.scenarios.iter_mut().flat_map(|scenario| scenario.anchors.iter_mut()))
     }
 }
 
@@ -295,6 +321,16 @@ impl Chapter {
     }
 }
 
+/// Un escenario con sus pasos (índices en el plan).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Scenario {
+    pub title: String,
+    pub situation: String,
+    pub before: String,
+    pub after: String,
+    pub steps: Vec<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Flow {
     /// Índices en `chapters`.
@@ -312,6 +348,10 @@ pub struct Storyline {
     pub before: String,
     pub after: String,
     pub example: Option<Example>,
+    pub problem: String,
+    pub impact: String,
+    pub solution: String,
+    pub scenarios: Vec<Scenario>,
     pub concepts: Vec<StoryConcept>,
     /// Lo que se contó de código que no entra en esta revisión.
     pub context: Vec<Context>,
@@ -747,6 +787,20 @@ pub fn gaps(story: &Story) -> Vec<String> {
     if story.before.trim().is_empty() || story.after.trim().is_empty() {
         found.push("before y after: cómo se comportaba el sistema antes y cómo ahora".to_owned());
     }
+    if story.problem.trim().is_empty() || story.impact.trim().is_empty() || story.solution.trim().is_empty() {
+        found.push(
+            "problem, impact y solution: qué fallaba o faltaba, a quién afectaba y con qué consecuencias, y la idea \
+             de la solución y por qué así"
+                .to_owned(),
+        );
+    }
+    if story.scenarios.len() < 2 {
+        found.push(
+            "scenarios: 2 a 4 casos concretos con datos de verdad (el normal y los límites), con qué pasaba antes y \
+             qué pasa ahora"
+                .to_owned(),
+        );
+    }
     if story.example.scenario.trim().is_empty() || story.example.walk.is_empty() {
         found.push("example: un caso concreto con datos de verdad, de principio a fin".to_owned());
     }
@@ -789,6 +843,31 @@ pub fn gaps(story: &Story) -> Vec<String> {
         }
     }
     found
+}
+
+/// Los escenarios con sus pasos; los vacíos no se enseñan.
+fn resolve_scenarios(
+    scenarios: &[StoryScenario],
+    review: &SessionReview,
+    plan: &[FlowStep],
+    repos: &[RepoRef],
+) -> Vec<Scenario> {
+    scenarios
+        .iter()
+        .filter(|scenario| !scenario.situation.trim().is_empty() || !scenario.after.trim().is_empty())
+        .map(|scenario| {
+            let mut steps: Vec<usize> =
+                scenario.anchors.iter().flat_map(|anchor| steps_of(anchor, review, plan, repos)).collect();
+            steps.dedup();
+            Scenario {
+                title: scenario.title.clone(),
+                situation: scenario.situation.clone(),
+                before: scenario.before.clone(),
+                after: scenario.after.clone(),
+                steps,
+            }
+        })
+        .collect()
 }
 
 fn resolve_example(
@@ -900,6 +979,7 @@ pub fn resolve(
     }
     let chapter_index = |id: &str| chapter_ids.iter().find(|(chapter, _)| chapter == id).map(|(_, index)| *index);
     let example = resolve_example(&story.example, review, plan, repos);
+    let scenarios = resolve_scenarios(&story.scenarios, review, plan, repos);
     let flow = story
         .flow
         .iter()
@@ -923,6 +1003,10 @@ pub fn resolve(
         before: story.before,
         after: story.after,
         example,
+        problem: story.problem,
+        impact: story.impact,
+        solution: story.solution,
+        scenarios,
         concepts: story.concepts,
         context,
         requirements,
@@ -1082,6 +1166,16 @@ fn merge(mut stories: Vec<Story>) -> Story {
         if merged.example.scenario.is_empty() {
             merged.example = story.example;
         }
+        for (merged, part) in [
+            (&mut merged.problem, story.problem),
+            (&mut merged.impact, story.impact),
+            (&mut merged.solution, story.solution),
+        ] {
+            if merged.is_empty() {
+                *merged = part;
+            }
+        }
+        merged.scenarios.extend(story.scenarios);
         for concept in story.concepts {
             if !merged.concepts.iter().any(|known| known.term.eq_ignore_ascii_case(&concept.term)) {
                 merged.concepts.push(concept);
@@ -1133,6 +1227,14 @@ fn output_schema() -> Value {
         "type": "object",
         "properties": {
             "summary": {"type": "string"},
+            "problem": {"type": "string"},
+            "impact": {"type": "string"},
+            "solution": {"type": "string"},
+            "scenarios": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}, "situation": {"type": "string"},
+                               "before": {"type": "string"}, "after": {"type": "string"}, "anchors": anchors},
+                "required": ["title", "situation", "before", "after", "anchors"], "additionalProperties": false}},
             "requirements": {"type": "array", "items": {
                 "type": "object",
                 "properties": {"id": {"type": "string"}, "text": {"type": "string"},
@@ -1156,7 +1258,7 @@ fn output_schema() -> Value {
             "unverified": strings,
             "risks": strings
         },
-        "required": ["summary", "requirements", "chapters", "flow", "outside", "unverified", "risks"],
+        "required": ["summary", "problem", "impact", "solution", "scenarios", "requirements", "chapters", "flow", "outside", "unverified", "risks"],
         "additionalProperties": false
     })
 }
@@ -1191,7 +1293,8 @@ Fusiona los capítulos que son la misma intención sumando sus pasos; mantén lo
 en un solo capítulo. Conserva y mejora sus narraciones para que cada capítulo enlace con el anterior; conserva \
 look_at y questions.
 - requirements: une los repetidos; done si alguna parte lo cumple del todo, partial si a medias, missing si ninguna.
-- summary del conjunto, flow entre los capítulos finales, y outside, unverified y risks sin repetir.
+- summary, problem, impact y solution del conjunto; scenarios sin repetir (los mejores, como mucho 4); flow \
+entre los capítulos finales, y outside, unverified y risks sin repetir.
 
 Escribe en el idioma de la descripción.";
 
@@ -1501,6 +1604,10 @@ pub fn fallback(review: &SessionReview, plan: &[FlowStep], repos: &[RepoRef]) ->
         before: String::new(),
         after: String::new(),
         example: None,
+        problem: String::new(),
+        impact: String::new(),
+        solution: String::new(),
+        scenarios: Vec::new(),
         concepts: Vec::new(),
         context: Vec::new(),
         requirements: Vec::new(),
@@ -1536,7 +1643,11 @@ mod tests {
 
         fn complete_json(&self, system: &str, user: &str, schema: &Value) -> std::result::Result<String, ExtractError> {
             assert_eq!(system, SYSTEM_PROMPT);
-            assert_eq!(schema["required"][2], "chapters");
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "chapters" || field == "scenarios"))
+            );
             assert!(user.contains("Lo que pide la tarea:\nSumar los precios"), "{user}");
             *self.calls.borrow_mut() += 1;
             Ok(self.answer.clone())
@@ -1944,12 +2055,22 @@ mod tests {
         ]}))
         .unwrap();
         let found = gaps(&thin);
-        for expected in ["before y after", "example", "concepts", "narration de «Lógica»", "ideas de «Lógica»"] {
+        for expected in [
+            "before y after",
+            "problem, impact y solution",
+            "scenarios",
+            "example",
+            "concepts",
+            "narration de «Lógica»",
+            "ideas de «Lógica»",
+        ] {
             assert!(found.iter().any(|gap| gap.starts_with(expected)), "falta «{expected}»: {found:?}");
         }
         assert!(!found.iter().any(|gap| gap.contains("Ajustes")), "la configuración no necesita ideas: {found:?}");
 
         let full: Story = serde_json::from_value(json!({"summary": "s", "before": "b", "after": "a",
+            "problem": "p", "impact": "i", "solution": "s",
+            "scenarios": [{"title": "a", "situation": "x", "before": "b", "after": "a"}, {"title": "b", "situation": "y", "before": "b", "after": "a"}],
             "example": {"scenario": "x", "walk": [{"what": "y"}]}, "concepts": [{"term": "t", "meaning": "m"}],
             "chapters": [{"id": "C1", "title": "T", "intent": "i", "narration": "n", "ideas": [
                 {"title": "I", "explanation": "Una explicación con suficiente detalle para alguien que no conoce nada de este código.", "anchors": [{"file": "a.ts"}]}
