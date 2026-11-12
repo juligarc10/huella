@@ -12,6 +12,7 @@ import {
   RotateCcw,
   Sparkles,
 } from 'lucide-react'
+import { motion } from 'motion/react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { Mono, Panel } from '@/components/bits'
@@ -180,6 +181,9 @@ export function Presentation({
     return next ? slides.findIndex((slide) => sameSlide(slide, next)) : 0
   }, [slides, everySlide, place])
   const slide = slides[position]
+  // Hacia dónde se va: la diapositiva entra por ese lado (estado derivado, sin efectos).
+  const [moved, setMoved] = useState({ position, direction: 'forward' as 'forward' | 'back' })
+  if (moved.position !== position) setMoved({ position, direction: position >= moved.position ? 'forward' : 'back' })
   // Cada diapositiva se empieza a leer por arriba, justo debajo del rastro.
   const slideKey = slide ? keyOf(slide) : ''
   const stage = useRef<HTMLDivElement>(null)
@@ -336,7 +340,7 @@ export function Presentation({
       )}
 
       <FreshLines.Provider value={fresh}>
-      <div key={slideKey} ref={stage} className="slide-enter scroll-mt-32">
+      <div key={slideKey} ref={stage} data-direction={moved.direction} className="slide-enter scroll-mt-32">
         {slide.kind === 'cover' && <Cover review={review} session={session} story={story} overview={overview} ask={ask()} onStep={goToStep} onChapter={goToChapter} />}
         {slide.kind === 'chapter' && <ChapterSlide review={review} story={story} chapter={slide.chapter} ask={ask()} onStep={goToStep} />}
         {slide.kind === 'step' && shownStep && (
@@ -390,7 +394,19 @@ export function Presentation({
 /** Preguntar es para cuando hace falta: plegado, salvo que ya haya algo que leer. */
 function AskToggle({ open, count, children }: { open: boolean; count: number; children: ReactNode }) {
   const [opened, setOpened] = useState(open)
-  if (opened || open) return children
+  // Si ya venía abierto (desde un aviso), aparece sin más; si se abre ahora, se despliega.
+  if (open && !opened) return children
+  if (opened)
+    return (
+      <motion.div
+        initial={open ? false : { height: 0, opacity: 0 }}
+        animate={{ height: 'auto', opacity: 1 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 36 }}
+        className="overflow-hidden"
+      >
+        {children}
+      </motion.div>
+    )
   return (
     <Button variant="ghost" className="self-start text-muted-foreground" onClick={() => setOpened(true)}>
       <MessageCircleQuestion aria-hidden="true" /> Preguntar al modelo

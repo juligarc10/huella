@@ -1,3 +1,4 @@
+import { motion, useReducedMotion } from 'motion/react'
 import { useMemo } from 'react'
 
 import type { ReviewResult, Storyline } from '@/lib/api'
@@ -26,6 +27,9 @@ export function FlowMap({
   onChapter: (chapter: number) => void
 }) {
   const layout = useMemo(() => layoutFlow(mapChapters(story), story.flow), [story])
+  const still = useReducedMotion()
+  // Por capas: primero lo de arriba, luego lo que cuelga de ello.
+  const delayOf = (y: number) => (still ? 0 : Math.min(y / 400, 1.2))
   const crosses = (edge: PlacedEdge) => {
     const [from, to] = [reposOf(edge.from), reposOf(edge.to)]
     return from.length > 0 && to.length > 0 && !from.some((repo) => to.includes(repo))
@@ -48,8 +52,11 @@ export function FlowMap({
               </marker>
             </defs>
             {layout.edges.map((edge) => (
-              <path
+              <motion.path
                 key={`${edge.from}-${edge.to}-${edge.label}`}
+                initial={still ? false : { pathLength: 0, opacity: 0 }}
+                animate={{ pathLength: 1, opacity: 1 }}
+                transition={{ duration: 0.6, ease: 'easeOut', delay: 0.15 + delayOf(0) }}
                 d={edge.path}
                 fill="none"
                 stroke={crosses(edge) ? 'var(--brand)' : 'var(--muted-foreground)'}
@@ -90,8 +97,11 @@ export function FlowMap({
             const kind = chapter.kind ? kinds[chapter.kind] : undefined
             const repos = manyRepos ? reposOf(index) : []
             return (
-              <button
+              <motion.button
                 key={index}
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: 'spring', stiffness: 380, damping: 30, delay: delayOf(y) }}
                 type="button"
                 onClick={() => onChapter(index)}
                 title={chapter.intent || chapter.title}
@@ -109,7 +119,7 @@ export function FlowMap({
                 <span className="text-xs text-muted-foreground">
                   {done}/{chapter.steps.length} pasos
                 </span>
-              </button>
+              </motion.button>
             )
           })}
         </div>

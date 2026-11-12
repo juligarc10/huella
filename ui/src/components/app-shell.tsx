@@ -14,6 +14,7 @@ import {
   Settings,
   Sun,
 } from 'lucide-react'
+import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState, type CSSProperties } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
 
@@ -39,6 +40,22 @@ const nav = [
   { to: '/ajustes', label: 'Ajustes', icon: Settings, end: false },
 ]
 
+/** Un muelle corto: se nota el movimiento sin hacer esperar. */
+const spring = { type: 'spring', stiffness: 420, damping: 38, mass: 0.8 } as const
+
+/** En pantalla ancha la barra va a un lado (se pliega a lo ancho); en estrecha, arriba (a lo alto). */
+function useWide() {
+  const query = '(min-width: 1024px)'
+  const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const onChange = () => setWide(media.matches)
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [])
+  return wide
+}
+
 const SIDEBAR_INITIAL = 256
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 420
@@ -49,6 +66,9 @@ export function AppShell() {
   const [hidden, setHidden] = useStoredNumber('huella-sidebar-hidden', 0)
   const toggleSidebar = () => setHidden(hidden ? 0 : 1)
   const location = useLocation()
+  const wide = useWide()
+  const folded = wide ? { width: 0, opacity: 0 } : { height: 0, opacity: 0 }
+  const unfolded = wide ? { width: 'auto', opacity: 1 } : { height: 'auto', opacity: 1 }
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -81,9 +101,23 @@ export function AppShell() {
       >
         Saltar al contenido
       </a>
+      {/* La barra se pliega y despliega; su contenido mantiene el ancho y queda recortado, sin recolocarse. */}
+      <AnimatePresence initial={false}>
+        {!hidden && (
+          <motion.div
+            key="barra"
+            initial={folded}
+            animate={unfolded}
+            exit={folded}
+            transition={spring}
+            className="shrink-0 overflow-hidden lg:sticky lg:top-0 lg:h-svh"
+          >
+            <Sidebar onOpenPalette={() => setPaletteOpen(true)} onHide={toggleSidebar} />
+          </motion.div>
+        )}
+      </AnimatePresence>
       {!hidden && (
         <>
-          <Sidebar onOpenPalette={() => setPaletteOpen(true)} onHide={toggleSidebar} />
           <ResizeHandle
             value={sidebar}
             min={SIDEBAR_MIN}
@@ -98,7 +132,10 @@ export function AppShell() {
         </>
       )}
       {Boolean(hidden) && (
-        <button
+        <motion.button
+          initial={{ opacity: 0, x: -8 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ ...spring, delay: 0.12 }}
           type="button"
           onClick={toggleSidebar}
           aria-label="Mostrar la barra lateral (⌘B)"
@@ -106,7 +143,7 @@ export function AppShell() {
           className="fixed top-3 left-3 z-30 hidden size-9 items-center justify-center rounded-lg border bg-card text-muted-foreground hover:text-foreground lg:flex"
         >
           <PanelLeftOpen className="size-4" aria-hidden="true" />
-        </button>
+        </motion.button>
       )}
       <main
         id="contenido"
@@ -128,7 +165,7 @@ function Sidebar({ onOpenPalette, onHide }: { onOpenPalette: () => void; onHide:
   const { project, setProject } = useProject()
 
   return (
-    <aside className="flex flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:sticky lg:top-0 lg:h-svh lg:w-[var(--sidebar-width)] lg:shrink-0">
+    <aside className="flex h-full flex-col gap-6 bg-sidebar px-4 py-5 text-sidebar-foreground lg:w-[var(--sidebar-width)] lg:shrink-0">
       <div className="flex items-center gap-2.5 px-2">
         <Logo />
         <span className="text-lg font-bold tracking-tight">Huella</span>
@@ -188,15 +225,18 @@ function Sidebar({ onOpenPalette, onHide }: { onOpenPalette: () => void; onHide:
             end={end}
             className={({ isActive }) =>
               cn(
-                'flex min-h-11 items-center gap-3 rounded-lg px-3 text-[15px] transition-colors',
-                isActive
-                  ? 'bg-sidebar-accent font-semibold text-sidebar-accent-foreground'
-                  : 'text-sidebar-foreground hover:bg-white/8',
+                'relative flex min-h-11 items-center gap-3 rounded-lg px-3 text-[15px] transition-colors',
+                isActive ? 'font-semibold text-sidebar-accent-foreground' : 'text-sidebar-foreground hover:bg-white/8',
               )
             }
           >
-            <Icon className="size-4 shrink-0" aria-hidden="true" />
-            {label}
+            {({ isActive }) => (
+              <>
+                {isActive && <motion.span layoutId="seccion-activa" transition={spring} aria-hidden="true" className="absolute inset-0 rounded-lg bg-sidebar-accent" />}
+                <Icon className="relative size-4 shrink-0" aria-hidden="true" />
+                <span className="relative">{label}</span>
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
@@ -255,11 +295,12 @@ function ThemeSwitch() {
           title={label}
           onClick={() => setTheme(value)}
           className={cn(
-            'flex min-h-9 flex-1 items-center justify-center rounded-md transition-colors',
-            theme === value ? 'bg-sidebar-accent text-sidebar-accent-foreground' : 'text-sidebar-muted hover:text-sidebar-foreground',
+            'relative flex min-h-9 flex-1 items-center justify-center rounded-md transition-colors',
+            theme === value ? 'text-sidebar-accent-foreground' : 'text-sidebar-muted hover:text-sidebar-foreground',
           )}
         >
-          <Icon className="size-4" aria-hidden="true" />
+          {theme === value && <motion.span layoutId="tema-activo" transition={spring} aria-hidden="true" className="absolute inset-0 rounded-md bg-sidebar-accent" />}
+          <Icon className="relative size-4" aria-hidden="true" />
         </button>
       ))}
     </div>
