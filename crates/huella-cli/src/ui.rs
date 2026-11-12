@@ -766,7 +766,12 @@ fn tasks(app: &App) -> Result<Value> {
         .into_iter()
         .map(|task| {
             let repos = app.store.task_repos(&task.key)?;
-            let state = states.get(&huella_engine::task::review_id(&task.key));
+            let review_id = huella_engine::task::review_id(&task.key);
+            let state = states.get(&review_id);
+            let branches: Vec<(String, String)> =
+                repos.iter().map(|repo| (repo.repo.clone(), repo.branch.clone())).collect();
+            // Si falla git, la tarea sale igual: solo sin el aviso.
+            let advanced = huella_engine::revisions::advanced(&app.store, &review_id, &branches).unwrap_or(false);
             Ok(json!({
                 "key": task.key,
                 "title": task.title,
@@ -782,6 +787,7 @@ fn tasks(app: &App) -> Result<Value> {
                 "status": state.map_or("pending", |state| state.status.as_str()),
                 "steps": state.and_then(|state| state.steps),
                 "reviewed": state.map_or(0, |state| state.reviewed),
+                "advanced": advanced,
             }))
         })
         .collect::<Result<Vec<_>>>()?;

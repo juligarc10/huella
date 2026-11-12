@@ -73,6 +73,26 @@ pub fn record(store: &Store, review_id: &str, repos: &[RepoSync]) -> Result<()> 
     Ok(())
 }
 
+/// Si la rama de algún repositorio ha avanzado desde el último momento
+/// guardado: hay algo nuevo que revisar. Sin momentos guardados, no.
+///
+/// # Errors
+/// Si falla la base de datos.
+pub fn advanced(store: &Store, review_id: &str, branches: &[(String, String)]) -> Result<bool> {
+    let Some(last) = store.revisions(review_id)?.pop() else { return Ok(false) };
+    let Ok(heads) = serde_json::from_str::<Vec<Head>>(&last.heads) else { return Ok(false) };
+    Ok(heads.iter().any(|head| {
+        let Some((_, branch)) = branches.iter().find(|(repo, _)| *repo == head.repo) else { return false };
+        let dir = Path::new(&head.repo);
+        // La rama local, o la del remoto si solo está ahí.
+        let now = [branch.clone(), format!("origin/{branch}")].iter().find_map(|reference| {
+            let wanted = format!("{reference}^{{commit}}");
+            git(dir, &["rev-parse", "--verify", "--quiet", &wanted]).ok().map(|sha| sha.trim().to_owned())
+        });
+        now.is_some_and(|sha| !sha.is_empty() && sha != head.sha)
+    }))
+}
+
 /// El commit que tenía la rama en una fecha, o su punto de partida si es anterior.
 fn head_at(repo: &RepoSync, unix: i64) -> Option<Head> {
     let dir = Path::new(&repo.repo);
@@ -419,6 +439,13 @@ mod tests {
         assert_eq!(found.len(), 1, "el momento guardado y el commit son el mismo punto: {found:?}");
         assert_eq!(found[0].heads[0].sha, first);
         assert_ne!(first, second);
+
+        // Lo que dice la lista de tareas: nada nuevo hasta que la rama avanza otra vez.
+        let branches = [(dir.display().to_string(), "feature/A".to_owned())];
+        assert!(!advanced(&store, "task:A", &branches).unwrap());
+        commit(&dir, "total.ts", BASE, "tercero");
+        assert!(advanced(&store, "task:A", &branches).unwrap());
+        assert!(!advanced(&store, "task:B", &branches).unwrap(), "sin momentos guardados, nada que avisar");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
