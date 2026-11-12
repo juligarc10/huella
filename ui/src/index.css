@@ -229,6 +229,17 @@
     animation: answer-enter 1600ms ease-out;
 }
 
+/* La línea de un punto, al ir a ella desde la explicación. */
+@keyframes line-flash {
+    from {
+        background-color: color-mix(in oklab, var(--brand) 35%, transparent);
+    }
+}
+
+.line-flash {
+    animation: line-flash 1200ms ease-out;
+}
+
 @keyframes page-enter {
     from {
         opacity: 0;
@@ -245,6 +256,7 @@
     .slide-enter,
     .slide-enter[data-direction],
     .verdict-pop,
+    .line-flash,
     .answer-enter {
         animation: none;
     }

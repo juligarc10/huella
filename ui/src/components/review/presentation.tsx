@@ -5,7 +5,6 @@ import {
   CircleCheck,
   CircleDashed,
   CircleX,
-  Eye,
   Loader2,
   Maximize2,
   MessageCircleQuestion,
@@ -21,7 +20,9 @@ import { AskPanel } from '@/components/review/ask-panel'
 import { DeclaredPanel } from '@/components/review/declared'
 import { FreshLines, StepDiff } from '@/components/review/diff'
 import { FlowMap } from '@/components/review/flow-map'
+import { StoryBlocks } from '@/components/review/blocks'
 import { GuidePanel } from '@/components/review/guide'
+import { AuditPanel, CheckFirst, Checks, findingsFor, IdeaExplanation, IdeaWarnings, Points, ScenarioChips } from '@/components/review/idea-parts'
 import { ProblemToSolution, Scenarios } from '@/components/review/problem'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
@@ -544,6 +545,16 @@ function Cover({
         </Block>
       )}
 
+      {story.blocks.length > 0 && (
+        <Block title="De un vistazo">
+          <StoryBlocks blocks={story.blocks} />
+        </Block>
+      )}
+
+      {story.source === 'declared' && (
+        <AuditPanel review={review} session={session} stepLink={(step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />} />
+      )}
+
       {/* Sin problema ni solución (guiones anteriores), el antes y el ahora van solos. */}
       {story.before && story.after && !story.problem && !story.solution && (
         <div className="grid gap-px overflow-hidden rounded-2xl border bg-border sm:grid-cols-2">
@@ -748,6 +759,7 @@ function ChapterSlide({
           <h2 className="text-4xl font-bold tracking-tight text-balance">{current.title}</h2>
           {current.intent && <p className="text-xl leading-snug font-medium tracking-tight">{current.intent}</p>}
           {current.narration && <p className="max-w-[62ch] text-[17px] leading-relaxed text-muted-foreground">{current.narration}</p>}
+          <StoryBlocks blocks={current.blocks} className="mt-2" />
         </header>
         <div className="flex flex-col gap-6">
           <Block title="En este capítulo">
@@ -766,17 +778,7 @@ function ChapterSlide({
               </ul>
             </Block>
           )}
-          {current.look_at.length > 0 && (
-            <Block title="No pases por alto">
-              <ul className="flex flex-col gap-1.5 text-sm">
-                {current.look_at.map((item) => (
-                  <li key={item} className="flex gap-2">
-                    <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
-                  </li>
-                ))}
-              </ul>
-            </Block>
-          )}
+          <CheckFirst items={current.look_at} title="Qué comprobar en este capítulo" />
           {current.questions.length > 0 && (
             <Block title="Al acabar deberías poder responder">
               <ul className="flex flex-col gap-1.5 text-sm">
@@ -786,6 +788,7 @@ function ChapterSlide({
               </ul>
             </Block>
           )}
+          <Checks checks={current.checks} />
         </div>
       </div>
       {ask}
@@ -814,26 +817,20 @@ function IdeaSlide({
   const idea = chapter.ideas[slide.idea]
   const steps = slide.steps.flatMap((step) => review.steps[step] ?? [])
   const declared = [...new Map(steps.flatMap((step) => step.declared).map((entry) => [entry.id, entry])).values()]
-  const terms = termsIn(story, idea.explanation)
+  const terms = termsIn(story, [idea.explanation, idea.what, idea.why, idea.breaks, ...idea.points.map((point) => point.text)].join(' '))
   return (
     <SplitPane>
       <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
         <header className="flex flex-col gap-2">
           <p className="text-[13px] font-semibold text-muted-foreground">{chapter.title}</p>
           <h2 className="text-2xl font-bold tracking-tight text-balance">{idea.title}</h2>
-          <p className="text-[16px] leading-relaxed whitespace-pre-line">{idea.explanation}</p>
         </header>
-        {idea.look_at.length > 0 && (
-          <Block title="No pases por alto">
-            <ul className="flex flex-col gap-1.5 text-sm">
-              {idea.look_at.map((item) => (
-                <li key={item} className="flex gap-2">
-                  <Eye className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" /> {item}
-                </li>
-              ))}
-            </ul>
-          </Block>
-        )}
+        <CheckFirst items={idea.look_at} />
+        <IdeaWarnings warnings={idea.warnings} findings={findingsFor(review, idea.steps)} />
+        <IdeaExplanation idea={idea} concepts={story.concepts} />
+        <Points points={idea.points} concepts={story.concepts} />
+        <ScenarioChips story={story} steps={idea.steps} />
+        <StoryBlocks blocks={idea.blocks} />
         {terms.length > 0 && (
           <Block title="Términos">
             <Terms concepts={terms} />
@@ -843,9 +840,23 @@ function IdeaSlide({
         {ask}
       </div>
       <div className="flex min-w-0 flex-col gap-5">
-        {steps.map((step, index) => (
-          <IdeaCode key={step.key} review={review} session={session} step={step} peekHint={index === 0} />
-        ))}
+        {steps.map((step, index) => {
+          // Los números de los puntos en su línea; lo que queda lejos de ellos, plegado.
+          const marks = new Map(
+            idea.points.flatMap((point, number) => (point.step === step.index && point.line !== null ? [[point.line, number + 1] as const] : [])),
+          )
+          return (
+            <IdeaCode
+              key={step.key}
+              review={review}
+              session={session}
+              step={step}
+              peekHint={index === 0}
+              marks={marks}
+              essentials={marks.size > 0 ? [...marks.keys()] : undefined}
+            />
+          )
+        })}
       </div>
     </SplitPane>
   )
@@ -886,6 +897,7 @@ function FileSlide({
             {chapter.narration || chapter.intent || 'El agente no explicó este fichero.'}
           </p>
         </header>
+        <IdeaWarnings warnings={[]} findings={findingsFor(review, slide.steps)} />
         {missing.length > 0 && (
           <Panel className="flex flex-col items-start gap-3">
             <p className="text-sm">El agente no explicó estos {steps.length} trozos.</p>
@@ -919,11 +931,15 @@ function IdeaCode({
   step,
   peekHint,
   explain = false,
+  marks,
+  essentials,
 }: {
   review: ReviewResult
   session: string
   step: ReviewStep
   peekHint: boolean
+  marks?: Map<number, number>
+  essentials?: number[]
   /** Muestra lo que explicó el modelo local de este trozo. */
   explain?: boolean
 }) {
@@ -946,6 +962,8 @@ function IdeaCode({
         composing={composing}
         onCompose={setComposing}
         peekHint={peekHint}
+        marks={marks}
+        essentials={essentials}
       />
     </section>
   )
@@ -979,6 +997,7 @@ function StepSlide({
           <Mono className="text-xs break-all text-muted-foreground">{step.display_path}</Mono>
           <TriageChips triage={step.triage} policy={review.policy} />
         </header>
+        <IdeaWarnings warnings={[]} findings={findingsFor(review, [step.index])} />
         <DeclaredPanel entries={step.declared} />
         <GuidePanel review={review} session={session} step={step} focus={focus} onFocus={setFocus} />
         {ask}
