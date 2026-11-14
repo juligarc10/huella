@@ -474,6 +474,98 @@ export interface CodeQuestion {
   lines: [number, number] | null
 }
 
+/** Nivel de «Profundizar aquí»: el recorrido con un ejemplo, o las reglas que aplica. */
+export type ExplainDepth = 'walk' | 'rules'
+
+export interface WalkStep {
+  title: string
+  what: string
+  /** Los valores del ejemplo en este paso. */
+  values: string
+  lines: [number, number] | null
+}
+
+export interface Rule {
+  kind: 'validation' | 'invariant' | 'error' | 'calculation' | 'state' | 'permission' | 'other' | string
+  when: string
+  then: string
+  why: string
+  lines: [number, number] | null
+  /** Tests que la comprueban; vacío si ninguno. */
+  tests: string[]
+}
+
+/** Una explicación a fondo de un trozo de código, anclada a su texto. */
+export interface CodeExplanation {
+  id: number
+  kind: ExplainDepth
+  /** El símbolo explicado entero, si lo es. */
+  symbol: string | null
+  quote: string
+  model: string
+  created_at: string
+  /** Líneas actuales del trozo; `null` si ya no está así en el fichero. */
+  lines: [number, number] | null
+  content: {
+    summary: string
+    example?: string
+    steps?: WalkStep[]
+    notes?: string[]
+    rules?: Rule[]
+    gaps?: string[]
+  }
+}
+
+/** Código que no cambia y que conviene conocer para entender un paso. */
+export interface PriorContextResult {
+  items: { path: string; display_path: string; qualified_name: string; kind: string; start_line: number; signature: string | null }[]
+}
+
+/** La guía de un símbolo entero («Entender este símbolo»). */
+export interface SymbolGuide {
+  id: number
+  symbol: string | null
+  model: string
+  created_at: string
+  lines: [number, number]
+  /** El código cambió desde que se escribió. */
+  stale: boolean
+  content: {
+    purpose: string
+    glossary: { term: string; meaning: string }[]
+    map: { method: string; use_case: string; lines: [number, number] | null }[]
+    dependencies: { name: string; role: string }[]
+    state: string[]
+    rules: (Rule & { method: string })[]
+    flows: { title: string; method: string; steps: string[] }[]
+    why: { text: string; source: 'history' | 'declared' | 'code' | string }[]
+    doubts: string[]
+    reading_order: { method: string; why: string }[]
+    questions: { question: string; answer: string }[]
+    tests_found: { name: string; path: string; line: number }[]
+    methods: { name: string; lines: [number, number] }[]
+  }
+}
+
+export interface SymbolGuideResult {
+  guide: SymbolGuide | null
+  /** Si se está escribiendo: cuántos métodos van resumidos, o el error. */
+  pending: { done: number; total: number; error: string | null } | null
+  ask_thinking: AskThinking
+}
+
+export interface PendingExplain {
+  path: string
+  quote: string
+  depth: ExplainDepth
+  error: string | null
+}
+
+export interface CodeExplanationsResult {
+  explanations: CodeExplanation[]
+  pending: PendingExplain[]
+}
+
 export interface PendingCodeAsk {
   path: string
   quote: string

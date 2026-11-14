@@ -3,12 +3,13 @@ import { createContext, Fragment, useContext, useEffect, useRef, useState, type 
 
 import { CodeText, useDiffTokens, usePeekKey, wordAt } from '@/components/review/code'
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
+import { DeepenButtons, ExplanationCard, PendingExplainCard } from '@/components/review/explanations'
 import { CommentCard, CommentComposer } from '@/components/review/comments'
 import { DefinitionPeek } from '@/components/review/definition-peek'
 import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
-import type { CodeQuestion, CommentHint, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
-import { useAddComment, useAskCode, useCodeQuestions } from '@/lib/queries'
+import type { AskThinking, CodeExplanation, CodeQuestion, CommentHint, ExplainDepth, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
+import { useAddComment, useAskCode, useCodeExplanations, useCodeQuestions, useExplainCode } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 /** Viendo solo lo nuevo desde un momento: lo nuevo de cada paso. Sin él, se ve todo igual. */
@@ -64,6 +65,8 @@ export function StepDiff({
   const add = useAddComment(session)
   const ask = useAskCode(step.path, session)
   const { data: codeQuestions } = useCodeQuestions(step.path, session)
+  const explain = useExplainCode(step.path, session)
+  const { data: codeExplanations } = useCodeExplanations(step.path, session)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [asking, setAsking] = useState(false)
   const [peek, setPeek] = useState<{ index: number; name: string; before: string } | null>(null)
@@ -110,6 +113,13 @@ export function StepDiff({
     if (index >= 0) answered.set(index, [...(answered.get(index) ?? []), question])
   }
   // Un fichero se reparte en varios pasos: cada pregunta sale solo en el que tiene sus líneas.
+  // Las explicaciones a fondo, igual: bajo la última línea del trozo, solo en el paso que lo tiene entero.
+  const explained = new Map<number, CodeExplanation[]>()
+  for (const explanation of codeExplanations?.explanations ?? []) {
+    const index = explanation.lines ? placeOf(explanation.quote) : -1
+    if (index >= 0) explained.set(index, [...(explained.get(index) ?? []), explanation])
+  }
+  const explaining = (codeExplanations?.pending ?? []).map((pending) => ({ pending, index: placeOf(pending.quote) })).filter(({ index }) => index >= 0)
   const thinking = (codeQuestions?.pending ?? [])
     .map((pending) => ({ pending, index: placeOf(pending.quote) }))
     .filter(({ pending, index }) => index >= 0 || !pending.quote.trim())
@@ -161,6 +171,13 @@ export function StepDiff({
     if (before) return { quote: before.text, removed, place: 'after' }
     return null
   }
+  // «Profundizar»: el recorrido o las reglas de un trozo; sale bajo su última línea al estar lista.
+  const deepen = (quote: string, depth: ExplainDepth, think: boolean, refresh = false) =>
+    explain.mutate({ quote, depth, think: think || undefined, refresh: refresh || undefined })
+  const blockCode = step.lines
+    .filter((line) => line.kind !== 'removed')
+    .map((line) => line.text)
+    .join('\n')
   const submitComment = (quote: string | null) => (body: string) =>
     add.mutate({ key: step.key, quote, body }, { onSuccess: () => onCompose(null) })
   const submitQuestion = (question: string, think: boolean) =>
@@ -176,7 +193,7 @@ export function StepDiff({
 
   // Tramos lejos de lo que importa (4 líneas o más), plegados: el código de la idea se ve de un vistazo.
   const keep = (index: number) =>
-    (essentials ?? []).some((line) => Math.abs(line - index) <= 3) || placed.has(index) || answered.has(index) || selected(index) || composing === index
+    (essentials ?? []).some((line) => Math.abs(line - index) <= 3) || placed.has(index) || answered.has(index) || explained.has(index) || selected(index) || composing === index
   const hidden = new Set<number>()
   const folds = new Map<number, number>()
   if (essentials && essentials.length > 0) {
@@ -273,6 +290,22 @@ export function StepDiff({
                   <CodeQuestionCard question={question} path={step.path} />
                 </div>
               ))}
+              {(explained.get(index) ?? []).map((explanation) => (
+                <div key={`e${explanation.id}`} className={inline}>
+                  <ExplanationCard
+                    explanation={explanation}
+                    path={step.path}
+                    onRefresh={() => deepen(explanation.quote, explanation.kind, false, true)}
+                  />
+                </div>
+              ))}
+              {explaining
+                .filter((e) => e.index === index)
+                .map(({ pending }) => (
+                  <div key={`x${pending.depth}${pending.quote.length}`} className={inline}>
+                    <PendingExplainCard pending={pending} model={model} path={step.path} />
+                  </div>
+                ))}
               {thinking
                 .filter((t) => t.index === index)
                 .map(({ pending }) => (
@@ -287,6 +320,15 @@ export function StepDiff({
                     canAsk={askTarget() !== null}
                     removedOnly={!selectedCode().trim() && selectedRemoved().trim().length > 0}
                     onAsk={() => setAsking(true)}
+                    onDeepen={
+                      selectedCode().trim()
+                        ? (depth, think) => {
+                            deepen(selectedCode(), depth, think)
+                            setSelection(null)
+                          }
+                        : undefined
+                    }
+                    thinking={codeQuestions?.ask_thinking}
                     onComment={() => {
                       onCompose(index)
                       setSelection(null)
@@ -331,6 +373,17 @@ export function StepDiff({
           <pre className="mt-2 overflow-x-auto font-mono text-xs leading-5 text-muted-foreground">{change.gone.join('\n')}</pre>
         </details>
       )}
+      {blockCode.trim() && (
+        <div className="flex flex-wrap items-center gap-2 border-t px-4 py-1.5">
+          <DeepenButtons
+            label="Profundizar en este bloque"
+            onDeepen={(depth, think) => deepen(blockCode, depth, think)}
+            disabled={explain.isPending || Boolean(codeQuestions?.ask_problem)}
+            title={codeQuestions?.ask_problem ?? undefined}
+            thinking={codeQuestions?.ask_thinking}
+          />
+        </div>
+      )}
       {peekHint && (
         <p className="border-t px-4 py-1.5 text-xs text-muted-foreground">
           <kbd className="font-mono">{navigator.platform.startsWith('Mac') ? '⌘' : 'Ctrl'}</kbd>+clic en un nombre para ver su definición
@@ -361,6 +414,8 @@ function SelectionBar({
   canAsk,
   removedOnly,
   onAsk,
+  onDeepen,
+  thinking,
   onComment,
   onClear,
 }: {
@@ -370,6 +425,9 @@ function SelectionBar({
   /** Solo hay líneas quitadas: la pregunta es por qué se quitaron. */
   removedOnly: boolean
   onAsk: () => void
+  /** Pedir el recorrido o las reglas de lo seleccionado; sin código, no se ofrece. */
+  onDeepen?: (depth: ExplainDepth, think: boolean) => void
+  thinking?: AskThinking
   onComment: () => void
   onClear: () => void
 }) {
@@ -391,6 +449,7 @@ function SelectionBar({
         <X aria-hidden="true" />
       </Button>
       <span className="text-xs text-muted-foreground">Mayúsculas+clic amplía la selección</span>
+      {onDeepen && <DeepenButtons onDeepen={onDeepen} thinking={thinking} />}
     </div>
   )
 }

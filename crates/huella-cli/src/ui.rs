@@ -78,6 +78,10 @@ pub(crate) struct App {
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
     code_asking: Arc<Mutex<Vec<PendingCodeAsk>>>,
+    /// Explicaciones a fondo («Profundizar aquí») que el modelo aún está escribiendo.
+    code_explaining: Arc<Mutex<Vec<PendingExplain>>>,
+    /// Guías de símbolos («Entender este símbolo») en curso.
+    understanding: Arc<Mutex<Vec<PendingGuide>>>,
     /// La última prueba de conexión con el modelo, desde Ajustes.
     probing: crate::settings::Probing,
 }
@@ -89,6 +93,28 @@ struct PendingCodeAsk {
     path: String,
     quote: String,
     question: String,
+    error: Option<String>,
+}
+
+/// Una explicación a fondo en curso o que falló.
+#[derive(Debug, Clone, Serialize)]
+struct PendingExplain {
+    /// Ruta normalizada del fichero.
+    path: String,
+    quote: String,
+    /// `walk` o `rules`.
+    depth: String,
+    error: Option<String>,
+}
+
+/// Una guía de símbolo en curso o que falló, con cuántos métodos van resumidos.
+#[derive(Debug, Clone, Serialize)]
+struct PendingGuide {
+    /// Ruta normalizada del fichero.
+    path: String,
+    symbol: String,
+    done: usize,
+    total: usize,
     error: Option<String>,
 }
 
@@ -166,6 +192,8 @@ impl App {
             auditing: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
+            code_explaining: Arc::new(Mutex::new(Vec::new())),
+            understanding: Arc::new(Mutex::new(Vec::new())),
             probing: Arc::default(),
         }
     }
@@ -330,6 +358,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["review", session, "feedback"]) => feedback(app, session)?,
         ("GET", ["review", session, "impact"]) => impact(app, session)?,
         ("GET", ["review", session, "definition"]) => definition(app, session, params)?,
+        ("GET", ["review", session, "context"]) => prior_context(app, session, params)?,
         ("GET", ["review", session, "revisions"]) => revisions(app, session)?,
         ("POST", ["review", session, "changes"]) => changes_since(app, session, body)?,
         ("POST", ["review", session, "coverage"]) => return start_coverage(app, session),
@@ -344,6 +373,15 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("GET", ["code", "questions"]) => code_questions(app, params)?,
         ("GET", ["code", "file"]) => code_file(params)?,
         ("POST", ["code", "ask", "dismiss"]) => dismiss_code_ask(app, body)?,
+        ("POST", ["code", "explain"]) => return explain_code(app, body),
+        ("POST", ["symbol", "understand"]) => return understand_symbol(app, body),
+        ("GET", ["symbol", "guide"]) => symbol_guide(app, params)?,
+        ("GET", ["code", "explanations"]) => code_explanations(app, params)?,
+        ("POST", ["code", "explain", "dismiss"]) => dismiss_explain(app, body)?,
+        ("POST", ["code", "explanations", id, "delete"]) => {
+            let id: i64 = id.parse().context("id no válido")?;
+            json!({"deleted": app.store.delete_code_explanation(id)?})
+        }
         ("POST", ["code", "questions", id, "delete"]) => {
             json!({"deleted": app.store.delete_code_question(id.parse().context("id no válido")?)?})
         }
@@ -1334,6 +1372,50 @@ fn definition(app: &mut App, session: &str, params: &HashMap<String, String>) ->
     Ok(serde_json::to_value(find(review, &roots, Lookup { name: &name, from: &from, before }))?)
 }
 
+/// Lo que conviene conocer de antes para entender un paso: lo que llaman sus
+/// líneas añadidas y no cambia en la revisión.
+fn prior_context(app: &mut App, session: &str, params: &HashMap<String, String>) -> Result<Value> {
+    use huella_engine::definition::SearchRoot;
+    let index: usize = non_empty(params.get("step")).context("falta el paso")?.parse().context("paso no válido")?;
+    load_review(app, session)?;
+    let (review, plan) = app.review.as_ref().context("revisión no cargada")?;
+    let step = plan.get(index).context("no hay ese paso")?;
+    let from = review.files[step.file].path.clone();
+    let added: Vec<&str> = step
+        .lines
+        .iter()
+        .filter_map(|line| match line {
+            huella_review::DiffLine::Added { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let roots: Vec<SearchRoot> = match &app.task_repos {
+        Some(repos) => repos
+            .iter()
+            .map(|repo| SearchRoot { root: PathBuf::from(&repo.repo), reference: repo.branch_ref.clone() })
+            .collect(),
+        None => huella_engine::session_project(&app.store, &review.session_id)?
+            .map(|project| SearchRoot { root: PathBuf::from(project), reference: None })
+            .into_iter()
+            .collect(),
+    };
+    let found = huella_engine::definition::prior_context(review, &roots, &from, &added);
+    let items: Vec<Value> = found
+        .into_iter()
+        .map(|definition| {
+            json!({
+                "path": definition.path,
+                "display_path": definition.display_path,
+                "qualified_name": definition.qualified_name,
+                "kind": definition.kind,
+                "start_line": definition.start_line,
+                "signature": definition.lines.first().map(|line| line.trim()),
+            })
+        })
+        .collect();
+    Ok(json!({"items": items}))
+}
+
 fn impact(app: &mut App, session: &str) -> Result<Value> {
     load_review(app, session)?;
     if let Some(cached) = &app.impact {
@@ -1506,6 +1588,212 @@ fn reviewed_content(app: &App, session: &str, path: &Path) -> Option<String> {
     let (review, _) = app.review.as_ref().filter(|(review, _)| review.session_id.starts_with(session))?;
     let key = huella_engine::normalize_path(path, None);
     review.files.iter().find(|file| file.path == key).map(|file| file.after.clone())
+}
+
+/// Explica a fondo un trozo de código (`path`, `quote`, `depth`: `walk` o
+/// `rules`, y si hay, `start`/`end`): la escribe un hilo con el modelo y la UI
+/// la muestra como pendiente mientras tanto. Si ya hay una para ese código, se
+/// devuelve sin llamar al modelo.
+fn explain_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let text = |key: &str| request[key].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    let path = PathBuf::from(text("path").context("falta el fichero")?);
+    let quote = request["quote"].as_str().unwrap_or_default().to_owned();
+    if quote.trim().is_empty() {
+        bail!("no hay código que explicar");
+    }
+    let depth_name = text("depth").unwrap_or_default();
+    let depth = huella_engine::explain::Depth::parse(&depth_name).context("depth debe ser walk o rules")?;
+    let think = request["think"].as_bool().filter(|think| *think);
+    let refresh = request["refresh"].as_bool().unwrap_or(false);
+    let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
+    let lines = line("start").zip(line("end"));
+    let key = huella_engine::normalize_path(&path, None);
+    let content = match text("session") {
+        Some(session) => {
+            load_review(app, &session)?;
+            reviewed_content(app, &session, &path)
+        }
+        None => None,
+    };
+    let pending = PendingExplain { path: key, quote: quote.clone(), depth: depth_name, error: None };
+    {
+        let mut all = app.code_explaining.lock().unwrap_or_else(PoisonError::into_inner);
+        let same = |p: &PendingExplain| p.path == pending.path && p.quote == pending.quote && p.depth == pending.depth;
+        if all.iter().any(|p| same(p) && p.error.is_none()) {
+            return Ok((202, json!({"explaining": true})));
+        }
+        all.retain(|p| !same(p));
+        all.push(pending.clone());
+    }
+    let (explaining, db, model, sources) =
+        (Arc::clone(&app.code_explaining), app.db.clone(), app.model.clone(), app.sources.clone());
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model_thinking(&model, think)?;
+            huella_engine::explain::explain_code(
+                &store,
+                Some(&sources),
+                llm.as_ref(),
+                huella_engine::explain::ExplainCode {
+                    path: &path,
+                    quote: &quote,
+                    lines,
+                    depth,
+                    reviewed: content.as_deref(),
+                    refresh,
+                },
+            )?;
+            Ok(())
+        })();
+        let mut all = explaining.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = all.iter().position(|p| {
+            p.path == pending.path && p.quote == pending.quote && p.depth == pending.depth && p.error.is_none()
+        }) {
+            match outcome {
+                Ok(()) => {
+                    all.remove(index);
+                }
+                Err(error) => all[index].error = Some(format!("{error:#}")),
+            }
+        }
+    });
+    Ok((202, json!({"explaining": true})))
+}
+
+/// Escribe la guía de un símbolo entero (`path`, `symbol`): primero cada
+/// método y luego la clase. Mientras, `symbol/guide` dice cuántos van.
+fn understand_symbol(app: &mut App, body: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let text = |key: &str| request[key].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    let path = PathBuf::from(text("path").context("falta el fichero")?);
+    let symbol = text("symbol").context("falta el símbolo")?;
+    let think = request["think"].as_bool().filter(|think| *think);
+    let refresh = request["refresh"].as_bool().unwrap_or(false);
+    let key = huella_engine::normalize_path(&path, None);
+    let pending = PendingGuide { path: key, symbol: symbol.clone(), done: 0, total: 0, error: None };
+    {
+        let mut all = app.understanding.lock().unwrap_or_else(PoisonError::into_inner);
+        let same = |p: &PendingGuide| p.path == pending.path && p.symbol == pending.symbol;
+        if all.iter().any(|p| same(p) && p.error.is_none()) {
+            return Ok((202, json!({"understanding": true})));
+        }
+        all.retain(|p| !same(p));
+        all.push(pending.clone());
+    }
+    let (understanding, db, model, sources) =
+        (Arc::clone(&app.understanding), app.db.clone(), app.model.clone(), app.sources.clone());
+    std::thread::spawn(move || {
+        let same = |p: &PendingGuide| p.path == pending.path && p.symbol == pending.symbol && p.error.is_none();
+        let progress = |done: usize, total: usize| {
+            let mut all = understanding.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = all.iter_mut().find(|p| same(p)) {
+                (entry.done, entry.total) = (done, total);
+            }
+        };
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model_thinking(&model, think)?;
+            let ask =
+                huella_engine::symbol_guide::UnderstandSymbol { path: &path, symbol: &symbol, reviewed: None, refresh };
+            huella_engine::symbol_guide::understand_symbol(&store, Some(&sources), llm.as_ref(), ask, &progress)?;
+            Ok(())
+        })();
+        let mut all = understanding.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = all.iter().position(same) {
+            match outcome {
+                Ok(()) => {
+                    all.remove(index);
+                }
+                Err(error) => all[index].error = Some(format!("{error:#}")),
+            }
+        }
+    });
+    Ok((202, json!({"understanding": true})))
+}
+
+/// La guía guardada de un símbolo (con si su código ha cambiado) y, si se está
+/// escribiendo, cuánto lleva. `dismiss=1` olvida un error.
+fn symbol_guide(app: &App, params: &HashMap<String, String>) -> Result<Value> {
+    let path = PathBuf::from(non_empty(params.get("path")).context("falta el fichero")?);
+    let symbol = non_empty(params.get("symbol")).context("falta el símbolo")?;
+    let key = huella_engine::normalize_path(&path, None);
+    let mut all = app.understanding.lock().unwrap_or_else(PoisonError::into_inner);
+    if params.get("dismiss").is_some_and(|value| value == "1") {
+        all.retain(|p| !(p.path == key && p.symbol == symbol && p.error.is_some()));
+    }
+    let pending = all.iter().find(|p| p.path == key && p.symbol == symbol).cloned();
+    drop(all);
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    let guide = huella_engine::symbol_guide::saved_guide(&app.store, &path, &symbol, &source)?.map(|guide| {
+        json!({
+            "id": guide.explanation.id,
+            "symbol": guide.explanation.symbol,
+            "model": guide.explanation.model,
+            "created_at": guide.explanation.created_at,
+            "lines": [guide.explanation.start_line, guide.explanation.end_line],
+            "stale": guide.stale,
+            "content": guide.content,
+        })
+    });
+    Ok(json!({"guide": guide, "pending": pending, "ask_thinking": crate::settings::thinking_option(&app.model)}))
+}
+
+/// Explicaciones a fondo del código de un fichero, con sus líneas actuales, y
+/// las que el modelo aún está escribiendo.
+fn code_explanations(app: &App, params: &HashMap<String, String>) -> Result<Value> {
+    let path = PathBuf::from(non_empty(params.get("path")).context("falta el fichero")?);
+    let key = huella_engine::normalize_path(&path, None);
+    let source = non_empty(params.get("session"))
+        .and_then(|session| reviewed_content(app, &session, &path))
+        .or_else(|| std::fs::read_to_string(&path).ok())
+        .unwrap_or_default();
+    let explanations: Vec<Value> = huella_engine::explain::explanations_in(&app.store, &path, &source)?
+        .into_iter()
+        .map(|located| {
+            let e = located.explanation;
+            json!({
+                "id": e.id,
+                "kind": e.kind,
+                "symbol": e.symbol,
+                "quote": e.quote,
+                "model": e.model,
+                "created_at": e.created_at,
+                "lines": located.lines.map(|(start, end)| [start, end]),
+                "content": located.content,
+            })
+        })
+        .collect();
+    let pending: Vec<PendingExplain> = app
+        .code_explaining
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|p| p.path == key)
+        .cloned()
+        .collect();
+    Ok(json!({"explanations": explanations, "pending": pending}))
+}
+
+/// Olvida una explicación a fondo que falló.
+fn dismiss_explain(app: &App, body: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let (path, quote, depth) = (
+        request["path"].as_str().context("falta el fichero")?,
+        request["quote"].as_str().context("falta el código")?,
+        request["depth"].as_str().context("falta el nivel")?,
+    );
+    app.code_explaining.lock().unwrap_or_else(PoisonError::into_inner).retain(|pending| {
+        !(pending.error.is_some() && pending.path == path && pending.quote == quote && pending.depth == depth)
+    });
+    Ok(json!({}))
 }
 
 /// Olvida una pregunta sobre líneas que falló.

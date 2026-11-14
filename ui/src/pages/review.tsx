@@ -22,6 +22,8 @@ import { ImpactPanel } from '@/components/review/impact'
 import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { StepDiff } from '@/components/review/diff'
 import { TaskOverview, taskTitle } from '@/components/review/task'
+import { UnderstandLinks } from '@/components/review/understand-links'
+import { PriorContext } from '@/components/review/prior-context'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { DeclaredPanel } from '@/components/review/declared'
 import { GuidePanel } from '@/components/review/guide'
@@ -576,10 +578,13 @@ export function Review({
                   >
                     Historia del símbolo
                   </Link>
+                  {' '}·{' '}
+                  <UnderstandLinks path={step.path} symbol={step.symbol} />
                 </>
               )}
             </p>
 
+            <PriorContext session={session} step={step.index} />
             <EvidencePanel evidence={step.evidence} path={step.path} />
             <ImpactPanel session={session} step={step} />
             <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} thinking={review.ask_thinking} task={Boolean(review.task)} />
