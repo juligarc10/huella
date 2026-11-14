@@ -298,7 +298,9 @@ fn respond(request: Request, reply: Reply) -> Result<()> {
 }
 
 fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>, body: &str) -> Result<(u16, Value)> {
-    let segments: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
+    // Cada segmento se decodifica: una clave de tarea puede llevar «/» (`BUGFIX%2FPAGO-1`).
+    let decoded: Vec<String> = path.trim_start_matches("/api/").split('/').map(path_segment).collect();
+    let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
     let value = match (method, segments.as_slice()) {
         ("GET", ["overview"]) => overview(app)?,
         ("GET", ["search"]) => search(app, params)?,
@@ -1960,6 +1962,11 @@ fn query_params(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Un segmento de la ruta: en una ruta, «+» es un «+» y no un espacio.
+fn path_segment(text: &str) -> String {
+    percent_decode(&text.replace('+', "%2B"))
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1994,6 +2001,12 @@ mod tests {
         assert_eq!(params["project"], "/Users/ana/canjea");
         assert_eq!(params["x"], "ñ");
         assert_eq!(params["bad"], "%zz");
+    }
+
+    #[test]
+    fn path_segments_are_decoded_keeping_plus_signs() {
+        assert_eq!(path_segment("task%3ABUGFIX%2FPAGO-1"), "task:BUGFIX/PAGO-1");
+        assert_eq!(path_segment("feature+f3"), "feature+f3");
     }
 
     #[test]
