@@ -316,7 +316,10 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["tasks", key, "target"]) => set_task_target(app, key, body)?,
         ("POST", ["tasks", key, "repos"]) => add_task_repo(app, key, body)?,
         ("POST", ["tasks", key, "repos", "remove"]) => remove_task_repo(app, key, body)?,
-        ("POST", ["tasks", key, "delete"]) => json!({"deleted": app.store.delete_task(key)?}),
+        ("POST", ["tasks", key, "delete"]) => {
+            forget_task_review(app, key);
+            json!({"deleted": app.store.delete_task(key)?})
+        }
         ("POST", ["review", session, "refresh"]) => {
             // Se vuelve a traer el remoto y a construir la revisión al pedirla.
             if app.review.as_ref().is_some_and(|(review, _)| review.session_id.starts_with(session)) {

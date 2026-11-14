@@ -22,7 +22,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { ReviewStatus, TaskDetail, TaskSummary } from '@/lib/api'
 import { dateTime, reviewStatusLabel } from '@/lib/format'
-import { useAddTaskRepo, useCreateTask, useRemoveTaskRepo, useReview, useSetTaskTarget, useTask, useTasks } from '@/lib/queries'
+import { useAddTaskRepo, useCreateTask, useDeleteTask, useRemoveTaskRepo, useReview, useSetTaskTarget, useTask, useTasks } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 import { Review } from '@/pages/review'
 
@@ -287,7 +287,10 @@ export function TaskPage() {
   if (isError) {
     return (
       <EmptyState icon={<ClipboardList className="size-8" />} title="No se pudo cargar la tarea">
-        {error.message}
+        <span className="flex flex-col items-center gap-3">
+          {error.message}
+          <DeleteTaskDialog taskKey={key} />
+        </span>
       </EmptyState>
     )
   }
@@ -337,6 +340,7 @@ function TaskSetup({ task, onDone }: { task: TaskDetail; onDone?: () => void }) 
             <Button variant="outline" size="lg" className="min-h-11" onClick={() => setFetch(true)} disabled={fresh.isFetching}>
               <RefreshCw className={cn(fresh.isFetching && 'animate-spin')} aria-hidden="true" /> Traer el remoto
             </Button>
+            <DeleteTaskDialog taskKey={task.key} />
             {onDone && (
               <Button size="lg" className="min-h-11" onClick={onDone}>
                 Revisar
@@ -416,6 +420,42 @@ function TaskSetup({ task, onDone }: { task: TaskDetail; onDone?: () => void }) 
         </Button>
       </form>
     </>
+  )
+}
+
+/** Borrar una tarea, tras confirmarlo: sale de la lista; las ramas no se tocan. */
+function DeleteTaskDialog({ taskKey }: { taskKey: string }) {
+  const [open, setOpen] = useState(false)
+  const remove = useDeleteTask()
+  const navigate = useNavigate()
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="lg" className="min-h-11 text-muted-foreground hover:text-destructive">
+          <Trash2 aria-hidden="true" /> Borrar tarea
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>¿Borrar {taskKey}?</DialogTitle>
+          <DialogDescription>
+            Se quita de la lista con su descripción y sus repositorios. Las ramas y los commits no se tocan.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)}>
+            Cancelar
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate(taskKey, { onSuccess: () => navigate('/tareas') })}
+          >
+            {remove.isPending && <Loader2 className="animate-spin" aria-hidden="true" />} Borrar
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
