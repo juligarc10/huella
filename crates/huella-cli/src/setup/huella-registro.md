@@ -15,6 +15,7 @@ Quien revise tu código tiene que entenderlo antes de aceptarlo, y **no tiene co
 4. **Tocas algo sensible**: seguridad, autenticación, datos persistidos o migraciones, API pública, dependencias → `kind: "risk"`, con `review_hint` diciendo qué mirar.
 5. **Algo no se entiende solo al leerlo**: por qué existe este código, el algoritmo, el orden de las llamadas, una regla de negocio → `kind: "explanation"`.
 6. **Descubres un término del dominio o del código** que alguien de fuera no conocería («prorrateo», «pool de créditos», `BillingAccount`) → `kind: "concept"`, con `summary` diciendo qué significa, sin dar nada por sabido.
+7. **Escribes o cambias lógica de dominio** (un servicio, un agregado, un motor de reglas): cada regla de negocio que decide qué pasa → `kind: "explanation"`, con `lines` justo en la condición y `summary` en la forma «si X → Y, porque Z», con los valores límite exactos y el nombre del error o estado. Si la clase es nueva o cambia de responsabilidad, una entrada más en la clase (`symbol: "Clase"`): para qué existe y qué no le toca. Quien después quiera entender la clase entera parte de esto.
 
 ### Cuándo no
 
