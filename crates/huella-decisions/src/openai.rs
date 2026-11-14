@@ -16,7 +16,7 @@ use crate::{ExtractError, JsonModel};
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const PROVIDER: &str = "openai-compatible";
 /// Margen de salida; sin él algunos servidores aplican un límite corto por defecto.
-const MAX_TOKENS: u32 = 8192;
+const MAX_TOKENS: u32 = 16_384;
 /// Silencio máximo entre dos fragmentos (incluye procesar el prompt).
 const MAX_SILENCE: Duration = Duration::from_secs(600);
 

@@ -18,7 +18,7 @@ use std::path::Path;
 
 use huella_anchoring::{Language, extract_symbols};
 use huella_core::{Symbol, SymbolKind};
-use huella_decisions::JsonModel;
+use huella_decisions::{ExtractError, JsonModel};
 use huella_store::{CodeExplanation, NewCodeExplanation, Store};
 use serde_json::{Value, json};
 
@@ -300,8 +300,8 @@ type Summary = (String, (usize, usize), String);
 
 /// Líneas de código por llamada al resumir métodos: los pequeños van juntos,
 /// para no gastar una llamada en un método de tres líneas.
-const BATCH_LINES: usize = 150;
-const BATCH_METHODS: usize = 10;
+const BATCH_LINES: usize = 100;
+const BATCH_METHODS: usize = 6;
 
 /// El resumen de cada método, en su orden: los guardados se reutilizan (por el
 /// hash de su código) y los demás se piden en tandas.
@@ -397,9 +397,17 @@ fn summarize_batch(model: &dyn JsonModel, path: &Path, source: &str, parts: &[&S
         request.push_str("```\n\n");
     }
     let request = huella_core::redact::redact(&request).into_owned();
-    let text = model
-        .complete_json(MEMBER_SYSTEM, &request, &member_schema())
-        .map_err(|error| EngineError::Model(error.to_string()))?;
+    let text = match model.complete_json(MEMBER_SYSTEM, &request, &member_schema()) {
+        Ok(text) => text,
+        // La respuesta no cupo (el razonamiento cuenta en el límite): la tanda, en dos mitades.
+        Err(ExtractError::Truncated) if parts.len() > 1 => {
+            let (first, second) = parts.split_at(parts.len() / 2);
+            let mut answers = summarize_batch(model, path, source, first)?;
+            answers.extend(summarize_batch(model, path, source, second)?);
+            return Ok(answers);
+        }
+        Err(error) => return Err(EngineError::Model(error.to_string())),
+    };
     let parsed: Value = serde_json::from_str(&text).map_err(|error| EngineError::Model(error.to_string()))?;
     let mut answers: Vec<Option<Value>> = vec![None; parts.len()];
     for mut method in parsed["methods"].as_array().cloned().unwrap_or_default() {
@@ -628,8 +636,6 @@ fn guide_schema() -> Value {
 mod tests {
     use std::cell::RefCell;
 
-    use huella_decisions::ExtractError;
-
     use super::*;
 
     /// Responde según qué se le pida: resumir un método o escribir la guía.
@@ -734,6 +740,48 @@ export class Pedidos {
         let calls = model.calls.borrow();
         assert_eq!(calls.len(), 4, "solo el método que cambió y la síntesis: {}", calls.len());
         assert!(calls[2].1.contains("liberar") && !calls[2].1.contains("reservar"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No le caben dos métodos en la respuesta.
+    struct Short {
+        calls: RefCell<Vec<usize>>,
+    }
+
+    impl JsonModel for Short {
+        fn model_id(&self) -> String {
+            "fake:1".into()
+        }
+
+        fn complete_json(
+            &self,
+            system: &str,
+            user: &str,
+            _schema: &Value,
+        ) -> std::result::Result<String, ExtractError> {
+            if system != MEMBER_SYSTEM {
+                return Ok(json!({"purpose": "Reservas.", "glossary": [], "map": [], "dependencies": [], "state": [], "rules": [],
+                    "flows": [], "why": [], "doubts": [], "reading_order": [], "questions": []}).to_string());
+            }
+            let count = user.matches("\n## ").count();
+            self.calls.borrow_mut().push(count);
+            if count > 1 {
+                return Err(ExtractError::Truncated);
+            }
+            Ok(json!({"methods": [{"index": 1, "purpose": "x", "inputs": "", "returns": "", "effects": [], "calls": [], "rules": []}]}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_batch_that_does_not_fit_is_split_in_halves() {
+        let dir = repo("split");
+        let path = dir.join("src/pedidos.ts");
+        let store = Store::open_in_memory().unwrap();
+        let model = Short { calls: RefCell::new(Vec::new()) };
+        let ask = UnderstandSymbol { path: &path, symbol: "Pedidos", reviewed: None, refresh: false };
+        let guide = understand_symbol(&store, None, &model, ask, &|_, _| {}).unwrap();
+        assert_eq!(*model.calls.borrow(), vec![2, 1, 1]);
+        assert_eq!(guide.content["methods"].as_array().unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
