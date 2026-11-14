@@ -323,10 +323,24 @@ fn uses_of(
 /// qué tipo se llama, solo ese tipo y lo que lo implementa.
 #[must_use]
 pub fn find(review: &SessionReview, roots: &[SearchRoot], lookup: Lookup<'_>) -> Found {
-    let Lookup { name, from, before } = lookup;
-    if !is_identifier(name) {
+    if !is_identifier(lookup.name) {
         return Found::default();
     }
+    let (definitions, home, wanted) = definitions_of(review, roots, lookup);
+    let (uses, total_uses) = home
+        .map(|search| uses_of(search, lookup.name, wanted.as_deref(), extension(lookup.from), &definitions))
+        .unwrap_or_default();
+    Found { definitions, uses, total_uses }
+}
+
+/// Las definiciones de [`find`], sin buscar sus usos; con el servicio desde el
+/// que se busca y el tipo al que se llama, si se sabe.
+fn definitions_of<'a>(
+    review: &SessionReview,
+    roots: &'a [SearchRoot],
+    lookup: Lookup<'_>,
+) -> (Vec<Definition>, Option<&'a SearchRoot>, Option<String>) {
+    let Lookup { name, from, before } = lookup;
     let display_of = |path: &str| {
         root_of(roots, path)
             .and_then(|search| path.strip_prefix(&format!("{}/", search.root.display())))
@@ -401,9 +415,100 @@ pub fn find(review: &SessionReview, roots: &[SearchRoot], lookup: Lookup<'_>) ->
         )
     });
     definitions.truncate(MAX_RESULTS);
-    let (uses, total_uses) =
-        home.map(|search| uses_of(search, name, wanted.as_deref(), extension(from), &definitions)).unwrap_or_default();
-    Found { definitions, uses, total_uses }
+    (definitions, home, wanted)
+}
+
+/// ¿Cambió esta definición en la revisión? Un fichero tocado tiene también
+/// código que no cambia: solo cuenta el símbolo cuyo cuerpo es otro (o nuevo).
+fn changed_here(review: &SessionReview, definition: &Definition) -> bool {
+    if !definition.in_change {
+        return false;
+    }
+    let Some(file) = review.files.iter().find(|file| file.path == definition.path) else { return false };
+    let hash_in = |source: &str| {
+        named(&file.path, source, short_name(&definition.qualified_name))
+            .into_iter()
+            .find(|symbol| symbol.qualified_name == definition.qualified_name)
+            .map(|symbol| symbol.body_hash)
+    };
+    let now = hash_in(&file.after);
+    now.is_none() || now != hash_in(&file.before)
+}
+
+/// Nombres que no son llamadas a código del proyecto.
+const NOT_CALLS: &[&str] = &[
+    "if", "for", "while", "switch", "catch", "return", "new", "function", "super", "this", "typeof", "await", "async",
+    "match", "loop", "fn", "let", "const", "var", "throw", "else", "do", "try", "sizeof", "assert", "println", "print",
+    "format", "vec", "Some", "Ok", "Err", "None", "String", "Object", "Array", "Math", "JSON", "console", "Error",
+    "Promise", "List", "Map", "Set", "Optional", "Integer", "Long", "Boolean", "Vec", "Box", "Option", "Result",
+];
+/// Nombres que se buscan por paso, y definiciones que se devuelven.
+const MAX_PRIOR_NAMES: usize = 14;
+const MAX_PRIOR: usize = 8;
+
+/// Lo que hay que conocer de antes para entender unas líneas añadidas: las
+/// funciones, métodos y tipos a los que llaman y que **no cambian** en esta
+/// revisión (lo que cambia ya tiene su propio paso). De la más usada a la menos.
+#[must_use]
+pub fn prior_context(review: &SessionReview, roots: &[SearchRoot], from: &str, added: &[&str]) -> Vec<Definition> {
+    // Cada nombre llamado (`x(`) o instanciado (`new X`), con lo que tiene delante para saber de qué tipo es.
+    let mut calls: Vec<(String, String, usize)> = Vec::new();
+    for line in added {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("use ")
+        {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let is_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
+            if is_start(bytes[index])
+                && (index == 0 || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
+            {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_' || bytes[index] == b'$')
+                {
+                    index += 1;
+                }
+                let name = &line[start..index];
+                let before = &line[..start];
+                let called = line[index..].trim_start().starts_with('(') || before.trim_end().ends_with("new");
+                if called && name.len() > 2 && !NOT_CALLS.contains(&name) {
+                    match calls.iter_mut().find(|(known, _, _)| known == name) {
+                        Some(entry) => entry.2 += 1,
+                        None => calls.push((name.to_owned(), before.to_owned(), 1)),
+                    }
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+    calls.sort_by_key(|(_, _, count)| std::cmp::Reverse(*count));
+    calls.truncate(MAX_PRIOR_NAMES);
+
+    let mut found: Vec<Definition> = Vec::new();
+    for (name, before, _) in &calls {
+        let (definitions, _, _) = definitions_of(review, roots, Lookup { name, from, before: Some(before) });
+        // Si lo define el propio cambio, ya se explica en su paso; los tests no son contexto.
+        let Some(first) = definitions.into_iter().find(|definition| !is_test(&definition.path)) else { continue };
+        if changed_here(review, &first)
+            || found.iter().any(|known| known.path == first.path && known.start_line == first.start_line)
+        {
+            continue;
+        }
+        found.push(first);
+        if found.len() >= MAX_PRIOR {
+            break;
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -468,6 +573,30 @@ mod tests {
     }
 
     const SERVICE: &str = "package a;\npublic class UserService {\n  public UserService() {}\n  public void register(String email) {\n    save(email);\n  }\n  private void save(String email) {\n    audit(email);\n  }\n}\n";
+
+    #[test]
+    fn prior_context_is_what_the_new_lines_call_and_does_not_change() {
+        let dir = repo("prior");
+        commit(&dir, "src/UserService.java", SERVICE);
+        commit(&dir, "src/Mailer.java", "package a;\npublic class Mailer {\n  public void send(String to) {}\n}\n");
+        let roots = [SearchRoot { root: dir.clone(), reference: None }];
+        let from = format!("{}/src/Signup.java", dir.display());
+        let added = [
+            "    // register(nunca) en un comentario no cuenta",
+            "    service.register(email);",
+            "    new Mailer().send(email);",
+            "    if (valid(email)) { return; }",
+        ];
+        let signup = "class Signup {\n  boolean valid(String e) { return true; }\n}\n";
+        let review = review_of(&[(&from, signup)]);
+
+        let found = prior_context(&review, &roots, &from, &added);
+        let names: Vec<&str> = found.iter().map(|d| d.qualified_name.as_str()).collect();
+        assert!(names.contains(&"UserService.register"), "{names:?}");
+        assert!(names.contains(&"Mailer") || names.contains(&"Mailer.send"), "{names:?}");
+        assert!(!names.contains(&"Signup.valid"), "lo que cambia ya tiene su paso: {names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_java_method_and_a_class_are_found_in_the_committed_branch() {

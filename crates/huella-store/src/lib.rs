@@ -416,6 +416,25 @@ const MIGRATIONS: &[&str] = &[
         findings        TEXT NOT NULL
     );
 ",
+    // 25: explicaciones a fondo de un trozo de código («Profundizar aquí») y
+    // guías de un símbolo entero. code_hash dice si el código sigue igual: si
+    // cambia, la explicación se rehace en vez de mostrar una que ya no vale.
+    r"
+    CREATE TABLE code_explanation (
+        id              INTEGER PRIMARY KEY,
+        path            TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        symbol          TEXT,
+        start_line      INTEGER NOT NULL,
+        end_line        INTEGER NOT NULL,
+        quote           TEXT NOT NULL,
+        code_hash       TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+    CREATE INDEX code_explanation_by_path ON code_explanation(path, kind);
+",
 ];
 
 /// Lo que no cuadra entre un guion y su código, guardado.
@@ -666,6 +685,43 @@ pub struct CodeQuestion {
     pub created_at: String,
     /// Las líneas quitadas sobre las que se preguntó; vacío si no hay.
     pub removed: String,
+}
+
+/// Explicación a fondo de un trozo de código o guía de un símbolo entero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeExplanation {
+    pub id: i64,
+    pub path: String,
+    /// `walk` (recorrido), `rules` (reglas), `symbol` (guía de un símbolo) o
+    /// `method` (resumen de un método, para la guía de su clase).
+    pub kind: String,
+    /// El símbolo explicado entero, si lo es.
+    pub symbol: Option<String>,
+    /// Líneas (1-based, inclusivas) cuando se explicó.
+    pub start_line: usize,
+    pub end_line: usize,
+    /// El código explicado: sirve para volver a encontrarlo si se mueve.
+    pub quote: String,
+    /// Hash del código explicado: si cambia, la explicación ya no vale.
+    pub code_hash: String,
+    /// La explicación, en JSON (su forma depende de `kind`).
+    pub content: String,
+    pub model: String,
+    pub created_at: String,
+}
+
+/// Explicación a fondo por guardar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewCodeExplanation<'a> {
+    pub path: &'a str,
+    pub kind: &'a str,
+    pub symbol: Option<&'a str>,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub quote: &'a str,
+    pub code_hash: &'a str,
+    pub content: &'a str,
+    pub model: &'a str,
 }
 
 /// Lo que se guarda de una pregunta nueva sobre código.
@@ -1548,6 +1604,82 @@ impl Store {
     /// Si falla la escritura.
     pub fn delete_code_question(&self, id: i64) -> Result<bool> {
         Ok(self.conn.execute("DELETE FROM code_question WHERE id = ?1", [id])? > 0)
+    }
+
+    /// Guarda una explicación a fondo de un trozo de código, redactada. Si ya
+    /// había una del mismo tipo sobre el mismo código, la sustituye.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_code_explanation(&self, new: &NewCodeExplanation<'_>) -> Result<i64> {
+        self.conn.execute(
+            "DELETE FROM code_explanation WHERE path = ?1 AND kind = ?2 AND code_hash = ?3",
+            params![new.path, new.kind, new.code_hash],
+        )?;
+        self.conn.execute(
+            "INSERT INTO code_explanation (path, kind, symbol, start_line, end_line, quote, code_hash, content, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            params![
+                new.path,
+                new.kind,
+                new.symbol,
+                i64::try_from(new.start_line).unwrap_or(i64::MAX),
+                i64::try_from(new.end_line).unwrap_or(i64::MAX),
+                redact(new.quote),
+                new.code_hash,
+                redact(new.content),
+                new.model
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Explicaciones a fondo del código de un fichero, de la más antigua a la más reciente.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn code_explanations(&self, path: &str) -> Result<Vec<CodeExplanation>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT id, path, kind, symbol, start_line, end_line, quote, code_hash, content, model, created_at
+             FROM code_explanation WHERE path = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([path], |row| {
+            let line = |index: usize| row.get::<_, i64>(index).map(|n| usize::try_from(n).unwrap_or_default());
+            Ok(CodeExplanation {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                kind: row.get(2)?,
+                symbol: row.get(3)?,
+                start_line: line(4)?,
+                end_line: line(5)?,
+                quote: row.get(6)?,
+                code_hash: row.get(7)?,
+                content: row.get(8)?,
+                model: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// La explicación de ese tipo sobre exactamente ese código, si la hay.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn code_explanation_for(&self, path: &str, kind: &str, code_hash: &str) -> Result<Option<CodeExplanation>> {
+        Ok(self
+            .code_explanations(path)?
+            .into_iter()
+            .rev()
+            .find(|explanation| explanation.kind == kind && explanation.code_hash == code_hash))
+    }
+
+    /// Borra una explicación a fondo.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn delete_code_explanation(&self, id: i64) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM code_explanation WHERE id = ?1", [id])? > 0)
     }
 
     /// Borra una conversación: la de un paso o, sin él, la general.
@@ -3715,6 +3847,33 @@ mod tests {
         assert!(!found[0].quote.contains("a8f3k2j9") && !found[0].answer.contains("a8f3k2j9"));
         assert!(store.delete_code_question(id).unwrap());
         assert_eq!(store.code_questions("/r/a.ts").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn code_explanations_replace_the_same_code_and_are_redacted() {
+        let store = Store::open_in_memory().unwrap();
+        let new = NewCodeExplanation {
+            path: "/r/a.ts",
+            kind: "rules",
+            symbol: Some("Pedidos.reservar"),
+            start_line: 3,
+            end_line: 9,
+            quote: "reservar() {}",
+            code_hash: "h1",
+            content: r#"{"rules": [{"when": "API_KEY=a8f3k2j9d0s7q1w4e6r5"}]}"#,
+            model: "fake:1",
+        };
+        store.add_code_explanation(&new).unwrap();
+        let id = store.add_code_explanation(&NewCodeExplanation { content: "{}", ..new }).unwrap();
+        store.add_code_explanation(&NewCodeExplanation { kind: "walk", ..new }).unwrap();
+        store.add_code_explanation(&NewCodeExplanation { code_hash: "h2", ..new }).unwrap();
+        let found = store.code_explanations("/r/a.ts").unwrap();
+        assert_eq!(found.len(), 3, "la del mismo código y tipo se sustituye");
+        let latest = store.code_explanation_for("/r/a.ts", "rules", "h1").unwrap().unwrap();
+        assert_eq!((latest.id, latest.content.as_str()), (id, "{}"));
+        assert!(found.iter().all(|e| !e.content.contains("a8f3k2j9")));
+        assert!(store.delete_code_explanation(id).unwrap());
+        assert!(store.code_explanation_for("/r/a.ts", "rules", "h1").unwrap().is_none());
     }
 
     #[test]
