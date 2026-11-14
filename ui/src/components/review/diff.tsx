@@ -91,11 +91,18 @@ export function StepDiff({
     if (index >= 0) placed.set(index, [...(placed.get(index) ?? []), comment])
     else loose.push(comment)
   }
-  // Cada pregunta, bajo la última línea del trozo preguntado, si está en este paso.
-  const lastLine = (quote: string) => quote.split('\n').map((line) => line.trim()).filter(Boolean).at(-1)
+  // Cada pregunta, bajo la última línea del trozo preguntado, si el trozo entero está en este paso.
+  // Casar solo la última línea (a menudo un «}») la sacaba en todos los pasos del fichero.
+  const code = step.lines.flatMap((line, index) =>
+    line.kind !== 'removed' && line.text.trim() ? [{ index, text: line.text.trim() }] : [],
+  )
   const placeOf = (quote: string) => {
-    const last = lastLine(quote)
-    return last ? step.lines.findIndex((line) => line.kind !== 'removed' && line.text.trim() === last) : -1
+    const wanted = quote.split('\n').map((line) => line.trim()).filter(Boolean)
+    if (wanted.length === 0) return -1
+    for (let start = 0; start + wanted.length <= code.length; start += 1) {
+      if (wanted.every((text, offset) => code[start + offset].text === text)) return code[start + wanted.length - 1].index
+    }
+    return -1
   }
   const answered = new Map<number, CodeQuestion[]>()
   for (const question of codeQuestions?.questions ?? []) {
