@@ -10,6 +10,7 @@
 //! su propia conexión a la base de datos y la interfaz consulta su progreso.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +75,8 @@ pub(crate) struct App {
     storylining: Arc<Mutex<HashMap<String, Storylining>>>,
     /// Contrastes del guion con el código en curso, por revisión.
     auditing: Arc<Mutex<HashMap<String, Storylining>>>,
+    /// Recorridos guiados en curso, por revisión.
+    walking: Arc<Mutex<HashMap<String, Storylining>>>,
     /// Preguntas que el modelo aún está respondiendo, por sesión.
     asking: Asking,
     /// Preguntas sobre código que el modelo aún está respondiendo.
@@ -190,6 +193,7 @@ impl App {
             guiding: Arc::new(Mutex::new(HashMap::new())),
             storylining: Arc::new(Mutex::new(HashMap::new())),
             auditing: Arc::new(Mutex::new(HashMap::new())),
+            walking: Arc::new(Mutex::new(HashMap::new())),
             asking: Arc::new(Mutex::new(HashMap::new())),
             code_asking: Arc::new(Mutex::new(Vec::new())),
             code_explaining: Arc::new(Mutex::new(Vec::new())),
@@ -365,6 +369,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "guide"]) => return start_guide(app, session, body),
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
         ("POST", ["review", session, "audit"]) => return start_audit(app, session),
+        ("POST", ["review", session, "walkthrough"]) => return start_walkthrough(app, session, body),
         ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["review", session, "ask", "clear"]) => clear_questions(app, session, body)?,
@@ -633,6 +638,9 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     if let Some(story) = &story {
         add_audit(app, review, plan, story, &triage, &declared, &mut value)?;
     }
+    value["walkthrough"] = json!(huella_engine::walkthrough::stored(&app.store, review, plan)?);
+    value["default_view"] = json!(crate::config::get().review.view);
+    value["walking"] = json!(app.walking.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
     let mut comprehension = Comprehension::default();
@@ -1225,6 +1233,73 @@ fn start_audit(app: &mut App, session: &str) -> Result<(u16, Value)> {
             Ok(())
         })();
         let mut all = auditing.lock().unwrap_or_else(PoisonError::into_inner);
+        match outcome {
+            Ok(()) => {
+                all.remove(&review_id);
+            }
+            Err(error) => {
+                all.insert(review_id, Storylining { running: false, part: None, error: Some(format!("{error:#}")) });
+            }
+        }
+    });
+    Ok((202, json!({"running": true})))
+}
+
+/// Recorrido guiado de una revisión (de una tarea o de una sesión): lo escribe un
+/// hilo con el modelo configurado. Lo que se pidió sale de la tarea o de las
+/// peticiones de la sesión; el guion, si lo hay, va como pista.
+fn start_walkthrough(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
+    if let Some(problem) = crate::model_problem(&app.model) {
+        bail!(problem);
+    }
+    let think =
+        serde_json::from_str::<Value>(body).ok().and_then(|request| request["think"].as_bool()).filter(|think| *think);
+    load_review(app, session)?;
+    let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    let project = review_project(app, &review.session_id)?;
+    let points = huella_review::attention::attention(&review, &plan);
+    let Assessment { triage, .. } = assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
+    let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
+    let told = task_story(app, &review, &plan, &triage, &declared)?;
+    let intent = match task_input_parts(app, &review)? {
+        Some((title, description, _)) => format!("{}\n{description}", title.unwrap_or_default()),
+        None => review
+            .turns
+            .iter()
+            .filter_map(|turn| turn.prompt.as_deref())
+            .map(|prompt| format!("- {}", prompt.trim()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let hints = told.as_ref().map_or_else(String::new, |story| {
+        let mut hints = story.summary.clone();
+        if let Some(example) = &story.example {
+            let _ = write!(hints, "\nCaso de principio a fin: {}", example.scenario);
+            for walk in &example.walk {
+                let _ = write!(hints, "\n- {}", walk.what);
+            }
+        }
+        hints
+    });
+    let review_id = review.session_id.clone();
+    {
+        let mut running = app.walking.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.get(&review_id).is_some_and(|state| state.running) {
+            return Ok((202, json!({"running": true})));
+        }
+        running.insert(review_id.clone(), Storylining { running: true, ..Storylining::default() });
+    }
+    let (walking, db, model) = (Arc::clone(&app.walking), app.db.clone(), app.model.clone());
+    let context_tokens = crate::config::get().llm.context_tokens;
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open(&db)?;
+            let llm = crate::build_model_thinking(&model, think)?;
+            let input = huella_engine::walkthrough::WalkInput { intent: &intent, hints: &hints };
+            huella_engine::walkthrough::generate(&store, &review, &plan, input, llm.as_ref(), context_tokens)?;
+            Ok(())
+        })();
+        let mut all = walking.lock().unwrap_or_else(PoisonError::into_inner);
         match outcome {
             Ok(()) => {
                 all.remove(&review_id);

@@ -609,6 +609,10 @@ export interface Settings {
   context_tokens: { value: number; from: SettingFrom }
   /** Idioma de lo que escribe el modelo; `null`: el de la petición o la pregunta. */
   language: { value: string | null; options: { code: string; label: string }[] }
+  /** Vista con la que se abre una revisión; `null`: la última que se usó. */
+  view: { value: 'steps' | 'presentation' | 'walk' | null }
+  /** Pedir al agente código que se lea de arriba abajo. */
+  narrative_code: { value: boolean }
   /** Nunca la clave: de dónde sale y si se puede leer. */
   key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
   problem: string | null
@@ -623,6 +627,9 @@ export type SettingsChange = Partial<{
   context_tokens: number | null
   /** `auto`: el de la petición o la pregunta. */
   language: string
+  /** `last`: la última que se usó. */
+  view: 'last' | 'steps' | 'presentation' | 'walk'
+  narrative_code: boolean
 }>
 
 /** Quién escribió una línea de la rama. */
@@ -755,6 +762,43 @@ export interface ReviewResult {
   /** El último contraste del guion con el código. */
   audit?: { findings: AuditFinding[]; model: string; recorded_at: string; stale: boolean } | null
   auditing?: { running: boolean; error: string | null } | null
+  /** El recorrido guiado, si se preparó. */
+  walkthrough?: StoredWalkthrough | null
+  walking?: { running: boolean; error: string | null } | null
+  /** Vista con la que se abre, según Ajustes; `null`: la última que se usó. */
+  default_view?: 'steps' | 'presentation' | 'walk' | null
+}
+
+/** Una parada del recorrido guiado: un paso del cambio, en orden de ejecución. */
+export interface WalkStop {
+  /** Índice del paso. */
+  step: number
+  title: string
+  /** Cómo se llega aquí desde la parada anterior. */
+  transition: string
+  arrives: string
+  does: string
+  leaves: string
+  why: string
+  /** Valores del caso en líneas del código (`quote` es el texto de la línea). */
+  values: { quote: string; value: string }[]
+  /** No se ve en el código cómo se llega aquí. */
+  gap: string | null
+}
+
+export interface StoredWalkthrough {
+  walkthrough: {
+    title: string
+    situation: string
+    stops: WalkStop[]
+    forks: { step: number; condition: string; outcome: string }[]
+    /** Pasos de código que el recorrido no toca. */
+    outside: number[]
+  }
+  model: string
+  recorded_at: string
+  /** El cambio cambió desde que se preparó. */
+  stale: boolean
 }
 
 export interface StoryChapter {

@@ -31,6 +31,7 @@ pub mod storyline;
 pub mod symbol_guide;
 pub mod task;
 pub mod triage;
+pub mod walkthrough;
 pub mod workspace;
 
 use std::path::PathBuf;

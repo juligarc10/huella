@@ -124,7 +124,8 @@ export function useReview(session: string | undefined) {
         data?.covering?.running ||
         data?.guiding?.pending.length ||
         data?.storylining?.running ||
-        data?.auditing?.running
+        data?.auditing?.running ||
+        data?.walking?.running
         ? 1500
         : false
     },
@@ -182,6 +183,16 @@ export function useDeleteTask() {
 }
 
 /** Vuelve a traer el remoto y a construir la revisión. */
+/** Prepara el recorrido guiado de una revisión; llega con la revisión. */
+export function useWalkthrough(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { think?: boolean }) => api.post(`review/${encodeURIComponent(session)}/walkthrough`, ask),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
 /** Contrasta el guion del agente con el código; el resultado llega con la revisión. */
 export function useAudit(session: string) {
   const client = useQueryClient()

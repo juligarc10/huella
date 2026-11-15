@@ -435,6 +435,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX code_explanation_by_path ON code_explanation(path, kind);
 ",
+    // 26: el recorrido guiado de una revisión (un caso que se sigue por el código
+    // en orden de ejecución); input_hash dice si el cambio sigue siendo el mismo.
+    r"
+    CREATE TABLE review_walkthrough (
+        review_id       TEXT PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        input_hash      TEXT NOT NULL,
+        content         TEXT NOT NULL
+    );
+",
 ];
 
 /// Lo que no cuadra entre un guion y su código, guardado.
@@ -445,6 +456,16 @@ pub struct StoredAudit {
     pub input_hash: String,
     /// Los hallazgos, en JSON.
     pub findings: String,
+}
+
+/// El recorrido guiado de una revisión, tal como se guardó.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredWalkthrough {
+    pub recorded_at: String,
+    pub model: String,
+    pub input_hash: String,
+    /// El recorrido, en JSON.
+    pub content: String,
 }
 
 /// Un momento guardado de una revisión.
@@ -2145,6 +2166,43 @@ impl Store {
             params![review_id, model, input_hash, redact(findings)],
         )?;
         Ok(())
+    }
+
+    /// Guarda el recorrido guiado de una revisión (en JSON), sustituyendo el anterior.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_walkthrough(&self, review_id: &str, model: &str, input_hash: &str, content: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_walkthrough (review_id, recorded_at, model, input_hash, content)
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?2, ?3, ?4)
+             ON CONFLICT(review_id) DO UPDATE SET recorded_at = excluded.recorded_at, model = excluded.model,
+                 input_hash = excluded.input_hash, content = excluded.content",
+            params![review_id, model, input_hash, redact(content)],
+        )?;
+        Ok(())
+    }
+
+    /// El recorrido guiado de una revisión, si se escribió.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn walkthrough(&self, review_id: &str) -> Result<Option<StoredWalkthrough>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT recorded_at, model, input_hash, content FROM review_walkthrough WHERE review_id = ?1",
+                [review_id],
+                |row| {
+                    Ok(StoredWalkthrough {
+                        recorded_at: row.get(0)?,
+                        model: row.get(1)?,
+                        input_hash: row.get(2)?,
+                        content: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// La última auditoría del guion de una revisión.

@@ -40,6 +40,7 @@ export function StepDiff({
   peekHint = true,
   marks,
   essentials,
+  annotations,
 }: {
   step: ReviewStep
   comments: ReviewComment[]
@@ -60,6 +61,8 @@ export function StepDiff({
   marks?: Map<number, number>
   /** Las líneas que importan: lo que queda lejos de ellas se pliega. Sin ellas, se ve todo. */
   essentials?: number[]
+  /** Lo que vale cada línea en el caso del recorrido guiado, por su índice. */
+  annotations?: Map<number, string>
 }) {
   const [unfolded, setUnfolded] = useState<Set<number>>(() => new Set())
   const add = useAddComment(session)
@@ -274,6 +277,11 @@ export function StepDiff({
                   {line.kind === 'added' ? (unexplained(line) ? '!' : '+') : line.kind === 'removed' ? '−' : ' '}
                 </span>
                 <CodeText text={line.text} tokens={tokens[index]} />
+                {annotations?.has(index) && (
+                  <span className="ml-6 shrink-0 rounded-md bg-brand-soft px-2 font-sans text-xs leading-6 text-accent-foreground">
+                    {annotations.get(index)}
+                  </span>
+                )}
               </div>
               {peek?.index === index && (
                 <div className={inline}>
