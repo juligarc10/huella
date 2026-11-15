@@ -27,6 +27,13 @@ guiada del cambio.
 - **Tareas** filtradas por estado, con las que tienen cambios nuevos y un buscador; refrescar en cada vista.
 - **Ajustes** en la aplicación: el modelo, la clave (en su fichero 600), probar la conexión y el idioma de las explicaciones.
 
+**Sin publicar** (rama `feature/profundizar-y-simbolos`): entender el código a fondo, no solo el cambio.
+
+- **Profundizar** en cualquier bloque o selección del diff: el *recorrido* (paso a paso con un ejemplo y sus valores) o las *reglas* (cada condición con sus líneas y los tests que la cubren). Se guardan por el hash del código (migración 25).
+- **Entender este símbolo**, pestaña de la página del símbolo: la guía de una clase entera (para qué existe, glosario, casos de uso, dependencias, reglas por método con sus tests, recorridos, por qué es así según su historia, lo dudoso, orden de lectura y preguntas). Resume los métodos en tandas, cada uno guardado por su código, y luego la clase. Con el Qwen local, `RulesEngine` (25 métodos, 417 líneas) tarda unos 16 minutos la primera vez y unos 5 al rehacerla.
+- **Contexto previo** de cada paso: lo que llaman sus líneas nuevas y no cambia en la revisión, con enlace a su guía.
+- La skill pide registrar las reglas de negocio y la responsabilidad de cada clase.
+
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
 ## Cómo retomarlo
