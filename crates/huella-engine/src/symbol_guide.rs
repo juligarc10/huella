@@ -176,10 +176,30 @@ pub fn understand_symbol(
         return Err(EngineError::Model("el modelo devolvió una guía vacía".into()));
     }
     let total = source.lines().count();
-    for list in ["map", "rules"] {
+    // Las líneas, dentro de la clase y, si se sabe de qué método son, dentro de ese método:
+    // un rango que abarca media clase es un error del modelo, no una regla.
+    let ranges_of = |method: &str| -> Vec<(usize, usize)> {
+        summaries.iter().filter(|(name, _, _)| short_name(name) == method).map(|(_, lines, _)| *lines).collect()
+    };
+    for (list, field) in [("map", "method"), ("rules", "method")] {
         if let Some(items) = content[list].as_array_mut() {
             for item in items {
-                item["lines"] = valid_lines(&item["lines"], (target.start_line, target.end_line), total);
+                let ranges = ranges_of(item[field].as_str().unwrap_or_default());
+                let lines = valid_lines(&item["lines"], (target.start_line, target.end_line), total);
+                let inside = |lines: &Value| {
+                    let (Some(first), Some(last)) = (lines[0].as_u64(), lines[1].as_u64()) else { return true };
+                    ranges.is_empty()
+                        || ranges.iter().any(|&(start, end)| {
+                            usize::try_from(first).is_ok_and(|f| f >= start)
+                                && usize::try_from(last).is_ok_and(|l| l <= end)
+                        })
+                };
+                item["lines"] = match (list, ranges.as_slice()) {
+                    // Un caso de uso es su método entero: sus líneas se saben sin el modelo.
+                    ("map", [(start, end)]) => json!([start, end]),
+                    _ if inside(&lines) => lines,
+                    _ => Value::Null,
+                };
             }
         }
     }
@@ -726,7 +746,9 @@ mod tests {
                     "glossary": [], "map": [{"method": "reservar", "use_case": "Reservar unidades", "lines": [2, 6]}],
                     "dependencies": [], "state": [],
                     "rules": [{"kind": "error", "when": "más que el stock", "then": "SinStock", "why": "", "method": "reservar",
-                               "lines": [400, 401], "tests": ["sin stock falla"]}],
+                               "lines": [400, 401], "tests": ["sin stock falla"]},
+                              {"kind": "error", "when": "abarca media clase", "then": "x", "why": "", "method": "reservar",
+                               "lines": [2, 9], "tests": []}],
                     "flows": [], "why": [], "doubts": [], "reading_order": [], "questions": []
                 })
                 .to_string()
@@ -778,9 +800,13 @@ export class Pedidos {
         let guide =
             understand_symbol(&store, None, &model, ask, &|done, total| seen.borrow_mut().push((done, total))).unwrap();
         assert_eq!(guide.content["purpose"], "Gestiona las reservas de stock.");
-        assert_eq!(guide.content["map"][0]["lines"], json!([2, 6]));
+        assert_eq!(guide.content["map"][0]["lines"], json!([2, 5]), "las del método, no las que diga el modelo");
         let rules = guide.content["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 2, "la regla que la síntesis olvidó se añade: {rules:?}");
+        assert_eq!(rules.len(), 3, "la regla que la síntesis olvidó se añade: {rules:?}");
+        assert!(
+            rules.iter().any(|r| r["when"] == "abarca media clase" && r["lines"].is_null()),
+            "fuera de su método: {rules:?}"
+        );
         assert_eq!((rules[0]["lines"].clone(), rules[0]["method"].clone()), (json!([7, 7]), json!("liberar")));
         assert_eq!(rules[1]["lines"], Value::Null, "líneas fuera de la clase se quitan");
         assert_eq!(guide.content["methods"].as_array().unwrap().len(), 2);
