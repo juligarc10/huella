@@ -33,6 +33,9 @@ guiada del cambio.
 - **Entender este símbolo**, pestaña de la página del símbolo: la guía de una clase entera (para qué existe, glosario, casos de uso, dependencias, reglas por método con sus tests, recorridos, por qué es así según su historia, lo dudoso, orden de lectura y preguntas). Resume los métodos en tandas, cada uno guardado por su código, y luego la clase. Con el Qwen local, `RulesEngine` (25 métodos, 417 líneas) tarda unos 16 minutos la primera vez y unos 5 al rehacerla.
 - **Contexto previo** de cada paso: lo que llaman sus líneas nuevas y no cambia en la revisión, con enlace a su guía.
 - La skill pide registrar las reglas de negocio y la responsabilidad de cada clase.
+- **Recorrido guiado**, tercera vista de la revisión (también en sesiones): un caso con datos seguido por el código en orden de ejecución, parada a parada (llega, pasa, sale, por qué, transición desde la anterior) con los valores junto a las líneas, bifurcaciones y un apéndice con lo que no toca. Dos llamadas al modelo (elegir con un índice de pasos; contar con el código de las paradas); los valores tienen que citar líneas reales y los saltos sin llamada que los una se avisan. Migración 26.
+- **Ajustes · Cómo leer una revisión**: la vista con la que se abre (por defecto, la última usada) y, opcional, pedir al agente código que se lea de arriba abajo (va en las instrucciones del MCP).
+- Siguiente en esta línea: que el agente escriba el recorrido al terminar (ampliar `example.walk` de `huella_storyline`) y, más adelante, valores de una ejecución real de un test.
 
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
