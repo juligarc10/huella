@@ -28,9 +28,19 @@ use crate::{EngineError, Result};
 
 /// Líneas que se explican de una vez: más allá, la explicación se diluye.
 const MAX_LINES: usize = 400;
-/// Tests que se envían al modelo, y líneas de cada uno.
+/// Tests que se envían al modelo al explicar un trozo, y líneas de cada uno.
 const MAX_TESTS: usize = 12;
 const TEST_LINES: usize = 40;
+
+/// Cuántos tests buscar y cuánto de cada uno.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TestBudget {
+    pub tests: usize,
+    pub lines: usize,
+}
+
+/// Para un trozo: pocos tests, enteros.
+pub(crate) const FOR_A_PIECE: TestBudget = TestBudget { tests: MAX_TESTS, lines: TEST_LINES };
 /// Nombres que se buscan en los tests.
 const MAX_NAMES: usize = 8;
 
@@ -157,7 +167,7 @@ estado, permiso y camino de error que decide qué pasa.
   (devuelve, lanza, guarda, avisa…, con el nombre exacto del error o del estado); `why` por qué existe la regla, \
   según la historia o, si lo deduces, diciéndolo. `kind`: validation, invariant, error, calculation, state, \
   permission u other. `tests`: los nombres de los tests del contexto que la comprueban de verdad (no basta con \
-  que llamen a la función); vacío si ninguno.
+  que llamen a la función); vacío si ninguno de los que ves (puede haber otros que no se te dan).
 - No mezcles reglas: si una condición tiene dos consecuencias según otro valor, son dos reglas.
 - `gaps`: reglas sin test, casos que el código no contempla y contradicciones con lo que declaró el agente.
 ";
@@ -322,7 +332,7 @@ pub(crate) struct TestRef {
 
 /// Los tests del repositorio de `path` que nombran alguno de `names`, con su
 /// código, para cruzarlos con las reglas.
-pub(crate) fn tests_naming(path: &Path, names: &[String]) -> Vec<TestRef> {
+pub(crate) fn tests_naming(path: &Path, names: &[String], budget: TestBudget) -> Vec<TestRef> {
     if names.is_empty() {
         return Vec::new();
     }
@@ -363,7 +373,7 @@ pub(crate) fn tests_naming(path: &Path, names: &[String]) -> Vec<TestRef> {
         let code: Vec<&str> = source
             .lines()
             .skip(test.start_line - 1)
-            .take((test.end_line - test.start_line + 1).min(TEST_LINES))
+            .take((test.end_line - test.start_line + 1).min(budget.lines))
             .collect();
         tests.push(TestRef {
             display_path: file.to_owned(),
@@ -371,7 +381,7 @@ pub(crate) fn tests_naming(path: &Path, names: &[String]) -> Vec<TestRef> {
             start_line: test.start_line,
             code: code.join("\n"),
         });
-        if tests.len() >= MAX_TESTS {
+        if tests.len() >= budget.tests {
             break;
         }
     }
@@ -395,7 +405,7 @@ fn is_test_file(path: &str) -> bool {
 }
 
 fn tests_context(path: &Path, names: &[String]) -> String {
-    let tests = tests_naming(path, names);
+    let tests = tests_naming(path, names, FOR_A_PIECE);
     let mut out = String::from("\n## Tests que nombran este código\n\n");
     if tests.is_empty() {
         let _ = writeln!(

@@ -175,7 +175,7 @@ export function RuleRow({ rule, method, onLine }: { rule: Rule; method?: string;
         </p>
       ) : (
         <p className="flex items-center gap-1.5 text-xs text-warn">
-          <TriangleAlert className="size-3.5" aria-hidden="true" /> Ningún test la comprueba
+          <TriangleAlert className="size-3.5" aria-hidden="true" /> No se encontró un test que la compruebe
         </p>
       )}
     </li>

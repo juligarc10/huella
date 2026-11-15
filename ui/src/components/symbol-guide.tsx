@@ -120,6 +120,13 @@ function Section({ icon, title, children, className }: { icon: ReactNode; title:
   )
 }
 
+/** Las reglas por método, en el orden en que aparece cada método. */
+function groupByMethod(rules: SymbolGuide['content']['rules']) {
+  const groups = new Map<string, SymbolGuide['content']['rules']>()
+  for (const rule of rules) groups.set(rule.method, [...(groups.get(rule.method) ?? []), rule])
+  return [...groups.entries()]
+}
+
 function GuideBody({ guide, onLine }: { guide: SymbolGuide; onLine: (line: number) => void }) {
   const c = guide.content
   const untested = c.rules.filter((rule) => rule.tests.length === 0).length
@@ -156,8 +163,7 @@ function GuideBody({ guide, onLine }: { guide: SymbolGuide; onLine: (line: numbe
         </Section>
       )}
 
-      <div className="flex flex-wrap items-start gap-4">
-        <Section icon={<Waypoints className="size-4" aria-hidden="true" />} title="Casos de uso" className="min-w-0 flex-[2_1_420px]">
+      <Section icon={<Waypoints className="size-4" aria-hidden="true" />} title="Casos de uso">
           <ul className="flex flex-col divide-y">
             {c.map.map((entry) => (
               <li key={entry.method} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2 text-sm first:pt-0 last:pb-0">
@@ -167,10 +173,10 @@ function GuideBody({ guide, onLine }: { guide: SymbolGuide; onLine: (line: numbe
               </li>
             ))}
           </ul>
-        </Section>
-        {(c.dependencies.length > 0 || c.state.length > 0) && (
-          <Section icon={<Route className="size-4" aria-hidden="true" />} title="Con quién habla y qué guarda" className="min-w-0 flex-[1_1_260px]">
-            <ul className="flex flex-col gap-2 text-sm">
+      </Section>
+      {(c.dependencies.length > 0 || c.state.length > 0) && (
+        <Section icon={<Route className="size-4" aria-hidden="true" />} title="Con quién habla y qué guarda">
+            <ul className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2">
               {c.dependencies.map((dependency) => (
                 <li key={dependency.name}>
                   <Mono className="font-semibold">{dependency.name}</Mono> <span className="text-muted-foreground">— {dependency.role}</span>
@@ -184,16 +190,31 @@ function GuideBody({ guide, onLine }: { guide: SymbolGuide; onLine: (line: numbe
                 ))}
               </ul>
             )}
-          </Section>
-        )}
-      </div>
+        </Section>
+      )}
 
       <Section icon={<ListChecks className="size-4" aria-hidden="true" />} title={`Reglas de negocio · ${c.rules.length}${untested > 0 ? ` · ${untested} sin test` : ''}`}>
-        <ol className="flex flex-col divide-y rounded-lg border">
-          {c.rules.map((rule, index) => (
-            <RuleRow key={index} rule={rule} method={rule.method} onLine={onLine} />
-          ))}
-        </ol>
+        <div className="flex flex-col gap-2">
+          {groupByMethod(c.rules).map(([method, rules]) => {
+            const missing = rules.filter((rule) => rule.tests.length === 0).length
+            return (
+              <details key={method} open className="rounded-lg border">
+                <summary className="flex cursor-pointer flex-wrap items-baseline gap-x-2 px-3 py-2 text-sm">
+                  <Mono className="font-semibold">{method || 'Sin método'}</Mono>
+                  <span className="text-xs text-muted-foreground">
+                    {rules.length === 1 ? '1 regla' : `${rules.length} reglas`}
+                    {missing > 0 && <span className="text-warn"> · {missing} sin test</span>}
+                  </span>
+                </summary>
+                <ol className="flex flex-col divide-y border-t">
+                  {rules.map((rule, index) => (
+                    <RuleRow key={index} rule={rule} onLine={onLine} />
+                  ))}
+                </ol>
+              </details>
+            )
+          })}
+        </div>
         {c.tests_found.length > 0 && (
           <details className="text-sm">
             <summary className="cursor-pointer text-muted-foreground">{c.tests_found.length} tests que la nombran</summary>

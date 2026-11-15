@@ -23,12 +23,15 @@ use huella_store::{CodeExplanation, NewCodeExplanation, Store};
 use serde_json::{Value, json};
 
 use crate::code_ask::{clip, write_history};
-use crate::explain::{code_hash, tests_naming};
+use crate::explain::{TestBudget, code_hash, tests_naming};
 use crate::paths::normalize_path;
 use crate::query::memory_at;
 use crate::workspace::git;
 use crate::{EngineError, Result};
 
+/// Tests de la clase que se envían, y líneas de cada uno.
+const MAX_TESTS: usize = 80;
+const TEST_LINES: usize = 15;
 /// Métodos que se resumen; del resto solo se dice que existen.
 const MAX_MEMBERS: usize = 30;
 /// Líneas de un método que se envían para resumirlo.
@@ -68,7 +71,8 @@ en Huella (lo que se pidió y lo que explicó el agente que la escribió) y lo q
 - `state`: el estado que guarda o cambia, y cuándo.
 - `rules`: las reglas de negocio de toda la clase, sin repetir: `kind`, `when`, `then`, `why` (por qué existe, \
   según la historia o deducido, diciéndolo), `method`, `lines` y `tests` (nombres de los tests que la comprueban \
-  de verdad; vacío si ninguno). Es la parte más importante: sé exhaustivo y concreto.
+  de verdad; vacío si ninguno). Es la parte más importante: sé exhaustivo y concreto. Incluye todas las reglas \
+  de los resúmenes de los métodos, tengan test o no: una regla sin test es justo lo que más interesa ver.
 - `flows`: los recorridos que importan (normalmente uno por caso de uso principal): `title`, `method` y `steps` \
   (frases cortas en orden, nombrando las llamadas).
 - `why`: por qué es así: decisiones y peticiones de su historia, cada una con `text` y `source` (history si \
@@ -89,7 +93,8 @@ pub struct UnderstandSymbol<'a> {
     pub symbol: &'a str,
     /// El contenido revisado del fichero, si no es el del disco.
     pub reviewed: Option<&'a str>,
-    /// Rehacer la guía aunque el código no haya cambiado.
+    /// Rehacer la guía aunque el código no haya cambiado. Los resúmenes de los
+    /// métodos se reutilizan igual: solo dependen de su código.
     pub refresh: bool,
 }
 
@@ -158,7 +163,7 @@ pub fn understand_symbol(
     let skipped = members.len().saturating_sub(MAX_MEMBERS);
     members.truncate(MAX_MEMBERS);
     let parts: Vec<&Symbol> = if members.is_empty() { vec![&target] } else { members.iter().collect() };
-    let summaries = summarize_all(store, model, path, &source, &parts, refresh, progress)?;
+    let summaries = summarize_all(store, model, path, &source, &parts, progress)?;
 
     // 2. La clase entera.
     let (request, tests) = guide_request(store, sources, path, &source, &target, &members, &summaries, skipped)?;
@@ -178,6 +183,7 @@ pub fn understand_symbol(
             }
         }
     }
+    complete_rules(&mut content, &summaries);
     content["tests_found"] = json!(
         tests.iter().map(|t| json!({"name": t.name, "path": t.display_path, "line": t.start_line})).collect::<Vec<_>>()
     );
@@ -249,7 +255,8 @@ fn guide_request(
     names.retain(|name| name.len() > 2 && crate::definition::is_identifier(name));
     names.dedup();
     names.truncate(10);
-    let tests = tests_naming(path, &names);
+    // Todos los de la clase, cortos: con pocos, las reglas parecen sin test aunque lo tengan.
+    let tests = tests_naming(path, &names, TestBudget { tests: MAX_TESTS, lines: TEST_LINES });
     request.push_str("## Tests que la nombran\n\n");
     if tests.is_empty() {
         request.push_str("No se encontró ningún test que la nombre.\n\n");
@@ -311,18 +318,13 @@ fn summarize_all(
     path: &Path,
     source: &str,
     parts: &[&Symbol],
-    refresh: bool,
     progress: &dyn Fn(usize, usize),
 ) -> Result<Vec<Summary>> {
     let key = normalize_path(path, None);
     let mut summaries: Vec<Option<String>> = Vec::with_capacity(parts.len());
     for part in parts {
-        let saved = if refresh {
-            None
-        } else {
-            store.code_explanation_for(&key, "method", &code_hash(&code_of(source, part)))?.map(|saved| saved.content)
-        };
-        summaries.push(saved);
+        let saved = store.code_explanation_for(&key, "method", &code_hash(&code_of(source, part)))?;
+        summaries.push(saved.map(|saved| saved.content));
     }
     let pending: Vec<usize> = (0..parts.len()).filter(|&index| summaries[index].is_none()).collect();
     let mut done = parts.len() - pending.len();
@@ -453,6 +455,54 @@ fn members_of(symbols: &[Symbol], target: &Symbol) -> Vec<Symbol> {
     let callable = |s: &Symbol| matches!(s.kind, SymbolKind::Method | SymbolKind::Function);
     let candidates: Vec<&Symbol> = symbols.iter().filter(|s| callable(s) && inside(s, target)).collect();
     candidates.iter().filter(|s| !candidates.iter().any(|outer| inside(s, outer))).map(|s| (*s).clone()).collect()
+}
+
+/// Métodos más cortos no aportan reglas propias al completar la guía.
+const MIN_RULE_METHOD_LINES: usize = 6;
+
+/// Añade a la guía las reglas de los resúmenes de los métodos que la síntesis
+/// no cubre (ninguna de sus reglas toca esas líneas): el modelo tiende a quedarse
+/// con las que tienen test, y las que no lo tienen son las que más importan.
+fn complete_rules(content: &mut Value, summaries: &[Summary]) {
+    let mut covered: Vec<(u64, u64)> = content["rules"]
+        .as_array()
+        .map(|rules| {
+            rules.iter().filter_map(|rule| Some((rule["lines"][0].as_u64()?, rule["lines"][1].as_u64()?))).collect()
+        })
+        .unwrap_or_default();
+    let mut missing = Vec::new();
+    for (name, (start, end), summary) in summaries {
+        // Un método de pocas líneas no tiene reglas que contar: delega o construye.
+        if end - start + 1 < MIN_RULE_METHOD_LINES {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(summary) else { continue };
+        for rule in parsed["rules"].as_array().into_iter().flatten() {
+            let (Some(first), Some(last)) = (rule["lines"][0].as_u64(), rule["lines"][1].as_u64()) else { continue };
+            let inside = usize::try_from(first).is_ok_and(|first| first >= *start)
+                && usize::try_from(last).is_ok_and(|last| last <= *end);
+            let when = rule["when"].as_str().unwrap_or_default().to_lowercase();
+            let filler = rule["kind"] == "other"
+                || ["por defecto", "estándar", "sin condiciones"].iter().any(|w| when.contains(w));
+            if !inside || filler || covered.iter().any(|&(a, b)| first <= b && a <= last) {
+                continue;
+            }
+            covered.push((first, last));
+            missing.push(json!({
+                "kind": rule["kind"].as_str().unwrap_or("other"),
+                "when": rule["when"].as_str().unwrap_or_default(),
+                "then": rule["then"].as_str().unwrap_or_default(),
+                "why": "",
+                "method": name.rsplit(['.', ':']).next().unwrap_or(name),
+                "lines": [first, last],
+                "tests": [],
+            }));
+        }
+    }
+    if let Some(rules) = content["rules"].as_array_mut() {
+        rules.extend(missing);
+        rules.sort_by_key(|rule| rule["lines"][0].as_u64().unwrap_or(u64::MAX));
+    }
 }
 
 /// La clase sin el cuerpo de sus métodos: campos, constructor y firmas.
@@ -660,7 +710,14 @@ mod tests {
                 // Uno por cada método numerado («## 1 · `…`»).
                 let count = user.matches("\n## ").count() + usize::from(user.starts_with("## "));
                 let methods: Vec<Value> = (1..=count)
-                    .map(|index| json!({"index": index, "purpose": "Reserva.", "inputs": "", "returns": "", "effects": [], "calls": [], "rules": []}))
+                    .map(|index| {
+                        let rules = if user.contains("liberar") && index == count {
+                            json!([{"kind": "calculation", "when": "siempre", "then": "suma", "lines": [7, 7]}])
+                        } else {
+                            json!([])
+                        };
+                        json!({"index": index, "purpose": "Reserva.", "inputs": "", "returns": "", "effects": [], "calls": [], "rules": rules})
+                    })
                     .collect();
                 json!({ "methods": methods }).to_string()
             } else {
@@ -684,7 +741,11 @@ export class Pedidos {
     return stock - cantidad
   }
   liberar(cantidad: number, stock: number) {
-    return stock + cantidad
+    if (cantidad < 0) {
+      return stock
+    }
+    const total = stock + cantidad
+    return total
   }
 }
 ";
@@ -718,7 +779,10 @@ export class Pedidos {
             understand_symbol(&store, None, &model, ask, &|done, total| seen.borrow_mut().push((done, total))).unwrap();
         assert_eq!(guide.content["purpose"], "Gestiona las reservas de stock.");
         assert_eq!(guide.content["map"][0]["lines"], json!([2, 6]));
-        assert_eq!(guide.content["rules"][0]["lines"], Value::Null, "líneas fuera de la clase se quitan");
+        let rules = guide.content["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2, "la regla que la síntesis olvidó se añade: {rules:?}");
+        assert_eq!((rules[0]["lines"].clone(), rules[0]["method"].clone()), (json!([7, 7]), json!("liberar")));
+        assert_eq!(rules[1]["lines"], Value::Null, "líneas fuera de la clase se quitan");
         assert_eq!(guide.content["methods"].as_array().unwrap().len(), 2);
         assert_eq!(*seen.borrow(), vec![(0, 2), (2, 2)]);
         let calls = model.calls.borrow().clone();
