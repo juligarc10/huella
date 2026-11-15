@@ -79,6 +79,8 @@ pub(crate) fn view(args: &ModelArgs, probing: &Probing) -> Value {
             "value": config.review.language,
             "options": crate::language::LANGUAGES.iter().map(|(code, label, _)| json!({"code": code, "label": label})).collect::<Vec<_>>(),
         },
+        "view": {"value": config.review.view},
+        "narrative_code": {"value": config.review.narrative_code.unwrap_or(false)},
         "key": key_view(provider),
         "problem": crate::model_problem(args),
         "probe": probing.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -150,6 +152,16 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
                 }
                 Some(_) => bail!("idioma desconocido"),
             },
+            "view" => match plain(value, "la vista", 20)?.as_deref() {
+                None | Some("last") => None,
+                Some(view @ ("steps" | "presentation" | "walk")) => Some(view.into()),
+                Some(_) => bail!("vista desconocida"),
+            },
+            "narrative_code" => match value {
+                Value::Null | Value::Bool(false) => None,
+                Value::Bool(true) => Some(true.into()),
+                _ => bail!("narrative_code debe ser sí o no"),
+            },
             "context_tokens" if value.is_null() => None,
             "context_tokens" => {
                 let tokens = value.as_i64().filter(|tokens| (1024..=10_000_000).contains(tokens));
@@ -163,6 +175,8 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
             "model" => ("llm", "model"),
             "thinking" => ("llm", "thinking"),
             "language" => ("review", "language"),
+            "view" => ("review", "view"),
+            "narrative_code" => ("review", "narrative_code"),
             _ => ("llm", "context_tokens"),
         };
         edits.push((table, key, edit));
@@ -277,6 +291,13 @@ mod tests {
             assert!(std::fs::read_to_string(path).unwrap().contains("[review]\nlanguage = \"en\""));
             save_in(path, r#"{"language": "auto"}"#).unwrap();
             assert_eq!(config::get().review.language, None, "automático quita el campo");
+            save_in(path, r#"{"view": "walk", "narrative_code": true}"#).unwrap();
+            assert_eq!(config::get().review.view.as_deref(), Some("walk"));
+            assert!(crate::language::narrative_rule().is_some());
+            save_in(path, r#"{"view": "last", "narrative_code": false}"#).unwrap();
+            assert_eq!(config::get().review.view, None, "la última usada quita el campo");
+            assert!(crate::language::narrative_rule().is_none());
+            assert!(save_in(path, r#"{"view": "otra"}"#).is_err());
         });
     }
 

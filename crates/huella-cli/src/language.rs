@@ -48,6 +48,17 @@ pub(crate) fn agent_rule() -> Option<String> {
     })
 }
 
+/// Lo que se añade a las instrucciones del agente si se pide código que se lea
+/// de arriba abajo (`[review] narrative_code`): así el recorrido guiado sale
+/// natural, porque el código ya cuenta la historia en orden.
+pub(crate) fn narrative_rule() -> Option<&'static str> {
+    config::get().review.narrative_code.unwrap_or(false).then_some(
+        " Escribe el código para que se lea de arriba abajo como una explicación: el método público cuenta los \
+         pasos con nombres del dominio, los detalles van debajo en el orden en que se llaman, y solo hay un \
+         comentario donde se decide algo que no es obvio.",
+    )
+}
+
 /// Un modelo que escribe en un idioma fijo.
 struct InLanguage {
     inner: Box<dyn JsonModel>,

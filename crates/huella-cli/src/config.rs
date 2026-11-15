@@ -53,6 +53,11 @@ pub struct Embed {
 pub struct Review {
     /// Idioma de lo que escribe el modelo (`es`, `en`…); sin definir, el de la petición.
     pub language: Option<String>,
+    /// Vista con la que se abre una revisión (`steps`, `presentation` o `walk`);
+    /// sin definir, la última que se usó.
+    pub view: Option<String>,
+    /// Pedir al agente que escriba el código para leerse de arriba abajo.
+    pub narrative_code: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]

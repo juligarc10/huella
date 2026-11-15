@@ -57,7 +57,11 @@ pub fn handle(context: &mut Context, message: &Value) -> Option<Value> {
             "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "huella", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": format!("{INSTRUCTIONS}{}", crate::language::agent_rule().unwrap_or_default()),
+            "instructions": format!(
+                "{INSTRUCTIONS}{}{}",
+                crate::language::agent_rule().unwrap_or_default(),
+                crate::language::narrative_rule().unwrap_or_default()
+            ),
         }),
         "ping" => json!({}),
         "tools/list" => json!({"tools": tools()}),
