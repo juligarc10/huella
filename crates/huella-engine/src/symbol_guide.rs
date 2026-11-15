@@ -197,6 +197,15 @@ pub fn understand_symbol(
                 item["lines"] = match (list, ranges.as_slice()) {
                     // Un caso de uso es su método entero: sus líneas se saben sin el modelo.
                     ("map", [(start, end)]) => json!([start, end]),
+                    // Sobrecargas: la que contiene lo que dijo el modelo o, si no, la más larga.
+                    ("map", [_, _, ..]) => {
+                        let said = lines[0].as_u64().and_then(|n| usize::try_from(n).ok());
+                        let chosen = ranges
+                            .iter()
+                            .find(|&&(start, end)| said.is_some_and(|line| (start..=end).contains(&line)))
+                            .or_else(|| ranges.iter().max_by_key(|&&(start, end)| end - start));
+                        chosen.map_or(Value::Null, |&(start, end)| json!([start, end]))
+                    }
                     _ if inside(&lines) => lines,
                     _ => Value::Null,
                 };
