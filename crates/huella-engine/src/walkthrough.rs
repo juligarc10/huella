@@ -111,6 +111,15 @@ pub struct Stop {
     /// Cómo se llega aquí: se calcula del código, no lo cuenta el modelo.
     #[serde(default)]
     pub hop: Option<Hop>,
+    /// La añadió Huella para unir el camino: quien contó el recorrido se la saltó.
+    #[serde(default)]
+    pub bridge: bool,
+    /// Fichero y símbolo del paso, para volver a encontrarlo si la lista de pasos
+    /// cambia (la sesión siguió editando): el número de paso solo vale mientras tanto.
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 /// Cómo se llega a una parada desde las anteriores.
@@ -190,10 +199,18 @@ pub fn stored(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> Resul
     let Ok(mut walkthrough) = serde_json::from_str::<Walkthrough>(&saved.content) else { return Ok(None) };
     // Si el cambio avanzó, los números de paso pueden apuntar a otro código: no se enseña como bueno.
     let stale = saved.input_hash != change_hash(review, plan);
-    let fits = walkthrough.stops.iter().all(|stop| stop.step < plan.len());
+    // Si el cambio siguió, los números de paso ya no valen: cada parada se busca
+    // por su fichero y su símbolo. Uno guardado sin ellos solo vale si el cambio es el mismo.
+    let anchored = walkthrough.stops.iter().all(|stop| stop.file.is_some() && stop.symbol.is_some());
+    let fits = if anchored {
+        reanchor(review, plan, &mut walkthrough)
+    } else {
+        !stale && walkthrough.stops.iter().all(|stop| stop.step < plan.len())
+    };
     if fits {
         // Los recorridos guardados antes de calcular los saltos también los tienen.
-        mark_hops(plan, &mut walkthrough.stops);
+        bridge_gaps(plan, &mut walkthrough.stops);
+        anchor_stops(review, plan, &mut walkthrough);
     }
     Ok(fits.then_some(StoredWalkthrough {
         walkthrough,
@@ -253,6 +270,8 @@ pub fn generate(
     let told = call(model, &system, &tell, &tell_schema())?;
     let walkthrough = assemble(plan, title, situation, &stops, &told);
 
+    let mut walkthrough = walkthrough;
+    anchor_stops(review, plan, &mut walkthrough);
     store.save_walkthrough(
         &review.session_id,
         &model.model_id(),
@@ -302,9 +321,12 @@ fn assemble(plan: &[FlowStep], title: String, situation: String, order: &[usize]
             values,
             gap: None,
             hop: None,
+            bridge: false,
+            file: None,
+            symbol: None,
         });
     }
-    mark_hops(plan, &mut stops);
+    bridge_gaps(plan, &mut stops);
     let forks = told["forks"]
         .as_array()
         .into_iter()
@@ -450,6 +472,98 @@ const DECLARATIONS: [&str; 14] = [
     "export ",
     "func ",
 ];
+
+/// Apunta en cada parada el fichero y el símbolo de su paso.
+fn anchor_stops(review: &SessionReview, plan: &[FlowStep], walkthrough: &mut Walkthrough) {
+    for stop in &mut walkthrough.stops {
+        let step = &plan[stop.step];
+        stop.file = Some(review.files[step.file].path.clone());
+        stop.symbol = step.symbol.as_ref().map(|symbol| symbol.qualified_name.clone());
+    }
+}
+
+/// Vuelve a encontrar el paso de cada parada por su fichero y su símbolo, y con
+/// él los de las bifurcaciones y las preguntas. Las que ya no están se quitan.
+/// `false` si no quedan al menos dos paradas.
+fn reanchor(review: &SessionReview, plan: &[FlowStep], walkthrough: &mut Walkthrough) -> bool {
+    let mut moved: Vec<(usize, usize)> = Vec::new();
+    walkthrough.stops.retain_mut(|stop| {
+        let (Some(file), Some(symbol)) = (&stop.file, &stop.symbol) else { return false };
+        let Some(step) = step_for(review, plan, file, symbol) else { return false };
+        moved.push((stop.step, step));
+        stop.step = step;
+        true
+    });
+    let new_step = |old: usize| moved.iter().find(|(before, _)| *before == old).map(|(_, now)| *now);
+    walkthrough.forks.retain_mut(|fork| new_step(fork.step).map(|step| fork.step = step).is_some());
+    for check in &mut walkthrough.checks {
+        check.step = check.step.and_then(new_step);
+    }
+    walkthrough.outside = (0..plan.len())
+        .filter(|&index| plan[index].role == StepRole::Flow && !walkthrough.stops.iter().any(|stop| stop.step == index))
+        .collect();
+    walkthrough.stops.len() >= MIN_STOPS
+}
+
+/// Paradas intermedias que se pueden añadir, como mucho, para unir un recorrido.
+const MAX_BRIDGES: usize = 4;
+
+/// Calcula los saltos y, donde una parada no tiene llamada visible, busca entre
+/// los pasos del cambio el que la llama y al que se llega desde una parada
+/// anterior, y lo añade como parada intermedia. No inventa nada: solo usa el
+/// código. Así un recorrido al que le falta un paso (lo que más se salta un
+/// modelo pequeño) vuelve a tener hilo.
+fn bridge_gaps(plan: &[FlowStep], stops: &mut Vec<Stop>) {
+    let short = |index: usize| {
+        plan[index]
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.rsplit(['.', ':']).next().unwrap_or(&symbol.qualified_name).to_owned())
+    };
+    let calls_step = |caller: usize, callee: usize| {
+        plan[caller].calls.contains(&callee)
+            || short(callee).is_some_and(|name| {
+                plan[caller].lines.iter().any(|line| match line {
+                    DiffLine::Added { text, .. } | DiffLine::Context(text) => calls(text, &name),
+                    DiffLine::Removed(_) => false,
+                })
+            })
+    };
+    for _ in 0..MAX_BRIDGES {
+        mark_hops(plan, stops);
+        let Some(position) = stops.iter().position(|stop| stop.hop.as_ref().is_some_and(|hop| hop.kind == "none"))
+        else {
+            return;
+        };
+        let target = stops[position].step;
+        let bridge = (0..plan.len()).find(|&candidate| {
+            plan[candidate].role == StepRole::Flow
+                && !stops.iter().any(|stop| stop.step == candidate)
+                && calls_step(candidate, target)
+                && stops[..position].iter().any(|before| calls_step(before.step, candidate))
+        });
+        let Some(bridge) = bridge else { return };
+        stops.insert(
+            position,
+            Stop {
+                step: bridge,
+                title: String::new(),
+                transition: String::new(),
+                arrives: String::new(),
+                does: String::new(),
+                leaves: String::new(),
+                why: String::new(),
+                values: Vec::new(),
+                gap: None,
+                hop: None,
+                bridge: true,
+                file: None,
+                symbol: None,
+            },
+        );
+    }
+    mark_hops(plan, stops);
+}
 
 /// ¿Llama esta línea a `name`? `x.name(`, `name(` o `new Name(`, pero no su
 /// declaración (`public X name(`, `fn name(`, `def name(`) ni un comentario.
@@ -676,9 +790,12 @@ pub fn declared(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> Res
                     .collect(),
                 gap: None,
                 hop: None,
+                bridge: false,
+                file: Some(stop.file.clone()),
+                symbol: Some(stop.symbol.clone()),
             })
             .collect();
-        mark_hops(plan, &mut stops);
+        bridge_gaps(plan, &mut stops);
         let forks = told
             .forks
             .iter()
@@ -999,8 +1116,111 @@ export function registrar(texto: string) {
         assert!(calls[1].contains("if (roll === 20)") && calls[1].contains("Un crítico"));
 
         let saved = stored(&store, &review, &plan).unwrap().unwrap();
-        assert_eq!(saved.walkthrough, walk);
+        assert_eq!(
+            saved.walkthrough.stops.iter().map(|s| s.step).collect::<Vec<_>>(),
+            walk.stops.iter().map(|s| s.step).collect::<Vec<_>>()
+        );
         assert!(!saved.stale);
+        assert_eq!(saved.walkthrough.stops[0].symbol.as_deref(), Some("atacar"), "cada parada guarda su símbolo");
+
+        // La sesión sigue y aparece un fichero antes: los números de paso cambian, las paradas no.
+        let before = FileEdit {
+            origin: EditOrigin {
+                agent: "t",
+                session_id: "s1".into(),
+                event_id: "e0".into(),
+                timestamp: None,
+                cwd: None,
+            },
+            path: PathBuf::from("/r/aaa.ts"),
+            kind: EditKind::Create,
+            before: None,
+            after: AfterState::Known("export function antes() { return 1 }\n".into()),
+            user_modified: false,
+            context: EditContext::default(),
+        };
+        let first = FileEdit {
+            origin: EditOrigin {
+                agent: "t",
+                session_id: "s1".into(),
+                event_id: "e".into(),
+                timestamp: None,
+                cwd: None,
+            },
+            path: PathBuf::from("/r/combate.ts"),
+            kind: EditKind::Create,
+            before: None,
+            after: AfterState::Known(CODE.into()),
+            user_modified: false,
+            context: EditContext::default(),
+        };
+        let grown = huella_review::build("s1", &[before, first], |e| e.path.display().to_string(), |_| None);
+        let grown_plan = huella_review::flow::plan(&grown);
+        let moved = stored(&store, &grown, &grown_plan).unwrap().unwrap();
+        assert!(moved.stale);
+        let names: Vec<&str> = moved
+            .walkthrough
+            .stops
+            .iter()
+            .map(|s| grown_plan[s.step].symbol.as_ref().unwrap().qualified_name.as_str())
+            .collect();
+        assert_eq!(names, ["atacar", "resolver", "registrar"], "cada parada sigue en su símbolo");
+    }
+
+    #[test]
+    fn a_missing_middle_step_is_bridged_from_the_code() {
+        // atacar → resolver → registrar, pero el modelo se salta resolver: Huella la añade.
+        const CHAIN: &str = "\
+export function atacar(roll: number) {
+  return resolver(roll)
+}
+export function resolver(roll: number) {
+  return registrar(roll === 20 ? 'critico' : 'normal')
+}
+export function registrar(texto: string) {
+  return texto
+}
+";
+        let edit = FileEdit {
+            origin: EditOrigin {
+                agent: "t",
+                session_id: "s1".into(),
+                event_id: "e".into(),
+                timestamp: None,
+                cwd: None,
+            },
+            path: PathBuf::from("/r/cadena.ts"),
+            kind: EditKind::Create,
+            before: None,
+            after: AfterState::Known(CHAIN.into()),
+            user_modified: false,
+            context: EditContext::default(),
+        };
+        let review = huella_review::build("s1", &[edit], |e| e.path.display().to_string(), |_| None);
+        let plan = huella_review::flow::plan(&review);
+        let at =
+            |name: &str| plan.iter().position(|s| s.symbol.as_ref().is_some_and(|s| s.qualified_name == name)).unwrap();
+        let stop = |step: usize| Stop {
+            step,
+            title: "x".into(),
+            transition: String::new(),
+            arrives: String::new(),
+            does: String::new(),
+            leaves: String::new(),
+            why: String::new(),
+            values: Vec::new(),
+            gap: None,
+            hop: None,
+            bridge: false,
+            file: None,
+            symbol: None,
+        };
+        let mut stops = vec![stop(at("atacar")), stop(at("registrar"))];
+        bridge_gaps(&plan, &mut stops);
+        let order: Vec<usize> = stops.iter().map(|stop| stop.step).collect();
+        assert_eq!(order, vec![at("atacar"), at("resolver"), at("registrar")]);
+        assert!(stops[1].bridge, "la intermedia la añadió Huella");
+        assert!(stops.iter().skip(1).all(|stop| stop.hop.as_ref().unwrap().kind == "direct"), "{stops:?}");
     }
 
     #[test]
