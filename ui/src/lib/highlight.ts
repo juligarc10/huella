@@ -1,11 +1,52 @@
-import { createCssVariablesTheme, createHighlighterCore, type HighlighterCore, type LanguageInput } from 'shiki/core'
+import { createHighlighterCore, type HighlighterCore, type LanguageInput, type ThemeRegistrationRaw } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
 
 /** Un trozo de línea con su color. */
 export type Token = { content: string; color?: string; italic: boolean }
 
 // Los colores son variables de CSS (--code-*): cambian con el tema sin volver a resaltar.
-const theme = createCssVariablesTheme({ name: 'huella', variablePrefix: '--code-', fontStyle: true })
+// Más categorías que el tema genérico de Shiki, para que un tipo no se confunda con
+// la variable que lo usa (`StartRequest request`), ni una llamada con un campo.
+const color = (name: string) => `var(--code-${name})`
+const rule = (name: string, scope: string[], fontStyle?: string) => ({ scope, settings: { foreground: color(name), fontStyle } })
+const theme: ThemeRegistrationRaw = {
+  name: 'huella',
+  type: 'light',
+  colors: { 'editor.foreground': color('fg'), 'editor.background': 'transparent' },
+  settings: [
+    { settings: { foreground: color('fg'), background: 'transparent' } },
+    rule('punctuation', ['punctuation', 'meta.brace', 'keyword.operator', 'punctuation.separator', 'punctuation.terminator']),
+    rule('variable', ['variable', 'variable.other', 'variable.parameter', 'variable.other.readwrite', 'variable.other.definition']),
+    rule('keyword', [
+      'keyword', 'keyword.control', 'keyword.operator.new', 'keyword.operator.expression', 'keyword.other', 'storage',
+      'storage.type', 'storage.modifier', 'storage.type.primitive', 'variable.language', 'entity.name.tag', 'constant.language.null',
+    ]),
+    rule('type', [
+      'entity.name.type', 'entity.name.class', 'entity.name.interface', 'entity.name.enum', 'entity.name.struct', 'entity.name.namespace',
+      'entity.other.inherited-class', 'support.class', 'support.type', 'storage.type.java', 'storage.type.generic.java',
+      'storage.type.object.array.java', 'storage.type.boolean.java', 'storage.type.number.java', 'entity.name.type.module',
+      'meta.type.parameters entity.name.type', 'support.type.primitive',
+    ]),
+    rule('function', [
+      'entity.name.function', 'support.function', 'meta.function-call entity.name.function', 'entity.name.function.member',
+      'meta.method-call entity.name.function', 'variable.function',
+    ]),
+    rule('property', [
+      'variable.other.property', 'variable.other.object.property', 'support.variable.property', 'meta.property-name',
+      'variable.other.member', 'entity.other.attribute-name', 'meta.object-literal.key', 'variable.object.property',
+    ]),
+    rule('constant', [
+      'constant', 'constant.numeric', 'constant.language', 'constant.character', 'variable.other.constant',
+      'variable.other.enummember', 'constant.other', 'support.constant',
+    ]),
+    rule('string', ['string', 'string.quoted', 'punctuation.definition.string', 'string.template', 'markup.inline.raw']),
+    rule('annotation', [
+      'storage.type.annotation', 'punctuation.definition.annotation', 'meta.declaration.annotation', 'meta.decorator',
+      'entity.name.function.decorator', 'punctuation.decorator', 'meta.annotation', 'entity.name.type.annotation',
+    ]),
+    rule('comment', ['comment', 'punctuation.definition.comment', 'comment.block.documentation'], 'italic'),
+  ],
+}
 
 // Cada lenguaje se carga cuando hace falta: son pesados y una revisión usa pocos.
 const languages: Record<string, { name: string; load: () => LanguageInput }> = {
