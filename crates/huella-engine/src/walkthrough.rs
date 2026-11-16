@@ -21,6 +21,7 @@ use huella_store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::blocks::StoryBlock;
 use crate::storyline::clip_line;
 use crate::{EngineError, Result};
 
@@ -64,6 +65,13 @@ Para cada parada (`step` es su número):
 `forks`: de 0 a 4 bifurcaciones que importan del camino: `after_step` (la parada donde se decide), `condition` \
 (qué tendría que ser distinto) y `outcome` (qué pasaría entonces y por dónde seguiría).
 
+`terms`: de 0 a 6 términos del dominio o del código que hay que conocer para seguir el caso, con su significado aquí.
+
+`checks`: de 2 a 4 preguntas para comprobar que se ha entendido el caso, con su respuesta y `step` (la parada donde \
+se ve). Que obliguen a entender, no a recordar un nombre.
+
+{BLOCKS}
+
 No inventes llamadas ni valores que el código no permita. Escribe en el idioma de lo que se pidió.";
 
 /// Lo que se le cuenta al modelo además de los pasos.
@@ -97,6 +105,39 @@ pub struct Stop {
     /// Si no se ve una llamada que traiga aquí desde las paradas anteriores, por qué.
     #[serde(default)]
     pub gap: Option<String>,
+    /// Cómo se llega aquí: se calcula del código, no lo cuenta el modelo.
+    #[serde(default)]
+    pub hop: Option<Hop>,
+}
+
+/// Cómo se llega a una parada desde las anteriores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hop {
+    /// `direct`: la parada anterior la llama; `back`: la anterior terminó y el
+    /// control volvió a una parada de antes, que la llama; `none`: no se ve.
+    pub kind: String,
+    /// La parada (su posición en el recorrido) desde la que se llama.
+    pub from: Option<usize>,
+    /// La línea de esa parada (índice en las líneas de su paso) con la llamada.
+    pub line: Option<usize>,
+    /// El texto de esa línea.
+    pub text: String,
+}
+
+/// Un término que hay que conocer para seguir el caso.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Term {
+    pub term: String,
+    pub meaning: String,
+}
+
+/// Una pregunta para comprobar que se ha entendido, con la parada donde se ve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    pub question: String,
+    pub answer: String,
+    /// Índice del paso en el plan.
+    pub step: Option<usize>,
 }
 
 /// Lo que pasaría si el caso fuera otro.
@@ -117,6 +158,13 @@ pub struct Walkthrough {
     pub forks: Vec<Fork>,
     /// Pasos de código que el recorrido no toca: el apéndice.
     pub outside: Vec<usize>,
+    /// Esquemas o tablas del caso, si aportan (los mismos de la presentación).
+    #[serde(default)]
+    pub blocks: Vec<StoryBlock>,
+    #[serde(default)]
+    pub terms: Vec<Term>,
+    #[serde(default)]
+    pub checks: Vec<Check>,
 }
 
 /// Un recorrido guardado, con si el cambio ha cambiado desde entonces.
@@ -134,10 +182,14 @@ pub struct StoredWalkthrough {
 /// Si falla la base de datos.
 pub fn stored(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> Result<Option<StoredWalkthrough>> {
     let Some(saved) = store.walkthrough(&review.session_id)? else { return Ok(None) };
-    let Ok(walkthrough) = serde_json::from_str::<Walkthrough>(&saved.content) else { return Ok(None) };
+    let Ok(mut walkthrough) = serde_json::from_str::<Walkthrough>(&saved.content) else { return Ok(None) };
     // Si el cambio avanzó, los números de paso pueden apuntar a otro código: no se enseña como bueno.
     let stale = saved.input_hash != change_hash(review, plan);
     let fits = walkthrough.stops.iter().all(|stop| stop.step < plan.len());
+    if fits {
+        // Los recorridos guardados antes de calcular los saltos también los tienen.
+        mark_hops(plan, &mut walkthrough.stops);
+    }
     Ok(fits.then_some(StoredWalkthrough { walkthrough, model: saved.model, recorded_at: saved.recorded_at, stale }))
 }
 
@@ -186,7 +238,8 @@ pub fn generate(
 
     // 2. Cada parada contada, con el código solo de esas paradas.
     let tell = tell_request(review, plan, input, &title, &situation, &stops, budget);
-    let told = call(model, TELL_SYSTEM, &tell, &tell_schema())?;
+    let system = TELL_SYSTEM.replace("{BLOCKS}", &crate::blocks::guide());
+    let told = call(model, &system, &tell, &tell_schema())?;
     let walkthrough = assemble(plan, title, situation, &stops, &told);
 
     store.save_walkthrough(
@@ -237,9 +290,10 @@ fn assemble(plan: &[FlowStep], title: String, situation: String, order: &[usize]
             why: text(stop, "why"),
             values,
             gap: None,
+            hop: None,
         });
     }
-    mark_gaps(plan, &mut stops);
+    mark_hops(plan, &mut stops);
     let forks = told["forks"]
         .as_array()
         .into_iter()
@@ -258,7 +312,32 @@ fn assemble(plan: &[FlowStep], title: String, situation: String, order: &[usize]
     let outside = (0..plan.len())
         .filter(|&index| plan[index].role == StepRole::Flow && !stops.iter().any(|stop| stop.step == index))
         .collect();
-    Walkthrough { title, situation, stops, forks, outside }
+    let blocks: Vec<StoryBlock> = serde_json::from_value(told["blocks"].clone()).unwrap_or_default();
+    let blocks = crate::blocks::sanitize(&blocks).into_iter().take(2).collect();
+    let terms = told["terms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|term| Term { term: text(term, "term"), meaning: text(term, "meaning") })
+        .filter(|term| !term.term.is_empty() && !term.meaning.is_empty())
+        .take(6)
+        .collect();
+    let checks = told["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|check| Check {
+            question: text(check, "question"),
+            answer: text(check, "answer"),
+            step: check["step"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok()?.checked_sub(1))
+                .filter(|step| stops.iter().any(|stop| stop.step == *step)),
+        })
+        .filter(|check| !check.question.is_empty() && !check.answer.is_empty())
+        .take(4)
+        .collect();
+    Walkthrough { title, situation, stops, forks, outside, blocks, terms, checks }
 }
 
 /// La línea del paso que cita `quote`: igual, sin espacios de los lados, o que
@@ -284,28 +363,109 @@ fn line_of(step: &FlowStep, quote: &str) -> Option<String> {
     contains
 }
 
-/// Marca las paradas a las que no se ve llegar: ninguna parada anterior las
-/// llama ni son llamadas por la anterior (el camino de vuelta de una llamada).
-fn mark_gaps(plan: &[FlowStep], stops: &mut [Stop]) {
+/// Cómo se llega a cada parada: la línea de una parada anterior que la llama
+/// (la más cercana), o, si el texto no la muestra, el grafo de llamadas. Si la
+/// llama la anterior, el salto es directo; si la llama una de antes, la
+/// anterior ya terminó y el control volvió allí. Si nada la llama, se avisa.
+fn mark_hops(plan: &[FlowStep], stops: &mut [Stop]) {
     let name = |index: usize| {
         plan[index]
             .symbol
             .as_ref()
             .map_or_else(|| format!("el paso {}", index + 1), |symbol| format!("`{}`", symbol.qualified_name))
     };
-    for position in 1..stops.len() {
-        let here = stops[position].step;
-        let previous = stops[position - 1].step;
-        let reached = stops[..position].iter().any(|before| plan[before.step].calls.contains(&here))
-            || plan[here].calls.contains(&previous);
-        if !reached {
-            stops[position].gap = Some(format!(
-                "No se ve en el código que {} lleve a {}: el salto lo cuenta el modelo, compruébalo.",
-                name(previous),
-                name(here)
-            ));
+    for position in 0..stops.len() {
+        if position == 0 {
+            stops[0].hop = None;
+            stops[0].gap = None;
+            continue;
         }
+        let here = stops[position].step;
+        let short = plan[here]
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.rsplit(['.', ':']).next().unwrap_or(&symbol.qualified_name).to_owned());
+        let by_text = short.as_deref().and_then(|wanted| {
+            (0..position).rev().find_map(|from| {
+                let lines = &plan[stops[from].step].lines;
+                lines.iter().enumerate().find_map(|(index, line)| match line {
+                    DiffLine::Added { text, .. } | DiffLine::Context(text) if calls(text, wanted) => {
+                        Some((from, Some(index), text.trim().to_owned()))
+                    }
+                    _ => None,
+                })
+            })
+        });
+        let by_graph = || {
+            (0..position)
+                .rev()
+                .find(|&from| plan[stops[from].step].calls.contains(&here))
+                .map(|from| (from, None, String::new()))
+        };
+        let hop = match by_text.or_else(by_graph) {
+            Some((from, line, text)) => Hop {
+                kind: if from + 1 == position { "direct" } else { "back" }.to_owned(),
+                from: Some(from),
+                line,
+                text,
+            },
+            None => Hop { kind: "none".to_owned(), from: None, line: None, text: String::new() },
+        };
+        stops[position].gap = (hop.kind == "none").then(|| {
+            format!(
+                "No se ve en el código que {} lleve a {}: el salto lo cuenta el modelo, compruébalo.",
+                name(stops[position - 1].step),
+                name(here)
+            )
+        });
+        stops[position].hop = Some(hop);
     }
+}
+
+/// Lo que empieza una declaración, no una llamada.
+const DECLARATIONS: [&str; 14] = [
+    "public ",
+    "private ",
+    "protected ",
+    "static ",
+    "final ",
+    "abstract ",
+    "override ",
+    "fn ",
+    "pub ",
+    "def ",
+    "function ",
+    "async ",
+    "export ",
+    "func ",
+];
+
+/// ¿Llama esta línea a `name`? `x.name(`, `name(` o `new Name(`, pero no su
+/// declaración (`public X name(`, `fn name(`, `def name(`) ni un comentario.
+fn calls(line: &str, name: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('@')
+        || DECLARATIONS.iter().any(|keyword| trimmed.starts_with(keyword))
+    {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while let Some(found) = line[start..].find(name) {
+        let at = start + found;
+        let end = at + name.len();
+        let before_ok = at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let after = line[end..].trim_start();
+        if before_ok && after.starts_with('(') {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 /// Lo que define el cambio: si cambia, el recorrido puede no valer.
@@ -446,8 +606,21 @@ fn tell_schema() -> Value {
                 "required": ["after_step", "condition", "outcome"],
                 "additionalProperties": false
             }},
+            "terms": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"term": text(), "meaning": text()},
+                "required": ["term", "meaning"],
+                "additionalProperties": false
+            }},
+            "checks": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"question": text(), "answer": text(), "step": {"type": "integer"}},
+                "required": ["question", "answer", "step"],
+                "additionalProperties": false
+            }},
+            "blocks": crate::blocks::output_schema(),
         },
-        "required": ["stops", "forks"],
+        "required": ["stops", "forks", "terms", "checks", "blocks"],
         "additionalProperties": false
     })
 }
@@ -556,7 +729,13 @@ export function registrar(texto: string) {
         assert_eq!(walk.stops[0].values.len(), 1, "solo los valores que citan una línea de verdad");
         assert_eq!(walk.stops[1].values[0].quote, "if (roll === 20) return 'critico'");
         assert_eq!(walk.stops[1].gap, None, "atacar llama a resolver");
+        let hop = walk.stops[1].hop.clone().unwrap();
+        assert_eq!(
+            (hop.kind.as_str(), hop.from, hop.text.as_str()),
+            ("direct", Some(0), "const golpe = resolver(roll)")
+        );
         assert!(walk.stops[2].gap.as_deref().is_some_and(|gap| gap.contains("registrar")), "nadie llama a registrar");
+        assert_eq!(walk.stops[2].hop.as_ref().unwrap().kind, "none");
         assert_eq!(walk.forks.len(), 1);
         let calls = model.calls.borrow();
         assert!(calls[0].contains("llama a"), "el índice dice quién llama a quién: {}", calls[0]);
@@ -565,6 +744,17 @@ export function registrar(texto: string) {
         let saved = stored(&store, &review, &plan).unwrap().unwrap();
         assert_eq!(saved.walkthrough, walk);
         assert!(!saved.stale);
+    }
+
+    #[test]
+    fn a_call_is_not_its_declaration_nor_a_comment() {
+        assert!(calls("    StartedGame started = game.start(request.playerName());", "start"));
+        assert!(calls("return Optional.of(new Flavor(dto.title()));", "Flavor"));
+        assert!(calls("  if (resolver (roll)) {", "resolver"));
+        assert!(!calls("  public StartResponse start(@Valid StartRequest request) {", "start"));
+        assert!(!calls("  // luego start(x)", "start"));
+        assert!(!calls("  restart(x)", "start"), "otra palabra que acaba igual");
+        assert!(!calls("  pub fn start(&self) {", "start"));
     }
 
     #[test]
