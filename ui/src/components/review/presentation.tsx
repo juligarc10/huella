@@ -26,6 +26,8 @@ import { AuditPanel, CheckFirst, Checks, findingsFor, IdeaExplanation, IdeaWarni
 import { ProblemToSolution, Scenarios } from '@/components/review/problem'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
 import { LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
+import { UnderstandLinks } from '@/components/review/understand-links'
+import { PriorContext } from '@/components/review/prior-context'
 import { undoKey, verdictDot, verdicts } from '@/components/review/verdicts'
 import { Button } from '@/components/ui/button'
 import type { LineRange, ReviewResult, ReviewStep, RevisionPoint, Storyline, Verdict } from '@/lib/api'
@@ -951,8 +953,10 @@ function IdeaCode({
         <Mono className="text-sm font-semibold">{stepName(step)}</Mono>
         <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
         <LevelMark level={step.triage.level} />
+        <UnderstandLinks path={step.path} symbol={step.symbol} className="ml-auto text-xs text-muted-foreground" />
       </div>
       {explain && step.guide && <p className="text-sm leading-relaxed">{step.guide.explanation}</p>}
+      <PriorContext session={session} step={step.index} />
       <StepDiff
         step={step}
         comments={review.comments.filter((comment) => comment.step_key === step.key)}

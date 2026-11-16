@@ -41,7 +41,7 @@ pub fn render(
         let _ = writeln!(out, "\n**Anclaje:** {}\n", describe(&report.outcome));
         let text = match &edit.after {
             AfterState::Known(text) => Some(text.clone()),
-            AfterState::FragmentOnly(_) => read_current(&edit.path),
+            AfterState::FragmentOnly(_) | AfterState::Replaced { .. } => read_current(&edit.path),
         };
         if let Some(text) = text {
             let _ = writeln!(out, "```\n{}```", excerpt(&text, &report.changed_lines, 12));

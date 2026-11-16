@@ -49,6 +49,78 @@ pub enum AfterState {
     /// La transcripción no guardó el fichero original: solo se conoce el texto
     /// insertado, que habrá que localizar en el fichero actual del disco.
     FragmentOnly(String),
+    /// Como `FragmentOnly`, pero con los reemplazos exactos: quien conozca el
+    /// fichero de antes (la edición anterior de la sesión, o el disco deshaciendo
+    /// la sesión) puede reconstruir el de después.
+    Replaced { fragment: String, replacements: Vec<Replacement> },
+}
+
+impl AfterState {
+    /// El texto insertado, si no se conoce el fichero completo.
+    #[must_use]
+    pub fn fragment(&self) -> Option<&str> {
+        match self {
+            Self::Known(_) => None,
+            Self::FragmentOnly(fragment) | Self::Replaced { fragment, .. } => Some(fragment),
+        }
+    }
+}
+
+/// Un reemplazo de texto de una edición (`Edit`/`MultiEdit` de Claude Code).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replacement {
+    pub old: String,
+    pub new: String,
+    pub replace_all: bool,
+}
+
+impl Replacement {
+    /// Aplica los reemplazos en orden. `None` si alguno no encaja.
+    #[must_use]
+    pub fn apply(text: &str, replacements: &[Self]) -> Option<String> {
+        let mut text = text.to_owned();
+        for r in replacements {
+            if r.old.is_empty() {
+                // Claude Code permite crear un fichero vacío con old_string = "".
+                if !text.is_empty() {
+                    return None;
+                }
+                text.clone_from(&r.new);
+            } else if !text.contains(&r.old) {
+                return None;
+            } else if r.replace_all {
+                text = text.replace(&r.old, &r.new);
+            } else {
+                text = text.replacen(&r.old, &r.new, 1);
+            }
+        }
+        Some(text)
+    }
+
+    /// Deshace los reemplazos, del último al primero. Solo si es inequívoco: el
+    /// texto nuevo tiene que aparecer una vez (o, con `replace_all`, al menos una
+    /// y sin estar ya en el texto viejo). `None` si no se puede.
+    #[must_use]
+    pub fn undo(text: &str, replacements: &[Self]) -> Option<String> {
+        let mut text = text.to_owned();
+        for r in replacements.iter().rev() {
+            if r.new.is_empty() {
+                return None;
+            }
+            let count = text.matches(r.new.as_str()).count();
+            if r.replace_all {
+                if count == 0 || r.old.contains(&r.new) {
+                    return None;
+                }
+                text = text.replace(&r.new, &r.old);
+            } else if count == 1 {
+                text = text.replacen(&r.new, &r.old, 1);
+            } else {
+                return None;
+            }
+        }
+        Some(text)
+    }
 }
 
 /// Edición de un fichero, ya independiente del agente que la hizo.
@@ -203,4 +275,29 @@ pub struct Conversation {
     pub session_id: String,
     pub cwd: Option<PathBuf>,
     pub turns: Vec<Turn>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn replacement(old: &str, new: &str, replace_all: bool) -> Replacement {
+        Replacement { old: old.into(), new: new.into(), replace_all }
+    }
+
+    #[test]
+    fn replacements_apply_and_undo_only_when_unambiguous() {
+        let edits = [replacement("uno", "UNO", false), replacement("dos", "DOS", true)];
+        let after = Replacement::apply("uno dos dos", &edits).unwrap();
+        assert_eq!(after, "UNO DOS DOS");
+        assert_eq!(Replacement::undo(&after, &edits).as_deref(), Some("uno dos dos"));
+        assert_eq!(Replacement::apply("tres", &edits), None, "lo viejo no está");
+        assert_eq!(
+            Replacement::undo("UNO UNO DOS", &edits),
+            None,
+            "lo nuevo aparece dos veces: no se sabe cuál deshacer"
+        );
+        assert_eq!(Replacement::undo("x", &[replacement("x", "", false)]), None, "un borrado no se puede deshacer");
+        assert_eq!(Replacement::apply("", &[replacement("", "nuevo", false)]).as_deref(), Some("nuevo"));
+    }
 }

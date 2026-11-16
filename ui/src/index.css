@@ -134,32 +134,33 @@
 
 /* Colores del código, sobre la tarjeta y sobre los fondos de añadido y quitado. */
 :root {
-    --code-token-keyword: #7a2fb5;
-    --code-token-function: #1d5cb8;
-    --code-token-string: #0b6b3a;
-    --code-token-string-expression: #0b6b3a;
-    --code-token-constant: #9c4300;
-    --code-token-parameter: #80500a;
-    --code-token-comment: #5c6863;
-    --code-token-punctuation: #4a4f52;
-    --code-token-link: #1d5cb8;
-    --code-foreground: inherit;
-    --code-background: transparent;
+    /* Sintaxis: la paleta de GitHub (Primer), con contraste AA sobre el fondo y el verde del diff. */
+    --code-fg: inherit;
+    --code-variable: inherit;
+    --code-punctuation: #57606a;
+    --code-keyword: #cf222e;
+    --code-type: #953800;
+    --code-function: #8250df;
+    --code-property: #116329;
+    --code-constant: #0550ae;
+    --code-string: #0a3069;
+    --code-annotation: #7d4e00;
+    --code-comment: #6e7781;
     --diff-removed: #fbdfdc;
     --diff-added: #dcefeb;
     --diff-fresh: #fdeeb5;
 }
 
 .dark {
-    --code-token-keyword: #cda8ff;
-    --code-token-function: #8fbcff;
-    --code-token-string: #95dba6;
-    --code-token-string-expression: #95dba6;
-    --code-token-constant: #f3b98a;
-    --code-token-parameter: #ebcb94;
-    --code-token-comment: #94a19b;
-    --code-token-punctuation: #a9afa9;
-    --code-token-link: #8fbcff;
+    --code-punctuation: #8b949e;
+    --code-keyword: #ff7b72;
+    --code-type: #ffa657;
+    --code-function: #d2a8ff;
+    --code-property: #7ee787;
+    --code-constant: #79c0ff;
+    --code-string: #a5d6ff;
+    --code-annotation: #e3b341;
+    --code-comment: #8b949e;
     --diff-removed: #3a2221;
     --diff-added: #182e2b;
     --diff-fresh: #3b3212;

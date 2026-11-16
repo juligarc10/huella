@@ -62,7 +62,7 @@ impl JsonModel for Anthropic {
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().map_err(network)?;
         if status != 200 {
-            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+            return Err(ExtractError::Api { provider: PROVIDER, status, body: crate::error_body(&body) });
         }
         let value: Value = serde_json::from_str(&body).map_err(|error| ExtractError::BadResponse(error.to_string()))?;
         response_text(&value)

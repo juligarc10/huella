@@ -6,6 +6,10 @@ import {
   query,
   type BranchReview,
   type CodeQuestionsResult,
+  type CodeExplanationsResult,
+  type SymbolGuideResult,
+  type PriorContextResult,
+  type ExplainDepth,
   type ImpactResult,
   type InboxSession,
   type ReviewStatus,
@@ -120,7 +124,8 @@ export function useReview(session: string | undefined) {
         data?.covering?.running ||
         data?.guiding?.pending.length ||
         data?.storylining?.running ||
-        data?.auditing?.running
+        data?.auditing?.running ||
+        data?.walking?.running
         ? 1500
         : false
     },
@@ -178,6 +183,16 @@ export function useDeleteTask() {
 }
 
 /** Vuelve a traer el remoto y a construir la revisión. */
+/** Prepara el recorrido guiado de una revisión; llega con la revisión. */
+export function useWalkthrough(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { think?: boolean }) => api.post(`review/${encodeURIComponent(session)}/walkthrough`, ask),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
 /** Contrasta el guion del agente con el código; el resultado llega con la revisión. */
 export function useAudit(session: string) {
   const client = useQueryClient()
@@ -342,6 +357,83 @@ export function useCodeQuestions(path: string, session?: string) {
     queryKey: ['code-questions', path],
     queryFn: () => api.get<CodeQuestionsResult>(`code/questions${query({ path, session })}`),
     refetchInterval: (state) => (state.state.data?.pending.some((ask) => !ask.error) ? 1500 : false),
+  })
+}
+
+/** Las explicaciones a fondo del código de un fichero y las que se están escribiendo. */
+export function useCodeExplanations(path: string, session?: string) {
+  return useQuery({
+    queryKey: ['code-explanations', path],
+    queryFn: () => api.get<CodeExplanationsResult>(`code/explanations${query({ path, session })}`),
+    refetchInterval: (state) => (state.state.data?.pending.some((pending) => !pending.error) ? 1500 : false),
+  })
+}
+
+/** Lo que conviene conocer de antes para entender un paso; solo se busca si se pide. */
+export function usePriorContext(session: string, step: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ['prior-context', session, step],
+    queryFn: () => api.get<PriorContextResult>(`review/${encodeURIComponent(session)}/context${query({ step: String(step) })}`),
+    enabled,
+    staleTime: 5 * 60_000,
+  })
+}
+
+/** La guía de un símbolo y, si se está escribiendo, cuánto lleva. */
+export function useSymbolGuide(path: string | null, symbol: string | null) {
+  return useQuery({
+    queryKey: ['symbol-guide', path, symbol],
+    queryFn: () => api.get<SymbolGuideResult>(`symbol/guide${query({ path, symbol })}`),
+    enabled: Boolean(path && symbol),
+    refetchInterval: (state) => (state.state.data?.pending && !state.state.data.pending.error ? 1500 : false),
+  })
+}
+
+/** «Entender este símbolo»: escribe (o rehace) su guía. */
+export function useUnderstandSymbol(path: string, symbol: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { think?: boolean; refresh?: boolean }) => api.post('symbol/understand', { path, symbol, ...ask }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['symbol-guide', path, symbol] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+/** Olvida el error de una guía que falló. */
+export function useDismissGuide(path: string, symbol: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.get(`symbol/guide${query({ path, symbol, dismiss: '1' })}`),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['symbol-guide', path, symbol] }),
+  })
+}
+
+/** «Profundizar aquí»: pide el recorrido o las reglas de un trozo de código. */
+export function useExplainCode(path: string, session?: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ask: { quote: string; depth: ExplainDepth; start?: number; end?: number; think?: boolean; refresh?: boolean }) =>
+      api.post('code/explain', { path, session, ...ask }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['code-explanations', path] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useDeleteCodeExplanation(path: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.post(`code/explanations/${id}/delete`),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['code-explanations', path] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
+export function useDismissExplain(path: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (pending: { quote: string; depth: ExplainDepth }) => api.post('code/explain/dismiss', { path, ...pending }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['code-explanations', path] }),
+    onError: (error) => toast.error(error.message),
   })
 }
 

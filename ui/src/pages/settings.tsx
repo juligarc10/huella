@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleAlert, KeyRound, Languages, Loader2, PlugZap } from 'lucide-react'
+import { BookOpenText, CheckCircle2, CircleAlert, KeyRound, Languages, Loader2, PlugZap } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Mono, PageHeader, Panel } from '@/components/bits'
@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { Settings, SettingsChange } from '@/lib/api'
 import { useSaveKey, useSaveSettings, useSettings, useTestModel } from '@/lib/queries'
@@ -186,6 +187,8 @@ export function SettingsPage() {
 
       <LanguagePanel settings={settings} />
 
+      <ReadingPanel settings={settings} />
+
       <KeyPanel settings={settings} provider={form.provider} />
     </>
   )
@@ -214,6 +217,78 @@ function ProbeResult({ probe }: { probe: Settings['probe'] }) {
 const AUTO = 'auto'
 
 /** El idioma se guarda al elegirlo: no depende del resto del formulario. */
+/** Cómo se lee una revisión: la vista con la que se abre y si se pide al agente código que se lea en orden. */
+function ReadingPanel({ settings }: { settings: Settings }) {
+  const save = useSaveSettings()
+  return (
+    <Panel className="flex flex-col gap-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold">
+        <BookOpenText className="size-4 text-muted-foreground" aria-hidden="true" /> Cómo leer una revisión
+      </h2>
+      <Field label="Vista con la que se abre">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          value={settings.view.value ?? 'last'}
+          onValueChange={(value) => value && save.mutate({ view: value as 'last' | 'steps' | 'presentation' | 'walk' })}
+          aria-label="Vista con la que se abre una revisión"
+          className="flex-wrap justify-start"
+          disabled={save.isPending}
+        >
+          <ToggleGroupItem value="last" className="px-3">
+            La última que usé
+          </ToggleGroupItem>
+          <ToggleGroupItem value="presentation" className="px-3">
+            Presentación
+          </ToggleGroupItem>
+          <ToggleGroupItem value="steps" className="px-3">
+            Pasos
+          </ToggleGroupItem>
+          <ToggleGroupItem value="walk" className="px-3">
+            Recorrido
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <p className="text-xs text-muted-foreground">
+          La presentación cuenta el cambio por ideas; el recorrido sigue un caso por el código en el orden en que se ejecuta. Siempre
+          puedes cambiar de vista en la revisión. Una sesión sin guion se abre en pasos en vez de en presentación.
+        </p>
+      </Field>
+      <label className="flex cursor-pointer items-start gap-3">
+        <Switch
+          checked={settings.narrative_code.value}
+          onCheckedChange={(checked) => save.mutate({ narrative_code: checked })}
+          disabled={save.isPending}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Pedir al agente código que se lea de arriba abajo</span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            El método público cuenta los pasos con nombres del dominio, los detalles van debajo en el orden en que se llaman y solo hay
+            comentarios donde se decide algo que no es obvio. Así el recorrido sale natural. Se le pide al agente al empezar cada
+            sesión.
+          </span>
+        </span>
+      </label>
+      <label className="flex cursor-pointer items-start gap-3">
+        <Switch
+          checked={settings.agent_walkthrough.value}
+          onCheckedChange={(checked) => save.mutate({ agent_walkthrough: checked })}
+          disabled={save.isPending}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Que el agente cuente la lectura guiada al terminar</span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            El agente que hizo el cambio la cuenta con los valores reales de los tests que ejecutó, y Huella comprueba que cada
+            parada y cada valor existan en el código. Está lista al abrir la revisión, sin esperar al modelo revisor. Gasta algo
+            más del agente al terminar cada tarea.
+          </span>
+        </span>
+      </label>
+    </Panel>
+  )
+}
+
 function LanguagePanel({ settings }: { settings: Settings }) {
   const save = useSaveSettings()
   const { language } = settings

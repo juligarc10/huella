@@ -15,6 +15,7 @@ Quien revise tu código tiene que entenderlo antes de aceptarlo, y **no tiene co
 4. **Tocas algo sensible**: seguridad, autenticación, datos persistidos o migraciones, API pública, dependencias → `kind: "risk"`, con `review_hint` diciendo qué mirar.
 5. **Algo no se entiende solo al leerlo**: por qué existe este código, el algoritmo, el orden de las llamadas, una regla de negocio → `kind: "explanation"`.
 6. **Descubres un término del dominio o del código** que alguien de fuera no conocería («prorrateo», «pool de créditos», `BillingAccount`) → `kind: "concept"`, con `summary` diciendo qué significa, sin dar nada por sabido.
+7. **Escribes o cambias lógica de dominio** (un servicio, un agregado, un motor de reglas): cada regla de negocio que decide qué pasa → `kind: "explanation"`, con `lines` justo en la condición y `summary` en la forma «si X → Y, porque Z», con los valores límite exactos y el nombre del error o estado. Si la clase es nueva o cambia de responsabilidad, una entrada más en la clase (`symbol: "Clase"`): para qué existe y qué no le toca. Quien después quiera entender la clase entera parte de esto.
 
 ### Cuándo no
 
@@ -93,3 +94,7 @@ Qué lleva:
 La respuesta de `huella_storyline` dice qué le falta al guion. Complétalo y vuelve a llamarla con el guion completo, igual que si después cambias más código.
 
 Si no tienes las herramientas de Huella, no lo escribas en otro sitio: sigue con la tarea.
+
+## Si te lo piden: `huella_walkthrough`
+
+Cuando la persona lo pida, o las instrucciones de Huella digan que lo cuentes al terminar, cuenta además el caso principal como **recorrido guiado** con `huella_walkthrough`: un caso concreto y realista, con datos, seguido por el código en el orden en que **se ejecuta** (no en el que lo escribiste). En cada parada, `transition` dice cómo se llega desde la anterior: qué la llama, o que la anterior terminó y el control vuelve a una de antes. Si ejecutaste tests, usa sus valores reales y márcalos con `from_test`; lo que deduzcas leyendo el código, sin marcar. Huella comprueba que cada parada y cada línea existan y que a cada parada se llegue desde las anteriores: si te responde que algo no cuadra, arréglalo (normalmente falta una parada intermedia) y vuelve a llamarla con el recorrido completo.

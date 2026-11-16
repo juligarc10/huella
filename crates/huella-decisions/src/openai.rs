@@ -16,7 +16,7 @@ use crate::{ExtractError, JsonModel};
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const PROVIDER: &str = "openai-compatible";
 /// Margen de salida; sin él algunos servidores aplican un límite corto por defecto.
-const MAX_TOKENS: u32 = 8192;
+const MAX_TOKENS: u32 = 16_384;
 /// Silencio máximo entre dos fragmentos (incluye procesar el prompt).
 const MAX_SILENCE: Duration = Duration::from_secs(600);
 
@@ -114,7 +114,7 @@ impl OpenAiCompatible {
         let status = response.status().as_u16();
         if status != 200 {
             let body = response.body_mut().read_to_string().map_err(network)?;
-            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+            return Err(ExtractError::Api { provider: PROVIDER, status, body: crate::error_body(&body) });
         }
         collect_stream(BufReader::new(response.body_mut().as_reader()))
     }
@@ -187,7 +187,7 @@ impl OpenAiEmbeddings {
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().map_err(network)?;
         if status != 200 {
-            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+            return Err(ExtractError::Api { provider: PROVIDER, status, body: crate::error_body(&body) });
         }
         parse_embeddings(&body, texts.len())
     }

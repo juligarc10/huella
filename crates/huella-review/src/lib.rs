@@ -12,7 +12,7 @@ pub mod flow;
 
 use std::collections::BTreeMap;
 
-use huella_core::{AfterState, FileEdit};
+use huella_core::{AfterState, FileEdit, Replacement};
 use serde::Serialize;
 use similar::{DiffOp, DiffTag, TextDiff};
 
@@ -152,17 +152,32 @@ pub fn build(
         turns.iter().rev().find(|turn| &turn.prompt == prompt).map_or(0, |turn| turn.index)
     };
 
+    let bases = bases_from_disk(edits, &key, &current);
     let mut steps: Vec<Step> = Vec::new();
     let mut histories: BTreeMap<String, History> = BTreeMap::new();
     let mut unreconstructable = 0;
     for (index, edit) in edits.iter().enumerate() {
-        let history = histories.entry(key(edit)).or_insert_with(|| History::start(edit));
-        let AfterState::Known(after) = &edit.after else {
-            unreconstructable += 1;
-            history.pending_unknown = true;
-            continue;
+        let history = histories
+            .entry(key(edit))
+            .or_insert_with(|| History::start(edit, bases.get(&key(edit)).map(String::as_str)));
+        // Sin el fichero completo, los reemplazos exactos se aplican sobre lo que
+        // se sabe de él: lo que dejó la edición anterior o la base del disco.
+        let replaced = match &edit.after {
+            AfterState::Replaced { replacements, .. } if history.known && !history.pending_unknown => {
+                Replacement::apply(&history.current, replacements).map(|after| (after, history.current.clone()))
+            }
+            _ => None,
         };
-        let expected = edit.before.as_deref().unwrap_or_default();
+        let (after, expected) = match (&edit.after, replaced) {
+            (AfterState::Known(after), _) => (after.clone(), edit.before.clone().unwrap_or_default()),
+            (_, Some(found)) => found,
+            _ => {
+                unreconstructable += 1;
+                history.pending_unknown = true;
+                continue;
+            }
+        };
+        let (after, expected) = (after.as_str(), expected.as_str());
         if history.current != expected {
             let reason = if std::mem::take(&mut history.pending_unknown) {
                 ExternalReason::Unreconstructable
@@ -181,6 +196,7 @@ pub fn build(
             discarded: Vec::new(),
         });
         history.apply_by_agent(after, steps.len() - 1);
+        history.known = true;
     }
 
     for (path, history) in &mut histories {
@@ -203,6 +219,37 @@ pub fn build(
     }
     let files = histories.into_iter().filter_map(|(path, history)| history.finish(path)).collect();
     SessionReview { session_id: session_id.to_owned(), turns, steps, files, unreconstructable }
+}
+
+/// El estado inicial de los ficheros cuya primera edición de la sesión no trae el
+/// fichero original (Claude Code no lo guarda en ficheros grandes): el del disco
+/// con las ediciones de la sesión deshechas, de la última a la primera. Solo si
+/// el disco es lo que dejó la sesión y cada paso se deshace sin ambigüedad.
+fn bases_from_disk(
+    edits: &[FileEdit],
+    key: &impl Fn(&FileEdit) -> String,
+    current: &impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    let mut by_file: BTreeMap<String, Vec<&FileEdit>> = BTreeMap::new();
+    for edit in edits {
+        by_file.entry(key(edit)).or_default().push(edit);
+    }
+    by_file
+        .into_iter()
+        .filter(|(_, edits)| edits[0].before.is_none() && matches!(edits[0].after, AfterState::Replaced { .. }))
+        .filter_map(|(path, edits)| {
+            let mut state = current(&path)?;
+            for edit in edits.iter().rev() {
+                state = match &edit.after {
+                    AfterState::Replaced { replacements, .. } => Replacement::undo(&state, replacements)?,
+                    // Una reescritura completa: lo de antes es su original, si lo guardó.
+                    AfterState::Known(after) if *after == state => edit.before.clone()?,
+                    _ => return None,
+                };
+            }
+            Some((path, state))
+        })
+        .collect()
 }
 
 /// Un turno nuevo empieza cada vez que cambia la petición de la persona.
@@ -231,21 +278,28 @@ struct History {
     /// Borrados: (línea del estado actual delante de la que se borró, paso).
     deletions: Vec<(usize, usize)>,
     pending_unknown: bool,
+    /// Se sabe cómo está el fichero ahora: hay original, base del disco o una
+    /// edición completa anterior. Sin eso, los reemplazos no se pueden aplicar.
+    known: bool,
     /// Líneas de un paso que una edición posterior del agente rehízo o borró.
     discarded: Vec<(usize, String)>,
 }
 
 impl History {
-    fn start(edit: &FileEdit) -> Self {
-        let initial = edit.before.clone().unwrap_or_default();
+    /// `base`: el fichero al empezar la sesión, si se sacó del disco.
+    fn start(edit: &FileEdit, base: Option<&str>) -> Self {
+        let initial = base.map(str::to_owned).or_else(|| edit.before.clone()).unwrap_or_default();
         let provenance = vec![None; lines(&initial).len()];
+        // Un reemplazo sin original no crea el fichero: solo no se guardó cómo estaba.
+        let replaces = matches!(edit.after, AfterState::Replaced { .. } | AfterState::FragmentOnly(_));
         Self {
-            created: edit.before.is_none(),
+            created: base.is_none() && edit.before.is_none() && !replaces,
             current: initial.clone(),
             initial,
             provenance,
             deletions: Vec::new(),
             pending_unknown: false,
+            known: base.is_some() || edit.before.is_some() || !replaces,
             discarded: Vec::new(),
         }
     }
@@ -523,6 +577,47 @@ mod tests {
         ]);
         assert_eq!(r.unreconstructable, 1);
         assert!(r.steps.iter().any(|s| matches!(s, Step::External { reason: ExternalReason::Unreconstructable })));
+    }
+
+    /// Una edición de Claude Code sin `originalFile` (fichero grande): solo los reemplazos.
+    fn replaced(path: &str, old: &str, new: &str, rationale: &str) -> FileEdit {
+        let mut found = edit(path, None, "", "p", rationale);
+        found.kind = EditKind::Replace;
+        found.after = AfterState::Replaced {
+            fragment: new.into(),
+            replacements: vec![Replacement { old: old.into(), new: new.into(), replace_all: false }],
+        };
+        found
+    }
+
+    #[test]
+    fn replacements_without_original_apply_on_what_the_previous_edit_left() {
+        let middle = BASE.replace("c\n", "C\n");
+        let r =
+            review(&[edit("x.ts", Some(BASE), &middle, "p", "cambio c"), replaced("x.ts", "i\n", "I\n", "cambio i")]);
+        assert_eq!(r.unreconstructable, 0);
+        assert!(r.steps.iter().all(|s| matches!(s, Step::Agent { .. })), "sin cambios externos: {:?}", r.steps);
+        assert_eq!(r.files[0].after, middle.replace("i\n", "I\n"));
+        let told: Vec<Vec<String>> = r.files[0].hunks.iter().map(|hunk| rationales(&r, hunk)).collect();
+        assert_eq!(told, vec![vec!["cambio c", "cambio i"]], "cada línea, de su edición");
+    }
+
+    #[test]
+    fn a_first_edit_without_original_starts_from_the_disk_with_the_session_undone() {
+        let disk = BASE.replace("c\n", "C\n").replace("i\n", "I\n");
+        let edits = [replaced("x.ts", "c\n", "C\n", "cambio c"), replaced("x.ts", "i\n", "I\n", "cambio i")];
+        let r = build("s", &edits, |edit| edit.path.display().to_string(), |_| Some(disk.clone()));
+        assert_eq!(r.unreconstructable, 0);
+        assert_eq!(r.files[0].status, FileStatus::Modified, "no es una creación: solo no se guardó el original");
+        assert_eq!(r.files[0].before, BASE);
+        assert!(r.steps.iter().all(|s| matches!(s, Step::Agent { .. })), "nada externo: {:?}", r.steps);
+        let told: Vec<Vec<String>> = r.files[0].hunks.iter().map(|hunk| rationales(&r, hunk)).collect();
+        assert_eq!(told, vec![vec!["cambio c", "cambio i"]], "solo las dos líneas cambiadas, no el fichero entero");
+
+        // Si el disco no se puede deshacer sin ambigüedad, sigue como antes: sin reconstruir.
+        let ambiguous = format!("{disk}C\n");
+        let r = build("s", &edits, |edit| edit.path.display().to_string(), |_| Some(ambiguous.clone()));
+        assert_eq!(r.unreconstructable, 2);
     }
 
     #[test]

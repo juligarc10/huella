@@ -23,6 +23,9 @@ import { ImpactPanel } from '@/components/review/impact'
 import { ComprehensionBar, LevelMark, shownBy, TriageChips, type TriageFilter } from '@/components/review/triage'
 import { StepDiff } from '@/components/review/diff'
 import { TaskOverview, taskTitle } from '@/components/review/task'
+import { UnderstandLinks } from '@/components/review/understand-links'
+import { Walkthrough } from '@/components/review/walkthrough'
+import { PriorContext } from '@/components/review/prior-context'
 import { FeedbackDialog } from '@/components/review/feedback-dialog'
 import { DeclaredPanel } from '@/components/review/declared'
 import { GuidePanel } from '@/components/review/guide'
@@ -41,14 +44,18 @@ import { cn, releaseFocus } from '@/lib/utils'
 
 const isUnexplained = (step: ReviewStep) => step.lines.some((line) => line.kind === 'added' && line.external)
 
-type Mode = 'presentation' | 'steps'
-const MODE_KEY = 'huella-modo-tarea'
+type Mode = 'presentation' | 'steps' | 'walk'
+const modes: Mode[] = ['presentation', 'steps', 'walk']
+// Tareas y sesiones recuerdan cada una su última vista.
+const modeKey = (task: boolean) => (task ? 'huella-modo-tarea' : 'huella-modo-sesion')
 
-function savedMode(): Mode {
+function savedMode(task: boolean): Mode {
+  const fallback: Mode = task ? 'presentation' : 'steps'
   try {
-    return localStorage.getItem(MODE_KEY) === 'steps' ? 'steps' : 'presentation'
+    const saved = localStorage.getItem(modeKey(task)) as Mode | null
+    return saved && modes.includes(saved) ? saved : fallback
   } catch {
-    return 'presentation'
+    return fallback
   }
 }
 
@@ -80,13 +87,19 @@ export function Review({
   const steps = review.steps
   // Por defecto se esconde lo que la política deja saltar.
   const [filter, setFilter] = useState<TriageFilter>('focus')
-  // Una tarea se abre en presentación (o en el modo que se eligió la última vez).
-  const [mode, setMode] = useState<Mode>(() => (review.task ? savedMode() : 'steps'))
-  const presenting = Boolean(review.task?.repos && review.storyline) && mode === 'presentation'
+  // Una tarea se abre en presentación y una sesión en pasos, o en la vista que se eligió la última vez.
+  const [mode, setMode] = useState<Mode>(() => review.default_view ?? savedMode(Boolean(review.task)))
+  const canPresent = Boolean(review.task?.repos && review.storyline)
+  const presenting = canPresent && mode === 'presentation'
+  const walking = mode === 'walk'
+  // Sin guion no hay presentación: se ve en pasos.
+  const view: Mode = mode === 'presentation' && !canPresent ? 'steps' : mode
+  // La vista guiada o la presentación ocupan la página: sin lista de pasos ni atajos de pasos.
+  const guided = presenting || walking
   const chooseMode = (next: Mode) => {
     setMode(next)
     try {
-      localStorage.setItem(MODE_KEY, next)
+      localStorage.setItem(modeKey(Boolean(review.task)), next)
     } catch {
       // Sin almacenamiento, el modo dura lo que la página.
     }
@@ -211,13 +224,13 @@ export function Review({
   }
 
   // En la presentación, los avisos los lleva ella, que sabe en qué diapositiva se está.
-  useAskNotices(review, current, (a, b) => a === b, go, !presenting)
+  useAskNotices(review, current, (a, b) => a === b, go, !guided)
 
   // j / k para moverse; r, c y d para el veredicto, como en la revisión de código; u lo quita.
   // En la presentación manda la suya (← y →).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (presenting) return
+      if (guided) return
       const target = event.target as HTMLElement
       if (event.metaKey || event.ctrlKey || target.closest('input, textarea, [role="dialog"]')) return
       const verdict = verdicts.find((v) => v.key === event.key)
@@ -298,26 +311,29 @@ export function Review({
         }
         actions={
           <div className="flex flex-wrap gap-2">
-            {review.task && review.storyline && (
-              <ToggleGroup
+            <ToggleGroup
                 type="single"
-                value={mode}
+                value={view}
                 onValueChange={(value) => {
                   if (!value) return
                   chooseMode(value as Mode)
                   releaseFocus()
                 }}
                 variant="outline"
-                aria-label="Cómo revisar la tarea"
+                aria-label="Cómo revisar"
               >
-                <ToggleGroupItem value="presentation" className="min-h-11 px-3">
-                  Presentación
-                </ToggleGroupItem>
+                {canPresent && (
+                  <ToggleGroupItem value="presentation" className="min-h-11 px-3">
+                    Presentación
+                  </ToggleGroupItem>
+                )}
                 <ToggleGroupItem value="steps" className="min-h-11 px-3">
                   Pasos
                 </ToggleGroupItem>
+                <ToggleGroupItem value="walk" className="min-h-11 px-3" title="Un caso seguido por el código en el orden en que se ejecuta">
+                  Recorrido
+                </ToggleGroupItem>
               </ToggleGroup>
-            )}
             {/* En la presentación, refrescar está en su barra. */}
             {!(review.task && review.storyline && mode === 'presentation') && (
               <RefreshButton onRefresh={() => refresh.mutateAsync()} refreshing={refresh.isPending} />
@@ -337,7 +353,7 @@ export function Review({
         }
       />
 
-      {review.task && !presenting && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
+      {review.task && !guided && <TaskOverview task={review.task} session={session} onSetup={onTaskSetup} />}
 
       {review.follow_ups.length > 0 && (
         <Panel className="flex flex-col gap-2 border-brand/40 bg-brand-soft/50">
@@ -366,7 +382,7 @@ export function Review({
         </Panel>
       )}
 
-      {!presenting && (
+      {!guided && (
         <div className="flex flex-col gap-2">
           <ComprehensionBar comprehension={review.comprehension} policy={review.policy} filter={filter} onFilter={setFilter} />
           <div className="flex flex-wrap justify-between gap-2 text-[13px] text-muted-foreground">
@@ -389,7 +405,16 @@ export function Review({
         </div>
       )}
 
-      {presenting ? (
+      {walking ? (
+        <Walkthrough
+          review={review}
+          session={session}
+          onStep={(index) => {
+            chooseMode('steps')
+            go(index)
+          }}
+        />
+      ) : presenting ? (
         <Presentation
           review={review}
           session={session}
@@ -604,10 +629,13 @@ export function Review({
                   >
                     Historia del símbolo
                   </Link>
+                  {' '}·{' '}
+                  <UnderstandLinks path={step.path} symbol={step.symbol} />
                 </>
               )}
             </p>
 
+            <PriorContext session={session} step={step.index} />
             <EvidencePanel evidence={step.evidence} path={step.path} />
             <ImpactPanel session={session} step={step} />
             <AskPanel session={session} step={step} questions={review.questions} asking={review.asking} model={review.ask_model} problem={review.ask_problem} thinking={review.ask_thinking} task={Boolean(review.task)} />

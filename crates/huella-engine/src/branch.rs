@@ -216,7 +216,7 @@ fn attribute(
     // insertaron, y una línea con ese texto exacto es suya.
     let mut fragments: HashMap<&str, &FileEdit> = HashMap::new();
     for edit in edits {
-        if let AfterState::FragmentOnly(text) = &edit.after {
+        if let Some(text) = edit.after.fragment() {
             for line in text.lines().map(str::trim).filter(|line| line.chars().count() >= 4) {
                 fragments.insert(line, edit);
             }

@@ -77,7 +77,7 @@ pub fn locate(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, 
 
 /// Como [`locate`], para una selección que salta líneas (un diff esconde los
 /// métodos de una clase): de su primera línea a la última que viene después.
-fn locate_span(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, usize)> {
+pub(crate) fn locate_span(source: &str, quote: &str, near: Option<usize>) -> Option<(usize, usize)> {
     let wanted: Vec<&str> = quote.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let (first, last) = (*wanted.first()?, *wanted.last()?);
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
@@ -221,7 +221,7 @@ pub fn questions_in(store: &Store, path: &Path, source: &str) -> Result<Vec<Loca
 
 /// Lo que ve el modelo: el código con la selección marcada, dónde está, su
 /// historia en Huella, sus commits y lo que ya se preguntó de esas líneas.
-fn context(
+pub(crate) fn context(
     store: &Store,
     sources: Option<&crate::Sources>,
     path: &Path,
@@ -360,7 +360,7 @@ fn removing_commits(path: &Path, removed: &str) -> Vec<String> {
 
 /// Cada edición del símbolo con lo que se pidió y lo que explicó el agente,
 /// completos: es lo que responde al «por qué».
-fn write_history(
+pub(crate) fn write_history(
     out: &mut String,
     memory: &SymbolMemory,
     sources: Option<&crate::Sources>,
@@ -452,7 +452,7 @@ fn date(unix: &str) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((cut, _)) => format!("{}…", &text[..cut]),
         None => text.to_owned(),
