@@ -58,9 +58,10 @@ pub fn handle(context: &mut Context, message: &Value) -> Option<Value> {
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "huella", "version": env!("CARGO_PKG_VERSION")},
             "instructions": format!(
-                "{INSTRUCTIONS}{}{}",
+                "{INSTRUCTIONS}{}{}{}",
                 crate::language::agent_rule().unwrap_or_default(),
-                crate::language::narrative_rule().unwrap_or_default()
+                crate::language::narrative_rule().unwrap_or_default(),
+                crate::language::walkthrough_rule().unwrap_or_default()
             ),
         }),
         "ping" => json!({}),
@@ -159,6 +160,7 @@ fn tools() -> Value {
         list.insert(at, record_tool());
         list.insert(at + 1, storyline_tool());
         list.insert(at + 2, recorded_tool());
+        list.insert(at + 3, walkthrough_tool());
     }
     tools
 }
@@ -227,6 +229,78 @@ fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
             text,
             " Para que lo entienda alguien sin contexto, falta: {}. Complétalo y vuelve a llamar a huella_storyline con el guion completo.",
             recorded.gaps.join("; ")
+        );
+    }
+    Ok(text)
+}
+
+/// `huella_walkthrough`: el agente cuenta el cambio como un recorrido guiado: un caso
+/// concreto seguido por el código en el orden en que se ejecuta.
+fn walkthrough_tool() -> Value {
+    let anchor = |what: &str| json!({"type": "string", "description": what});
+    json!({
+        "name": "huella_walkthrough",
+        "description": "Cuenta el cambio como un recorrido guiado, para quien lo revise sin conocer el código: un caso \
+                        concreto y realista, con datos, seguido por el código en el ORDEN EN QUE SE EJECUTA, parada a \
+                        parada (de la entrada a la lógica, los datos y los efectos). En cada parada: cómo se llega desde \
+                        la anterior (transition), qué llega, qué hace y por qué, qué sale, y los valores que toman las \
+                        líneas clave en el caso; si ejecutaste tests, usa sus valores reales y márcalos con from_test. \
+                        Huella comprueba que cada parada exista, que cada valor cite una línea real y que a cada parada \
+                        se llegue desde las anteriores, y te responde lo que no cuadre: arréglalo y vuelve a llamarla \
+                        con el recorrido completo.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "El caso, en pocas palabras"},
+                "situation": {"type": "string", "description": "El caso con sus datos: quién hace qué y con qué valores"},
+                "stops": {"type": "array", "minItems": 2, "maxItems": 14, "items": {"type": "object", "properties": {
+                    "file": anchor("Ruta absoluta del fichero"),
+                    "symbol": anchor("Función o método (Clase.metodo o su nombre)"),
+                    "title": {"type": "string", "description": "Qué ocurre aquí"},
+                    "transition": {"type": "string", "description": "Cómo se llega desde la parada anterior: qué la llama o a qué vuelve el control"},
+                    "arrives": {"type": "string", "description": "Qué llega, con los valores del caso"},
+                    "does": {"type": "string", "description": "Qué hace este código con eso y por qué"},
+                    "leaves": {"type": "string", "description": "Qué sale o qué cambia, con valores"},
+                    "why": {"type": "string", "description": "Por qué se hace así (decisión), si lo hay"},
+                    "values": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {
+                        "quote": {"type": "string", "description": "El texto exacto de una línea de ese símbolo"},
+                        "value": {"type": "string", "description": "Lo que vale o decide ahí en el caso"},
+                        "from_test": {"type": "boolean", "description": "El valor salió de ejecutar un test"}},
+                        "required": ["quote", "value"]}}},
+                    "required": ["file", "symbol", "title", "transition", "arrives", "does", "leaves"]}},
+                "forks": {"type": "array", "items": {"type": "object", "properties": {
+                    "file": anchor("Ruta absoluta del fichero donde se decide"), "symbol": anchor("Símbolo donde se decide"),
+                    "condition": {"type": "string"}, "outcome": {"type": "string"}},
+                    "required": ["file", "symbol", "condition", "outcome"]},
+                    "description": "Si el caso fuera otro: qué cambiaría y por dónde seguiría"},
+                "terms": {"type": "array", "items": {"type": "object", "properties": {
+                    "term": {"type": "string"}, "meaning": {"type": "string"}}, "required": ["term", "meaning"]}},
+                "checks": {"type": "array", "items": {"type": "object", "properties": {
+                    "question": {"type": "string"}, "answer": {"type": "string"},
+                    "file": anchor("Fichero de la parada donde se ve"), "symbol": anchor("Símbolo de esa parada")},
+                    "required": ["question", "answer"]},
+                    "description": "De 2 a 4 preguntas para comprobar que se ha entendido, con su respuesta"},
+                "blocks": {"type": "array", "description": "Tablas o esquemas del caso, solo si aportan (los mismos tipos que en huella_storyline)"}
+            },
+            "required": ["title", "situation", "stops"]
+        }
+    })
+}
+
+/// `huella_walkthrough`: guarda el recorrido del agente y le dice qué no cuadra con el código.
+fn walkthrough(store: &Store, arguments: &Value) -> Result<String> {
+    let told: huella_engine::walkthrough::ToldWalk = serde_json::from_value(arguments.clone())
+        .map_err(|error| anyhow::anyhow!("el recorrido no sigue el esquema: {error}"))?;
+    let recorded = huella_engine::walkthrough::record_declared(store, told)?;
+    let mut text = format!(
+        "Recorrido registrado (#{}): {} paradas en código que existe. Se mostrará como lectura guiada al revisar.",
+        recorded.id, recorded.stops
+    );
+    if !recorded.problems.is_empty() {
+        let _ = write!(
+            text,
+            " No cuadra con el código: {}. Arréglalo y vuelve a llamar a huella_walkthrough con el recorrido completo.",
+            recorded.problems.join("; ")
         );
     }
     Ok(text)
@@ -316,6 +390,9 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
     }
     if name == "huella_recorded" {
         return recorded(&context.store, arguments);
+    }
+    if name == "huella_walkthrough" {
+        return walkthrough(&context.store, arguments);
     }
     // Lo nuevo de las transcripciones se indexa antes de responder.
     huella_engine::index(&mut context.store, &context.sources)?;
@@ -540,6 +617,7 @@ mod tests {
                 "huella_record",
                 "huella_storyline",
                 "huella_recorded",
+                "huella_walkthrough",
                 "huella_sessions"
             ]
         );

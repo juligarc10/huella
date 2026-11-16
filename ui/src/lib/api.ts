@@ -613,6 +613,8 @@ export interface Settings {
   view: { value: 'steps' | 'presentation' | 'walk' | null }
   /** Pedir al agente código que se lea de arriba abajo. */
   narrative_code: { value: boolean }
+  /** Pedir al agente que cuente la lectura guiada al terminar. */
+  agent_walkthrough: { value: boolean }
   /** Nunca la clave: de dónde sale y si se puede leer. */
   key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
   problem: string | null
@@ -630,6 +632,7 @@ export type SettingsChange = Partial<{
   /** `last`: la última que se usó. */
   view: 'last' | 'steps' | 'presentation' | 'walk'
   narrative_code: boolean
+  agent_walkthrough: boolean
 }>
 
 /** Quién escribió una línea de la rama. */
@@ -781,7 +784,7 @@ export interface WalkStop {
   leaves: string
   why: string
   /** Valores del caso en líneas del código (`quote` es el texto de la línea). */
-  values: { quote: string; value: string }[]
+  values: { quote: string; value: string; from_test?: boolean }[]
   /** No se ve en el código cómo se llega aquí. */
   gap: string | null
   /** Cómo se llega aquí, sacado del código: la parada que la llama y en qué línea. */
@@ -806,6 +809,8 @@ export interface StoredWalkthrough {
   recorded_at: string
   /** El cambio cambió desde que se preparó. */
   stale: boolean
+  /** `agent`: lo contó el agente que hizo el cambio; `model`: el modelo revisor. */
+  source: 'agent' | 'model'
 }
 
 export interface StoryChapter {

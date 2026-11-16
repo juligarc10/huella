@@ -52,7 +52,8 @@ function keyLines(step: ReviewStep | undefined, stop: WalkStop) {
   const found: { index: number; value: string }[] = []
   for (const value of stop.values) {
     const index = step?.lines.findIndex((line) => line.kind !== 'removed' && line.text.trim() === value.quote.trim()) ?? -1
-    if (index >= 0 && !found.some((item) => item.index === index)) found.push({ index, value: value.value })
+    if (index >= 0 && !found.some((item) => item.index === index))
+      found.push({ index, value: value.from_test ? `${value.value} · visto en un test` : value.value })
   }
   return found.sort((a, b) => a.index - b.index)
 }
@@ -149,8 +150,13 @@ export function Walkthrough({ review, session, onStep }: { review: ReviewResult;
       }
       footer={
         <span className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-          {stored.model.replace(/^[^:]+:/, '')} · {dateTime(stored.recorded_at)}
-          {controls('Rehacer la lectura')}
+          {stored.source === 'agent' ? (
+            <span className="rounded-full bg-brand-soft px-2.5 py-0.5 font-medium text-accent-foreground">Contada por el agente que hizo el cambio</span>
+          ) : (
+            <span>Preparada por {stored.model.replace(/^[^:]+:/, '')}</span>
+          )}
+          · {dateTime(stored.recorded_at)}
+          {controls(stored.source === 'agent' ? 'Prepararla con el modelo revisor' : 'Rehacer la lectura')}
         </span>
       }
     />
@@ -301,7 +307,7 @@ function Guided({
         })}
       </nav>
 
-      {moment === 'overview' && <Overview review={review} walk={walk} terms={terms} onStart={() => setMoment('walk')} onStop={(index) => { setMoment('walk'); goStop(index) }} />}
+      {moment === 'overview' && <Overview review={review} walk={walk} source={stored.source} terms={terms} onStart={() => setMoment('walk')} onStop={(index) => { setMoment('walk'); goStop(index) }} />}
 
       {moment === 'walk' && current && step && (
         <div className={cn('grid items-start gap-4', focusMode ? 'mx-auto w-full max-w-5xl' : 'lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(0,1fr)_300px]')}>
@@ -421,7 +427,21 @@ function hopSentence(stop: WalkStop, walk: Walk, review: ReviewResult) {
 
 /* ---------------- Vista general ---------------- */
 
-function Overview({ review, walk, terms, onStart, onStop }: { review: ReviewResult; walk: Walk; terms: Terms; onStart: () => void; onStop: (index: number) => void }) {
+function Overview({
+  review,
+  walk,
+  source,
+  terms,
+  onStart,
+  onStop,
+}: {
+  review: ReviewResult
+  walk: Walk
+  source: StoredWalkthrough['source']
+  terms: Terms
+  onStart: () => void
+  onStop: (index: number) => void
+}) {
   const { layer, order } = layersOf(review, walk)
   const prompt = review.task?.description || review.turns[0]?.prompt || ''
   return (
@@ -449,6 +469,7 @@ function Overview({ review, walk, terms, onStart, onStop }: { review: ReviewResu
         <section className="flex flex-col gap-2.5 rounded-2xl bg-brand-soft p-5 text-accent-foreground" aria-label="El caso que vas a seguir">
           <span className="text-xs font-semibold tracking-wider uppercase">El caso que vas a seguir</span>
           <h2 className="text-xl font-semibold text-pretty">{walk.title}</h2>
+          {source === 'agent' && <span className="self-start rounded-full bg-card/70 px-2.5 py-0.5 text-xs font-medium">Contado por el agente que hizo el cambio</span>}
           <p className="leading-relaxed">
             <WithTerms text={walk.situation} concepts={terms} />
           </p>

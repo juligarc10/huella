@@ -59,6 +59,16 @@ pub(crate) fn narrative_rule() -> Option<&'static str> {
     )
 }
 
+/// Lo que se añade a las instrucciones del agente si se le pide contar la
+/// lectura guiada al terminar (`[review] agent_walkthrough`).
+pub(crate) fn walkthrough_rule() -> Option<&'static str> {
+    config::get().review.agent_walkthrough.unwrap_or(false).then_some(
+        " Al terminar una tarea, después de huella_storyline, cuenta también el caso principal con huella_walkthrough: \
+         un caso concreto seguido por el código en el orden en que se ejecuta, con los valores reales de los tests \
+         que ejecutaste marcados con from_test, y corrige lo que te responda que no cuadra.",
+    )
+}
+
 /// Un modelo que escribe en un idioma fijo.
 struct InLanguage {
     inner: Box<dyn JsonModel>,

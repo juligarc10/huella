@@ -269,6 +269,22 @@ function ReadingPanel({ settings }: { settings: Settings }) {
           </span>
         </span>
       </label>
+      <label className="flex cursor-pointer items-start gap-3">
+        <Switch
+          checked={settings.agent_walkthrough.value}
+          onCheckedChange={(checked) => save.mutate({ agent_walkthrough: checked })}
+          disabled={save.isPending}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Que el agente cuente la lectura guiada al terminar</span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            El agente que hizo el cambio la cuenta con los valores reales de los tests que ejecutó, y Huella comprueba que cada
+            parada y cada valor existan en el código. Está lista al abrir la revisión, sin esperar al modelo revisor. Gasta algo
+            más del agente al terminar cada tarea.
+          </span>
+        </span>
+      </label>
     </Panel>
   )
 }

@@ -88,6 +88,9 @@ pub struct WalkInput<'a> {
 pub struct LineValue {
     pub quote: String,
     pub value: String,
+    /// El valor salió de ejecutar un test, no de leer el código.
+    #[serde(default)]
+    pub from_test: bool,
 }
 
 /// Una parada del recorrido.
@@ -174,6 +177,8 @@ pub struct StoredWalkthrough {
     pub model: String,
     pub recorded_at: String,
     pub stale: bool,
+    /// `agent`: lo contó el agente que hizo el cambio; `model`: el modelo revisor.
+    pub source: String,
 }
 
 /// El recorrido guardado de una revisión, si lo hay.
@@ -190,7 +195,13 @@ pub fn stored(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> Resul
         // Los recorridos guardados antes de calcular los saltos también los tienen.
         mark_hops(plan, &mut walkthrough.stops);
     }
-    Ok(fits.then_some(StoredWalkthrough { walkthrough, model: saved.model, recorded_at: saved.recorded_at, stale }))
+    Ok(fits.then_some(StoredWalkthrough {
+        walkthrough,
+        model: saved.model,
+        recorded_at: saved.recorded_at,
+        stale,
+        source: "model".to_owned(),
+    }))
 }
 
 /// Escribe el recorrido guiado de una revisión y lo guarda.
@@ -275,7 +286,7 @@ fn assemble(plan: &[FlowStep], title: String, situation: String, order: &[usize]
             .filter_map(|value| {
                 let quote = text(value, "quote");
                 let shown = text(value, "value");
-                line_of(&plan[step], &quote).map(|line| LineValue { quote: line, value: shown })
+                line_of(&plan[step], &quote).map(|line| LineValue { quote: line, value: shown, from_test: false })
             })
             .filter(|value| !value.value.is_empty())
             .take(6)
@@ -466,6 +477,252 @@ fn calls(line: &str, name: &str) -> bool {
         start = end;
     }
     false
+}
+
+// ---------- Lo que cuenta el agente (huella_walkthrough) ----------
+
+/// Una parada tal como la cuenta el agente: anclada a un fichero y un símbolo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToldStop {
+    pub file: String,
+    pub symbol: String,
+    pub title: String,
+    pub transition: String,
+    pub arrives: String,
+    pub does: String,
+    pub leaves: String,
+    pub why: String,
+    pub values: Vec<LineValue>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToldFork {
+    pub file: String,
+    pub symbol: String,
+    pub condition: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToldCheck {
+    pub question: String,
+    pub answer: String,
+    pub file: String,
+    pub symbol: String,
+}
+
+/// El recorrido que cuenta el agente al terminar.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToldWalk {
+    pub title: String,
+    pub situation: String,
+    pub stops: Vec<ToldStop>,
+    pub forks: Vec<ToldFork>,
+    pub terms: Vec<Term>,
+    pub checks: Vec<ToldCheck>,
+    pub blocks: Vec<StoryBlock>,
+}
+
+/// Lo que se le responde al agente: qué se guardó y qué tiene que arreglar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedWalk {
+    pub id: i64,
+    pub stops: usize,
+    pub problems: Vec<String>,
+}
+
+/// El símbolo de un fichero por su nombre (`Clase.metodo` o solo `metodo`) y sus líneas.
+fn find_in_file(path: &std::path::Path, source: &str, symbol: &str) -> Option<(usize, usize)> {
+    let symbols = huella_anchoring::Language::from_path(path)
+        .and_then(|language| huella_anchoring::extract_symbols(language, source).ok())
+        .map(|extraction| extraction.symbols)
+        .unwrap_or_default();
+    let found = symbols.iter().find(|s| s.qualified_name == symbol).or_else(|| {
+        symbols.iter().find(|s| s.qualified_name.rsplit(['.', ':']).next() == symbol.rsplit(['.', ':']).next())
+    })?;
+    Some((found.start_line, found.end_line))
+}
+
+/// Guarda el recorrido que cuenta el agente, con las rutas normalizadas, y
+/// dice qué no cuadra con el código: ficheros o símbolos que no están, valores
+/// que citan líneas que no existen y paradas a las que no se ve llegar.
+///
+/// # Errors
+/// Si ninguna parada apunta a código que exista, o falla la base de datos.
+pub fn record_declared(store: &Store, mut told: ToldWalk) -> Result<RecordedWalk> {
+    let mut problems = Vec::new();
+    // El código de cada parada, para comprobar valores y saltos.
+    let mut codes: Vec<Option<Vec<String>>> = Vec::new();
+    for (index, stop) in told.stops.iter_mut().enumerate() {
+        let number = index + 1;
+        let Ok(path) = std::fs::canonicalize(&stop.file) else {
+            problems.push(format!("parada {number}: no encuentro el fichero {}; usa su ruta absoluta", stop.file));
+            codes.push(None);
+            continue;
+        };
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        let Some((start, end)) = find_in_file(&path, &source, &stop.symbol) else {
+            problems.push(format!("parada {number}: no encuentro `{}` en {}", stop.symbol, stop.file));
+            codes.push(None);
+            continue;
+        };
+        let lines: Vec<String> = source.lines().skip(start - 1).take(end - start + 1).map(str::to_owned).collect();
+        for value in &stop.values {
+            if !lines.iter().any(|line| {
+                line.trim() == value.quote.trim() || (value.quote.trim().len() > 3 && line.contains(value.quote.trim()))
+            }) {
+                problems.push(format!(
+                    "parada {number}: la línea «{}» no está en `{}`",
+                    clip(value.quote.trim(), 80),
+                    stop.symbol
+                ));
+            }
+        }
+        stop.file = crate::normalize_path(&path, None);
+        codes.push(Some(lines));
+    }
+    let resolved = codes.iter().filter(|code| code.is_some()).count();
+    if resolved == 0 {
+        return Err(EngineError::Invalid(
+            "ninguna parada apunta a código que exista: usa rutas absolutas y nombres de símbolos reales".into(),
+        ));
+    }
+    if told.stops.len() < MIN_STOPS {
+        problems.push("un recorrido necesita al menos dos paradas".to_owned());
+    }
+    for index in 1..told.stops.len() {
+        let wanted = told.stops[index].symbol.rsplit(['.', ':']).next().unwrap_or_default().to_owned();
+        if codes[index].is_none() || wanted.is_empty() {
+            continue;
+        }
+        let reached = codes[..index].iter().flatten().any(|lines| lines.iter().any(|line| calls(line, &wanted)));
+        if !reached {
+            problems.push(format!(
+                "parada {}: no se ve que ninguna parada anterior llame a `{wanted}`; si se llega desde otro sitio, añade esa parada o cuéntalo en transition",
+                index + 1
+            ));
+        }
+    }
+    for fork in &mut told.forks {
+        if let Ok(path) = std::fs::canonicalize(&fork.file) {
+            fork.file = crate::normalize_path(&path, None);
+        }
+    }
+    for check in &mut told.checks {
+        if let Ok(path) = std::fs::canonicalize(&check.file) {
+            check.file = crate::normalize_path(&path, None);
+        }
+    }
+    let content = serde_json::to_string(&told).map_err(|error| EngineError::Invalid(error.to_string()))?;
+    let id = store.add_declared_walkthrough(&content)?;
+    Ok(RecordedWalk { id, stops: resolved, problems })
+}
+
+/// El paso del plan de una parada contada por el agente: mismo fichero y mismo símbolo.
+fn step_for(review: &SessionReview, plan: &[FlowStep], file: &str, symbol: &str) -> Option<usize> {
+    let short = symbol.rsplit(['.', ':']).next().unwrap_or(symbol);
+    let in_file = |index: &usize| review.files[plan[*index].file].path == file;
+    let named = |index: &usize, exact: bool| {
+        plan[*index].symbol.as_ref().is_some_and(|s| {
+            if exact { s.qualified_name == symbol } else { s.qualified_name.rsplit(['.', ':']).next() == Some(short) }
+        })
+    };
+    (0..plan.len())
+        .find(|index| in_file(index) && named(index, true))
+        .or_else(|| (0..plan.len()).find(|index| in_file(index) && named(index, false)))
+}
+
+/// El último recorrido que contó el agente y encaja con esta revisión: al
+/// menos dos paradas y la mayoría de ellas en pasos suyos.
+///
+/// # Errors
+/// Si falla la base de datos.
+pub fn declared(store: &Store, review: &SessionReview, plan: &[FlowStep]) -> Result<Option<StoredWalkthrough>> {
+    for (_, recorded_at, content) in store.declared_walkthroughs(20)? {
+        let Ok(told) = serde_json::from_str::<ToldWalk>(&content) else { continue };
+        let resolved: Vec<(usize, &ToldStop)> = told
+            .stops
+            .iter()
+            .filter_map(|stop| step_for(review, plan, &stop.file, &stop.symbol).map(|step| (step, stop)))
+            .collect();
+        if resolved.len() < MIN_STOPS || resolved.len() * 5 < told.stops.len() * 3 {
+            continue;
+        }
+        let mut stops: Vec<Stop> = resolved
+            .iter()
+            .map(|(step, stop)| Stop {
+                step: *step,
+                title: stop.title.clone(),
+                transition: stop.transition.clone(),
+                arrives: stop.arrives.clone(),
+                does: stop.does.clone(),
+                leaves: stop.leaves.clone(),
+                why: stop.why.clone(),
+                values: stop
+                    .values
+                    .iter()
+                    .filter_map(|value| {
+                        line_of(&plan[*step], &value.quote).map(|line| LineValue {
+                            quote: line,
+                            value: value.value.clone(),
+                            from_test: value.from_test,
+                        })
+                    })
+                    .take(8)
+                    .collect(),
+                gap: None,
+                hop: None,
+            })
+            .collect();
+        mark_hops(plan, &mut stops);
+        let forks = told
+            .forks
+            .iter()
+            .filter_map(|fork| {
+                let step = step_for(review, plan, &fork.file, &fork.symbol)?;
+                stops.iter().any(|stop| stop.step == step).then(|| Fork {
+                    step,
+                    condition: fork.condition.clone(),
+                    outcome: fork.outcome.clone(),
+                })
+            })
+            .collect();
+        let checks = told
+            .checks
+            .iter()
+            .map(|check| Check {
+                question: check.question.clone(),
+                answer: check.answer.clone(),
+                step: step_for(review, plan, &check.file, &check.symbol)
+                    .filter(|step| stops.iter().any(|stop| stop.step == *step)),
+            })
+            .collect();
+        let outside = (0..plan.len())
+            .filter(|&index| plan[index].role == StepRole::Flow && !stops.iter().any(|stop| stop.step == index))
+            .collect();
+        let walkthrough = Walkthrough {
+            title: told.title,
+            situation: told.situation,
+            stops,
+            forks,
+            outside,
+            blocks: crate::blocks::sanitize(&told.blocks),
+            terms: told.terms,
+            checks,
+        };
+        return Ok(Some(StoredWalkthrough {
+            walkthrough,
+            model: "el agente".to_owned(),
+            recorded_at,
+            stale: false,
+            source: "agent".to_owned(),
+        }));
+    }
+    Ok(None)
 }
 
 /// Lo que define el cambio: si cambia, el recorrido puede no valer.
@@ -755,6 +1012,68 @@ export function registrar(texto: string) {
         assert!(!calls("  // luego start(x)", "start"));
         assert!(!calls("  restart(x)", "start"), "otra palabra que acaba igual");
         assert!(!calls("  pub fn start(&self) {", "start"));
+    }
+
+    #[test]
+    fn the_agent_walk_is_checked_against_the_code_and_matched_to_the_review() {
+        let dir = std::env::temp_dir().join(format!("huella-told-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("combate.ts");
+        std::fs::write(&file, CODE).unwrap();
+        let file = std::fs::canonicalize(&file).unwrap();
+        let path = file.display().to_string();
+        let stop = |symbol: &str, quote: &str, value: &str| ToldStop {
+            file: path.clone(),
+            symbol: symbol.into(),
+            title: symbol.into(),
+            values: vec![LineValue { quote: quote.into(), value: value.into(), from_test: true }],
+            ..ToldStop::default()
+        };
+        let told = ToldWalk {
+            title: "Un crítico".into(),
+            stops: vec![
+                stop("atacar", "const golpe = resolver(roll)", "golpe = 'critico'"),
+                stop("resolver", "if (roll === 20) return 'critico'", "verdadero"),
+                stop("registrar", "no existe esta línea", "x"),
+                stop("NoExiste", "", ""),
+            ],
+            ..ToldWalk::default()
+        };
+        let store = Store::open_in_memory().unwrap();
+        let recorded = record_declared(&store, told).unwrap();
+        assert_eq!(recorded.stops, 3);
+        let problems = recorded.problems.join(" | ");
+        assert!(problems.contains("no existe esta línea"), "{problems}");
+        assert!(problems.contains("`registrar`"), "nadie llama a registrar: {problems}");
+        assert!(problems.contains("NoExiste"), "{problems}");
+        assert!(!problems.contains("parada 2"), "atacar llama a resolver: {problems}");
+
+        // En una revisión con ese fichero, se resuelve a sus pasos, con los saltos calculados.
+        let edit = FileEdit {
+            origin: EditOrigin {
+                agent: "t",
+                session_id: "s1".into(),
+                event_id: "e".into(),
+                timestamp: None,
+                cwd: None,
+            },
+            path: file.clone(),
+            kind: EditKind::Create,
+            before: None,
+            after: AfterState::Known(CODE.into()),
+            user_modified: false,
+            context: EditContext::default(),
+        };
+        let review = huella_review::build("s1", &[edit], |e| e.path.display().to_string(), |_| None);
+        let plan = huella_review::flow::plan(&review);
+        let found = declared(&store, &review, &plan).unwrap().unwrap();
+        assert_eq!(found.source, "agent");
+        assert_eq!(found.walkthrough.stops.len(), 3);
+        assert_eq!(found.walkthrough.stops[1].hop.as_ref().unwrap().kind, "direct");
+        assert!(found.walkthrough.stops[0].values[0].from_test);
+        assert!(found.walkthrough.stops[2].values.is_empty(), "el valor de una línea que no existe se quita");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

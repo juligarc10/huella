@@ -446,6 +446,15 @@ const MIGRATIONS: &[&str] = &[
         content         TEXT NOT NULL
     );
 ",
+    // 27: el recorrido guiado que cuenta el agente (huella_walkthrough), anclado
+    // a ficheros y símbolos: vale para cualquier revisión que tenga esas paradas.
+    r"
+    CREATE TABLE declared_walkthrough (
+        id              INTEGER PRIMARY KEY,
+        recorded_at     TEXT NOT NULL,
+        content         TEXT NOT NULL
+    );
+",
 ];
 
 /// Lo que no cuadra entre un guion y su código, guardado.
@@ -2203,6 +2212,32 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Guarda el recorrido guiado que contó el agente (en JSON, redactado).
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn add_declared_walkthrough(&self, content: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO declared_walkthrough (recorded_at, content) VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?1)",
+            [redact(content)],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Los recorridos que contó el agente, del más reciente al más antiguo:
+    /// `(id, cuándo, JSON)`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn declared_walkthroughs(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT id, recorded_at, content FROM declared_walkthrough ORDER BY id DESC LIMIT ?1")?;
+        let rows = statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// La última auditoría del guion de una revisión.

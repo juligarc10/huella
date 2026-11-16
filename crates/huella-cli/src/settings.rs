@@ -81,6 +81,7 @@ pub(crate) fn view(args: &ModelArgs, probing: &Probing) -> Value {
         },
         "view": {"value": config.review.view},
         "narrative_code": {"value": config.review.narrative_code.unwrap_or(false)},
+        "agent_walkthrough": {"value": config.review.agent_walkthrough.unwrap_or(false)},
         "key": key_view(provider),
         "problem": crate::model_problem(args),
         "probe": probing.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -157,10 +158,10 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
                 Some(view @ ("steps" | "presentation" | "walk")) => Some(view.into()),
                 Some(_) => bail!("vista desconocida"),
             },
-            "narrative_code" => match value {
+            "narrative_code" | "agent_walkthrough" => match value {
                 Value::Null | Value::Bool(false) => None,
                 Value::Bool(true) => Some(true.into()),
-                _ => bail!("narrative_code debe ser sí o no"),
+                _ => bail!("{name} debe ser sí o no"),
             },
             "context_tokens" if value.is_null() => None,
             "context_tokens" => {
@@ -177,6 +178,7 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
             "language" => ("review", "language"),
             "view" => ("review", "view"),
             "narrative_code" => ("review", "narrative_code"),
+            "agent_walkthrough" => ("review", "agent_walkthrough"),
             _ => ("llm", "context_tokens"),
         };
         edits.push((table, key, edit));
@@ -297,6 +299,10 @@ mod tests {
             save_in(path, r#"{"view": "last", "narrative_code": false}"#).unwrap();
             assert_eq!(config::get().review.view, None, "la última usada quita el campo");
             assert!(crate::language::narrative_rule().is_none());
+            save_in(path, r#"{"agent_walkthrough": true}"#).unwrap();
+            assert!(crate::language::walkthrough_rule().is_some());
+            save_in(path, r#"{"agent_walkthrough": false}"#).unwrap();
+            assert!(crate::language::walkthrough_rule().is_none());
             assert!(save_in(path, r#"{"view": "otra"}"#).is_err());
         });
     }

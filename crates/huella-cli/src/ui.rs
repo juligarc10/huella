@@ -643,7 +643,12 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     if let Some(story) = &story {
         add_audit(app, review, plan, story, &triage, &declared, &mut value)?;
     }
-    value["walkthrough"] = json!(huella_engine::walkthrough::stored(&app.store, review, plan)?);
+    // Lo que contó el agente manda sobre lo que preparó el modelo revisor.
+    let walkthrough = match huella_engine::walkthrough::declared(&app.store, review, plan)? {
+        Some(told) => Some(told),
+        None => huella_engine::walkthrough::stored(&app.store, review, plan)?,
+    };
+    value["walkthrough"] = json!(walkthrough);
     value["default_view"] = json!(crate::config::get().review.view);
     value["walking"] = json!(app.walking.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     // Veredicto de cada paso, si se dio con su contenido actual.
