@@ -285,6 +285,21 @@ function ReadingPanel({ settings }: { settings: Settings }) {
           </span>
         </span>
       </label>
+      <label className="flex cursor-pointer items-start gap-3">
+        <Switch
+          checked={settings.learning.value}
+          onCheckedChange={(checked) => save.mutate({ learning: checked })}
+          disabled={save.isPending}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Recordar lo que compruebo</span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            Guarda tus respuestas a «Comprobar» y qué términos te costaron. En las siguientes revisiones no se vuelve a subrayar lo que ya
+            sabes y se te recuerda lo que conviene repasar. Se queda en tu equipo.
+          </span>
+        </span>
+      </label>
     </Panel>
   )
 }

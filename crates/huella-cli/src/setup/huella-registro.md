@@ -95,6 +95,10 @@ La respuesta de `huella_storyline` dice qué le falta al guion. Complétalo y vu
 
 Si no tienes las herramientas de Huella, no lo escribas en otro sitio: sigue con la tarea.
 
+## Si te piden explicar una clase: `huella_symbol_guide`
+
+Cuando te pidan explicar una clase o un servicio entero, o al crear o cambiar mucho uno con lógica de dominio, escribe su guía con `huella_symbol_guide`: para qué existe, sus casos de uso y, sobre todo, **todas** sus reglas de negocio, cada una con el texto exacto de la línea donde se decide (`quote`) y los tests que la comprueban de verdad. Si una regla no tiene test, dilo en `doubts`. Huella comprueba las líneas y los tests y te responde lo que no cuadre.
+
 ## Si te lo piden: `huella_walkthrough`
 
 Cuando la persona lo pida, o las instrucciones de Huella digan que lo cuentes al terminar, cuenta además el caso principal como **recorrido guiado** con `huella_walkthrough`: un caso concreto y realista, con datos, seguido por el código en el orden en que **se ejecuta** (no en el que lo escribiste). En cada parada, `transition` dice cómo se llega desde la anterior: qué la llama, o que la anterior terminó y el control vuelve a una de antes. Si ejecutaste tests, usa sus valores reales y márcalos con `from_test`; lo que deduzcas leyendo el código, sin marcar. Huella comprueba que cada parada y cada línea existan y que a cada parada se llegue desde las anteriores: si te responde que algo no cuadra, arréglalo (normalmente falta una parada intermedia) y vuelve a llamarla con el recorrido completo.

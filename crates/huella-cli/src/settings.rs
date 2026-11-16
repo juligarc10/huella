@@ -82,6 +82,7 @@ pub(crate) fn view(args: &ModelArgs, probing: &Probing) -> Value {
         "view": {"value": config.review.view},
         "narrative_code": {"value": config.review.narrative_code.unwrap_or(false)},
         "agent_walkthrough": {"value": config.review.agent_walkthrough.unwrap_or(false)},
+        "learning": {"value": config.review.learning.unwrap_or(true)},
         "key": key_view(provider),
         "problem": crate::model_problem(args),
         "probe": probing.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -158,6 +159,12 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
                 Some(view @ ("steps" | "presentation" | "walk")) => Some(view.into()),
                 Some(_) => bail!("vista desconocida"),
             },
+            // Recordar está activado por defecto: lo que se guarda es «no».
+            "learning" => match value {
+                Value::Null | Value::Bool(true) => None,
+                Value::Bool(false) => Some(false.into()),
+                _ => bail!("learning debe ser sí o no"),
+            },
             "narrative_code" | "agent_walkthrough" => match value {
                 Value::Null | Value::Bool(false) => None,
                 Value::Bool(true) => Some(true.into()),
@@ -179,6 +186,7 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
             "view" => ("review", "view"),
             "narrative_code" => ("review", "narrative_code"),
             "agent_walkthrough" => ("review", "agent_walkthrough"),
+            "learning" => ("review", "learning"),
             _ => ("llm", "context_tokens"),
         };
         edits.push((table, key, edit));
@@ -302,6 +310,10 @@ mod tests {
             save_in(path, r#"{"agent_walkthrough": true}"#).unwrap();
             assert!(crate::language::walkthrough_rule().is_some());
             save_in(path, r#"{"agent_walkthrough": false}"#).unwrap();
+            save_in(path, r#"{"learning": false}"#).unwrap();
+            assert_eq!(config::get().review.learning, Some(false));
+            save_in(path, r#"{"learning": true}"#).unwrap();
+            assert_eq!(config::get().review.learning, None, "activado es lo de por defecto");
             assert!(crate::language::walkthrough_rule().is_none());
             assert!(save_in(path, r#"{"view": "otra"}"#).is_err());
         });

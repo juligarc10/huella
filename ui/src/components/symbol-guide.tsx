@@ -97,9 +97,12 @@ export function SymbolGuidePanel({ path, symbol }: { path: string; symbol: strin
       {errorNote}
       <GuideBody guide={guide} onLine={onLine} />
       <p className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-        <span>
-          {guide.model.replace(/^[^:]+:/, '')} · {dateTime(guide.created_at)}
-        </span>
+        {guide.model === 'agent' ? (
+          <span className="rounded-full bg-brand-soft px-2.5 py-0.5 font-medium text-accent-foreground">Contada por el agente</span>
+        ) : (
+          <span>Preparada por {guide.model.replace(/^[^:]+:/, '')}</span>
+        )}
+        <span>· {dateTime(guide.created_at)}</span>
         <Button size="sm" variant="ghost" className="h-7" onClick={() => start(true)} disabled={understand.isPending}>
           <RefreshCw aria-hidden="true" /> Rehacer
         </Button>

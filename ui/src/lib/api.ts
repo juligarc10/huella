@@ -615,6 +615,8 @@ export interface Settings {
   narrative_code: { value: boolean }
   /** Pedir al agente que cuente la lectura guiada al terminar. */
   agent_walkthrough: { value: boolean }
+  /** Recordar lo que se comprueba. */
+  learning: { value: boolean }
   /** Nunca la clave: de dónde sale y si se puede leer. */
   key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
   problem: string | null
@@ -633,6 +635,7 @@ export type SettingsChange = Partial<{
   view: 'last' | 'steps' | 'presentation' | 'walk'
   narrative_code: boolean
   agent_walkthrough: boolean
+  learning: boolean
 }>
 
 /** Quién escribió una línea de la rama. */
@@ -770,6 +773,14 @@ export interface ReviewResult {
   walking?: { running: boolean; error: string | null } | null
   /** Vista con la que se abre, según Ajustes; `null`: la última que se usó. */
   default_view?: 'steps' | 'presentation' | 'walk' | null
+  /** Lo que se recuerda de lo comprobado; `null` si está desactivado. */
+  learning?: Learning | null
+}
+
+/** Lo comprobado: las respuestas de esta revisión y lo que se sabe de cada término. */
+export interface Learning {
+  checks: Record<string, 'yes' | 'no'>
+  terms: { term: string; meaning: string; known: number; missed: number }[]
 }
 
 /** Una parada del recorrido guiado: un paso del cambio, en orden de ejecución. */
