@@ -784,6 +784,8 @@ export interface WalkStop {
   values: { quote: string; value: string }[]
   /** No se ve en el código cómo se llega aquí. */
   gap: string | null
+  /** Cómo se llega aquí, sacado del código: la parada que la llama y en qué línea. */
+  hop: { kind: 'direct' | 'back' | 'none'; from: number | null; line: number | null; text: string } | null
 }
 
 export interface StoredWalkthrough {
@@ -794,6 +796,11 @@ export interface StoredWalkthrough {
     forks: { step: number; condition: string; outcome: string }[]
     /** Pasos de código que el recorrido no toca. */
     outside: number[]
+    /** Esquemas o tablas del caso, si aportan. */
+    blocks: StoryBlock[]
+    terms: { term: string; meaning: string }[]
+    /** Preguntas para comprobar, con el paso donde se ve. */
+    checks: { question: string; answer: string; step: number | null }[]
   }
   model: string
   recorded_at: string

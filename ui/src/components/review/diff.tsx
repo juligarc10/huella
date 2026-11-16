@@ -278,7 +278,7 @@ export function StepDiff({
                 </span>
                 <CodeText text={line.text} tokens={tokens[index]} />
                 {annotations?.has(index) && (
-                  <span className="ml-6 shrink-0 rounded-md bg-brand-soft px-2 font-sans text-xs leading-6 text-accent-foreground">
+                  <span className="answer-enter ml-6 shrink-0 rounded-md bg-brand-soft px-2 font-sans text-xs leading-6 text-accent-foreground">
                     {annotations.get(index)}
                   </span>
                 )}
