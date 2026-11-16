@@ -7,9 +7,9 @@ revisar y comprender el código que escribe la IA, por tarea (lo que se va a
 mergear), con lo que el agente declara mientras trabaja y una presentación
 guiada del cambio.
 
-## Dónde estamos (2026-11-12)
+## Dónde estamos (2026-11-17)
 
-**Publicada**: v0.7.0.
+**Publicada**: v0.8.0 (migraciones 25 a 28: `huella setup` hace copia antes).
 
 - **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
 - **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
@@ -27,15 +27,20 @@ guiada del cambio.
 - **Tareas** filtradas por estado, con las que tienen cambios nuevos y un buscador; refrescar en cada vista.
 - **Ajustes** en la aplicación: el modelo, la clave (en su fichero 600), probar la conexión y el idioma de las explicaciones.
 
-**Sin publicar** (rama `feature/profundizar-y-simbolos`): entender el código a fondo, no solo el cambio.
+**Desde v0.8.0**: entender el código a fondo, no solo el cambio.
 
 - **Profundizar** en cualquier bloque o selección del diff: el *recorrido* (paso a paso con un ejemplo y sus valores) o las *reglas* (cada condición con sus líneas y los tests que la cubren). Se guardan por el hash del código (migración 25).
 - **Entender este símbolo**, pestaña de la página del símbolo: la guía de una clase entera (para qué existe, glosario, casos de uso, dependencias, reglas por método con sus tests, recorridos, por qué es así según su historia, lo dudoso, orden de lectura y preguntas). Resume los métodos en tandas, cada uno guardado por su código, y luego la clase. Con el Qwen local, `RulesEngine` (25 métodos, 417 líneas) tarda unos 16 minutos la primera vez y unos 5 al rehacerla.
 - **Contexto previo** de cada paso: lo que llaman sus líneas nuevas y no cambia en la revisión, con enlace a su guía.
 - La skill pide registrar las reglas de negocio y la responsabilidad de cada clase.
-- **Recorrido guiado**, tercera vista de la revisión (también en sesiones): un caso con datos seguido por el código en orden de ejecución, parada a parada (llega, pasa, sale, por qué, transición desde la anterior) con los valores junto a las líneas, bifurcaciones y un apéndice con lo que no toca. Dos llamadas al modelo (elegir con un índice de pasos; contar con el código de las paradas); los valores tienen que citar líneas reales y los saltos sin llamada que los una se avisan. Migración 26.
+- **Lectura guiada**, tercera vista de la revisión (también en sesiones): un caso con datos seguido por el código en orden de ejecución, parada a parada (llega, pasa, sale, por qué, transición desde la anterior) con los valores junto a las líneas, bifurcaciones y un apéndice con lo que no toca. Dos llamadas al modelo (elegir con un índice de pasos; contar con el código de las paradas); los valores tienen que citar líneas reales y los saltos sin llamada que los una se avisan. Migración 26.
 - **Ajustes · Cómo leer una revisión**: la vista con la que se abre (por defecto, la última usada) y, opcional, pedir al agente código que se lea de arriba abajo (va en las instrucciones del MCP).
-- Siguiente en esta línea: que el agente escriba el recorrido al terminar (ampliar `example.walk` de `huella_storyline`) y, más adelante, valores de una ejecución real de un test.
+- La lectura guiada va en cinco momentos (vista general, recorrido, lo demás, comprobar y decidir), con un acompañante; cada parada dice cómo se llega a ella (la llamada, la vuelta a una parada anterior o el salto sin llamada), calculado del código. Si falta una parada, Huella la añade desde el código.
+- **El agente cuenta** la lectura guiada (`huella_walkthrough`, con valores reales de los tests) y la guía de una clase (`huella_symbol_guide`); Huella lo comprueba contra el código y le devuelve lo que no cuadra (migración 27). Opcional en Ajustes.
+- **Recordar lo comprobado**: respuestas de «Comprobar» y términos sabidos o por repasar (migración 28).
+- Colores del código con tipos, métodos, campos y anotaciones distintos (paleta de GitHub).
+- Las ediciones de ficheros grandes que Claude Code guarda sin el original se reconstruyen; la revisión de sesiones en worktrees compara con el worktree; tareas con «/» en la clave, borrar tareas.
+- Sin probar con el modelo local: generar la lectura guiada con términos, preguntas y bloques.
 
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
@@ -59,7 +64,7 @@ La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y s
 
 ### 1. Comprobar la calidad con tareas reales
 
-- Volver a contar DUNGEON-1 con la skill de v0.7.0 y ver si las ideas pasan de catálogo a explicación, y si el problema y los escenarios se entienden sin leer el código.
+- Volver a contar DUNGEON-1 con la skill de v0.8.0 y ver si las ideas pasan de catálogo a explicación, y si el problema y los escenarios se entienden sin leer el código.
 - Probar una tarea real de trabajo (varios micros, rama de sprint) y las guías del modelo local, que aún no se han visto con el contexto nuevo.
 - Ajustar la skill (`crates/huella-cli/src/setup/huella-registro.md`) según lo que salga.
 
