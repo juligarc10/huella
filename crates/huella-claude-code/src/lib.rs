@@ -14,7 +14,7 @@ mod activity;
 
 use huella_core::{
     Activity, AfterState, Agent, AgentBatch, AgentError, Conversation, EditContext, EditKind, EditOrigin, FileEdit,
-    Speaker, TranscriptCursor, Turn,
+    Replacement, Speaker, TranscriptCursor, Turn,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -305,13 +305,6 @@ fn edit_from_result(
     Some(FileEdit { origin, path, kind, before, after, user_modified, context })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Replacement {
-    old: String,
-    new: String,
-    replace_all: bool,
-}
-
 /// `Edit` trae un único reemplazo; `MultiEdit`, una lista `edits`.
 fn replacements(result: &Map<String, Value>) -> Option<Vec<Replacement>> {
     if let Some(Value::Array(edits)) = result.get("edits") {
@@ -328,30 +321,16 @@ fn replacement(fields: &Map<String, Value>) -> Option<Replacement> {
     Some(Replacement { old: old.to_owned(), new: new.to_owned(), replace_all })
 }
 
-/// Aplica los reemplazos al fichero original. Sin original, o si algún
-/// fragmento no aparece, solo se conoce el texto insertado.
+/// Aplica los reemplazos al fichero original. Sin original (Claude Code no lo
+/// guarda en ficheros grandes), se guardan los reemplazos para aplicarlos sobre
+/// lo que se sepa del fichero; si algún fragmento no aparece en el original,
+/// solo se conoce el texto insertado.
 fn apply_replacements(before: Option<&str>, replacements: &[Replacement]) -> AfterState {
-    let fragment_only = || {
-        let inserted: Vec<&str> = replacements.iter().map(|r| r.new.as_str()).collect();
-        AfterState::FragmentOnly(inserted.join("\n"))
+    let fragment = || replacements.iter().map(|r| r.new.as_str()).collect::<Vec<_>>().join("\n");
+    let Some(before) = before else {
+        return AfterState::Replaced { fragment: fragment(), replacements: replacements.to_vec() };
     };
-    let Some(mut text) = before.map(str::to_owned) else { return fragment_only() };
-    for r in replacements {
-        if r.old.is_empty() {
-            // Claude Code permite crear un fichero vacío con old_string = "".
-            if !text.is_empty() {
-                return fragment_only();
-            }
-            text.clone_from(&r.new);
-        } else if !text.contains(&r.old) {
-            return fragment_only();
-        } else if r.replace_all {
-            text = text.replace(&r.old, &r.new);
-        } else {
-            text = text.replacen(&r.old, &r.new, 1);
-        }
-    }
-    AfterState::Known(text)
+    Replacement::apply(before, replacements).map_or_else(|| AfterState::FragmentOnly(fragment()), AfterState::Known)
 }
 
 fn str_field<'a>(fields: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -436,11 +415,15 @@ mod tests {
     }
 
     #[test]
-    fn edit_without_original_file_keeps_only_the_fragment() {
+    fn edit_without_original_file_keeps_its_replacements() {
         let line = edit_line(&serde_json::json!({
             "filePath": "/repo/a.ts", "oldString": "x", "newString": "y", "originalFile": null,
         }));
-        assert_eq!(parse(&[&line]).edits[0].after, AfterState::FragmentOnly("y".into()));
+        let replaced = AfterState::Replaced {
+            fragment: "y".into(),
+            replacements: vec![Replacement { old: "x".into(), new: "y".into(), replace_all: false }],
+        };
+        assert_eq!(parse(&[&line]).edits[0].after, replaced, "sin original, se guardan los reemplazos");
     }
 
     #[test]

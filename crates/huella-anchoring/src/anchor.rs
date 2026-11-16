@@ -43,7 +43,7 @@ pub fn anchor_edit(edit: &FileEdit, read_current: impl Fn(&Path) -> Option<Strin
             let changes = diff_changes(edit.before.as_deref().unwrap_or_default(), after);
             (after.clone(), changes, Confidence::Exact)
         }
-        AfterState::FragmentOnly(fragment) => {
+        AfterState::FragmentOnly(fragment) | AfterState::Replaced { fragment, .. } => {
             if fragment.trim().is_empty() {
                 return unresolved("borrado sin fichero original en la transcripción");
             }
