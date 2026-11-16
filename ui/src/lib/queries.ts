@@ -113,7 +113,7 @@ export function useSessions() {
 export function useReview(session: string | undefined) {
   return useQuery({
     queryKey: ['review', session],
-    queryFn: () => api.get<ReviewResult>(`review/${session}`),
+    queryFn: () => api.get<ReviewResult>(`review/${encodeURIComponent(session ?? '')}`),
     enabled: Boolean(session),
     staleTime: 60_000,
     // Mientras el modelo responde una pregunta, se consulta a menudo.
@@ -197,7 +197,7 @@ export function useWalkthrough(session: string) {
 export function useAudit(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post(`review/${session}/audit`, {}),
+    mutationFn: () => api.post(`review/${encodeURIComponent(session)}/audit`, {}),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -206,7 +206,7 @@ export function useAudit(session: string) {
 export function useRefreshReview(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post(`review/${session}/refresh`, {}),
+    mutationFn: () => api.post(`review/${encodeURIComponent(session)}/refresh`, {}),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['review', session] })
       client.invalidateQueries({ queryKey: ['task'] })
@@ -225,7 +225,7 @@ export function useInbox() {
 export function useSetVerdict(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (mark: { key: string; hash: string; verdict: Verdict | null }) => api.post(`review/${session}/mark`, mark),
+    mutationFn: (mark: { key: string; hash: string; verdict: Verdict | null }) => api.post(`review/${encodeURIComponent(session)}/mark`, mark),
     onMutate: (mark) => {
       client.setQueryData<ReviewResult>(['review', session], (review) => {
         if (!review) return review
@@ -259,7 +259,7 @@ export function useSetVerdict(session: string) {
 export function useSetReviewStatus(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (status: ReviewStatus) => api.post(`review/${session}/status`, { status }),
+    mutationFn: (status: ReviewStatus) => api.post(`review/${encodeURIComponent(session)}/status`, { status }),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['review', session] })
       client.invalidateQueries({ queryKey: ['inbox'] })
@@ -272,7 +272,7 @@ export function useAddComment(session: string) {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (comment: { key: string; quote: string | null; body: string }) =>
-      api.post<{ id: number }>(`review/${session}/comments`, comment),
+      api.post<{ id: number }>(`review/${encodeURIComponent(session)}/comments`, comment),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['review', session] })
       client.invalidateQueries({ queryKey: ['inbox'] })
@@ -307,7 +307,7 @@ export function useBranch(project: string | null, base: string) {
 export function useImpact(session: string) {
   return useQuery({
     queryKey: ['impact', session],
-    queryFn: () => api.get<ImpactResult>(`review/${session}/impact`),
+    queryFn: () => api.get<ImpactResult>(`review/${encodeURIComponent(session)}/impact`),
     staleTime: 5 * 60_000,
   })
 }
@@ -318,7 +318,7 @@ export function useDefinition(session: string, name: string, path: string, befor
     queryKey: ['definition', session, name, path, before],
     queryFn: () =>
       api.get<DefinitionResult>(
-        `review/${session}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}&before=${encodeURIComponent(before ?? '')}`,
+        `review/${encodeURIComponent(session)}/definition?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}&before=${encodeURIComponent(before ?? '')}`,
       ),
     staleTime: 5 * 60_000,
   })
@@ -328,7 +328,7 @@ export function useDefinition(session: string, name: string, path: string, befor
 export function useRevisions(session: string) {
   return useQuery({
     queryKey: ['revisions', session],
-    queryFn: () => api.get<{ points: RevisionPoint[] }>(`review/${session}/revisions`),
+    queryFn: () => api.get<{ points: RevisionPoint[] }>(`review/${encodeURIComponent(session)}/revisions`),
   })
 }
 
@@ -336,7 +336,7 @@ export function useRevisions(session: string) {
 export function useChanges(session: string, point: RevisionPoint | null) {
   return useQuery({
     queryKey: ['changes', session, point?.id],
-    queryFn: () => api.post<{ steps: StepChange[] }>(`review/${session}/changes`, { heads: point?.heads }),
+    queryFn: () => api.post<{ steps: StepChange[] }>(`review/${encodeURIComponent(session)}/changes`, { heads: point?.heads }),
     enabled: Boolean(point),
   })
 }
@@ -344,7 +344,7 @@ export function useChanges(session: string, point: RevisionPoint | null) {
 export function useFeedback(session: string, enabled: boolean) {
   return useQuery({
     queryKey: ['feedback', session],
-    queryFn: () => api.get<{ markdown: string; items: number }>(`review/${session}/feedback`),
+    queryFn: () => api.get<{ markdown: string; items: number }>(`review/${encodeURIComponent(session)}/feedback`),
     enabled,
     staleTime: 0,
   })
@@ -471,7 +471,7 @@ export function useDeleteCodeQuestion(path: string) {
 export function useCoverage(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post(`review/${session}/coverage`, {}),
+    mutationFn: () => api.post(`review/${encodeURIComponent(session)}/coverage`, {}),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -481,7 +481,7 @@ export function useCoverage(session: string) {
 export function useStoryline(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post(`review/${session}/storyline`, {}),
+    mutationFn: () => api.post(`review/${encodeURIComponent(session)}/storyline`, {}),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -491,7 +491,7 @@ export function useStoryline(session: string) {
 export function useGuide(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (keys: string[]) => api.post(`review/${session}/guide`, { keys }),
+    mutationFn: (keys: string[]) => api.post(`review/${encodeURIComponent(session)}/guide`, { keys }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -501,7 +501,7 @@ export function useGuide(session: string) {
 export function useGuideCheck(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (check: { key: string; index: number; done: boolean }) => api.post(`review/${session}/guide/check`, check),
+    mutationFn: (check: { key: string; index: number; done: boolean }) => api.post(`review/${encodeURIComponent(session)}/guide/check`, check),
     onMutate: (check) => {
       client.setQueryData<ReviewResult>(['review', session], (review) =>
         review && {
@@ -544,7 +544,7 @@ export function useDismissCodeAsk(path: string, session?: string) {
 export function useClearQuestions(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (step: number | null) => api.post(`review/${session}/ask/clear`, { step }),
+    mutationFn: (step: number | null) => api.post(`review/${encodeURIComponent(session)}/ask/clear`, { step }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -553,7 +553,7 @@ export function useClearQuestions(session: string) {
 export function useAsk(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { question: string; step: number | null; think?: boolean }) => api.post(`review/${session}/ask`, ask),
+    mutationFn: (ask: { question: string; step: number | null; think?: boolean }) => api.post(`review/${encodeURIComponent(session)}/ask`, ask),
     onSuccess: (_, ask) => {
       noteAsked(askId.general(ask.step, ask.question), ask.question)
       client.invalidateQueries({ queryKey: ['review', session] })
