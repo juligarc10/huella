@@ -96,6 +96,29 @@ struct ExtractionOutput {
     decisions: Vec<ExtractedDecision>,
 }
 
+/// El cuerpo de una respuesta de error, para enseñarlo: una página HTML (la de
+/// un proxy o un túnel caído) se queda en su título; lo demás, recortado.
+#[must_use]
+pub fn error_body(body: &str) -> String {
+    const MAX: usize = 500;
+    let lower = body.to_lowercase();
+    if lower.contains("<html") || lower.trim_start().starts_with("<!doctype") {
+        let title = lower
+            .find("<title>")
+            .and_then(|start| lower[start + 7..].find("</title>").map(|end| body[start + 7..start + 7 + end].trim()))
+            .filter(|title| !title.is_empty());
+        return title.map_or_else(
+            || "una página HTML en vez de la respuesta del modelo".to_owned(),
+            |title| title.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+    }
+    let trimmed = body.trim();
+    match trimmed.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+        None => trimmed.to_owned(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
     #[error("falta la credencial: define {0}")]
@@ -356,6 +379,18 @@ mod tests {
     use huella_core::Turn;
 
     use super::*;
+
+    #[test]
+    fn an_html_error_page_is_reduced_to_its_title() {
+        let page = "<!doctype html>\n<html><head>\n<title>Cloudflare Tunnel error | llamacpp.example.com | Cloudflare</title></head><body>…</body></html>";
+        assert_eq!(error_body(page), "Cloudflare Tunnel error | llamacpp.example.com | Cloudflare");
+        assert_eq!(
+            error_body("<html><body>sin título</body></html>"),
+            "una página HTML en vez de la respuesta del modelo"
+        );
+        assert_eq!(error_body("  {\"error\": \"model not found\"} "), "{\"error\": \"model not found\"}");
+        assert_eq!(error_body(&"x".repeat(900)).chars().count(), 501);
+    }
 
     fn conversation(texts: &[(Speaker, &str)]) -> Conversation {
         Conversation {

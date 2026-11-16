@@ -114,7 +114,7 @@ impl OpenAiCompatible {
         let status = response.status().as_u16();
         if status != 200 {
             let body = response.body_mut().read_to_string().map_err(network)?;
-            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+            return Err(ExtractError::Api { provider: PROVIDER, status, body: crate::error_body(&body) });
         }
         collect_stream(BufReader::new(response.body_mut().as_reader()))
     }
@@ -187,7 +187,7 @@ impl OpenAiEmbeddings {
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().map_err(network)?;
         if status != 200 {
-            return Err(ExtractError::Api { provider: PROVIDER, status, body });
+            return Err(ExtractError::Api { provider: PROVIDER, status, body: crate::error_body(&body) });
         }
         parse_embeddings(&body, texts.len())
     }
