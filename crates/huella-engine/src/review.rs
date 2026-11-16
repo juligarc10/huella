@@ -1,6 +1,7 @@
 //! Revisión de lo que cambió en una sesión.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 
 use huella_core::FileEdit;
 use huella_review::SessionReview;
@@ -79,11 +80,31 @@ pub fn session_review(sources: &crate::Sources, prefix: &str) -> Result<SessionR
     // Una sesión continuada se reparte entre transcripciones: orden por tiempo,
     // estable para conservar el orden de escritura dentro de cada una.
     edits.sort_by(|a, b| a.origin.timestamp.cmp(&b.origin.timestamp));
+    // Dónde está en el disco cada fichero: la ruta normalizada lleva un worktree
+    // al repositorio principal, que puede estar en otra rama. Se lee la copia
+    // en la que editó la sesión.
+    let on_disk: HashMap<String, PathBuf> = edits
+        .iter()
+        .map(|edit| {
+            let real = edit
+                .origin
+                .cwd
+                .as_deref()
+                .filter(|_| edit.path.is_relative())
+                .map_or_else(|| edit.path.clone(), |cwd| cwd.join(&edit.path));
+            (normalize_path(&edit.path, edit.origin.cwd.as_deref()), real)
+        })
+        .collect();
     // El disco solo se compara si ninguna sesión posterior tocó el fichero: si
     // no, sus cambios se confundirían con los de esta.
     let current = |path: &str| {
         let last_session = latest.get(path).map(|(_, session)| session.as_str());
-        (last_session == Some(session.as_str())).then(|| std::fs::read_to_string(path).ok()).flatten()
+        if last_session != Some(session.as_str()) {
+            return None;
+        }
+        // Si el worktree ya no existe, no se compara: el repositorio principal no dice nada de esa copia.
+        let real = on_disk.get(path).map_or_else(|| PathBuf::from(path), Clone::clone);
+        std::fs::read_to_string(real).ok()
     };
     Ok(huella_review::build(&session, &edits, |edit| normalize_path(&edit.path, edit.origin.cwd.as_deref()), current))
 }
@@ -133,6 +154,34 @@ mod tests {
             session_review(&Sources::claude_code(&dir), "aaaa"),
             Err(EngineError::AmbiguousSession { .. })
         ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn compares_with_the_worktree_the_session_edited_not_the_main_checkout() {
+        let dir = std::env::temp_dir().join(format!("huella-review-wt-{}", std::process::id()));
+        let repo = dir.join("repo");
+        let worktree = repo.join(".claude/worktrees/w");
+        std::fs::create_dir_all(dir.join("-repo")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        // El repositorio principal está en otra rama, con otra versión del fichero.
+        std::fs::write(repo.join("a.ts"), "otra rama\n").unwrap();
+        std::fs::write(worktree.join("a.ts"), "a\nB\n").unwrap();
+        let path = worktree.join("a.ts").display().to_string();
+        let change =
+            serde_json::json!({"filePath": path, "oldString": "b", "newString": "B", "originalFile": "a\nb\n"});
+        std::fs::write(dir.join("-repo/t.jsonl"), format!("{}\n", line("e1", "wt-1", "2026-10-27T10:00:00Z", &change)))
+            .unwrap();
+
+        let review = session_review(&Sources::claude_code(&dir), "wt").unwrap();
+        assert_eq!(review.files[0].path, repo.join("a.ts").display().to_string());
+        assert_eq!(review.files[0].after, "a\nB\n");
+        assert!(!review.steps.iter().any(|step| matches!(step, huella_review::Step::External { .. })));
+
+        // Sin el worktree no hay con qué comparar: no se inventan cambios a mano.
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let review = session_review(&Sources::claude_code(&dir), "wt").unwrap();
+        assert!(!review.steps.iter().any(|step| matches!(step, huella_review::Step::External { .. })));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

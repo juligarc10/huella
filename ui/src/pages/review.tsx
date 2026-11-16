@@ -8,6 +8,7 @@ import {
   GitCompareArrows,
   MessageSquare,
   MessageSquarePlus,
+  RefreshCw,
   Sparkles,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -234,9 +235,36 @@ export function Review({
   })
 
   if (!step) {
+    if (!review.task) {
+      return (
+        <EmptyState icon={<FileQuestion className="size-8" />} title="Esta sesión no tiene pasos que revisar">
+          No hay cambios netos en ningún fichero.
+        </EmptyState>
+      )
+    }
+    // En una tarea se revisan commits: lo que aún no está en uno no aparece.
     return (
-      <EmptyState icon={<FileQuestion className="size-8" />} title="Esta sesión no tiene pasos que revisar">
-        No hay cambios netos en ningún fichero.
+      <EmptyState icon={<FileQuestion className="size-8" />} title="Esta tarea aún no tiene cambios que revisar">
+        <span className="flex flex-col items-center gap-3">
+          <span>Se revisa lo que hay en commits en cada rama, contra la rama a la que se mergea. Lo que no está en un commit no cuenta.</span>
+          {review.task.repos.map((repo) => (
+            <span key={repo.repo} className="text-sm">
+              <strong className="text-foreground">{repo.name ?? repo.repo}</strong>: <Mono>{repo.branch}</Mono>{' '}
+              {repo.commits === 0 ? 'no tiene commits por encima de' : 'no cambia nada respecto a'} <Mono>{repo.target ?? '¿?'}</Mono>
+              {repo.uncommitted.length > 0 && ` (${repo.uncommitted.length} ficheros sin commitear)`}
+            </span>
+          ))}
+          <span className="flex flex-wrap justify-center gap-2">
+            <Button variant="outline" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+              <RefreshCw className={cn(refresh.isPending && 'animate-spin')} aria-hidden="true" /> Volver a buscar
+            </Button>
+            {onTaskSetup && (
+              <Button variant="ghost" onClick={onTaskSetup}>
+                Repositorios y destino
+              </Button>
+            )}
+          </span>
+        </span>
       </EmptyState>
     )
   }
