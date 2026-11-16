@@ -375,6 +375,7 @@ fn api(app: &mut App, method: &str, path: &str, params: &HashMap<String, String>
         ("POST", ["review", session, "storyline"]) => return start_storyline(app, session),
         ("POST", ["review", session, "audit"]) => return start_audit(app, session),
         ("POST", ["review", session, "walkthrough"]) => return start_walkthrough(app, session, body),
+        ("POST", ["review", session, "learning"]) => record_check(app, session, body)?,
         ("POST", ["review", session, "guide", "check"]) => check_guide(app, session, body)?,
         ("POST", ["review", session, "ask"]) => return ask(app, session, body),
         ("POST", ["review", session, "ask", "clear"]) => clear_questions(app, session, body)?,
@@ -650,6 +651,7 @@ fn review(app: &mut App, session: &str) -> Result<Value> {
     };
     value["walkthrough"] = json!(walkthrough);
     value["default_view"] = json!(crate::config::get().review.view);
+    value["learning"] = learning(app, &review.session_id)?;
     value["walking"] = json!(app.walking.lock().unwrap_or_else(PoisonError::into_inner).get(&review.session_id));
     // Veredicto de cada paso, si se dio con su contenido actual.
     let verdicts = app.store.review_verdicts(&review.session_id)?;
@@ -1253,6 +1255,47 @@ fn start_audit(app: &mut App, session: &str) -> Result<(u16, Value)> {
         }
     });
     Ok((202, json!({"running": true})))
+}
+
+/// Lo que se recuerda de lo comprobado: las respuestas de esta revisión y lo que
+/// se sabe de cada término. `null` si recordar está desactivado.
+fn learning(app: &App, review_id: &str) -> Result<Value> {
+    if !crate::config::get().review.learning.unwrap_or(true) {
+        return Ok(Value::Null);
+    }
+    let checks: serde_json::Map<String, Value> =
+        app.store.checks(review_id)?.into_iter().map(|(question, verdict)| (question, json!(verdict))).collect();
+    let terms: Vec<Value> = app
+        .store
+        .learned_terms()?
+        .into_iter()
+        .map(|(term, meaning, known, missed)| json!({"term": term, "meaning": meaning, "known": known, "missed": missed}))
+        .collect();
+    Ok(json!({"checks": checks, "terms": terms}))
+}
+
+/// Guarda la respuesta a una pregunta de comprobación y cuenta sus términos.
+fn record_check(app: &mut App, session: &str, body: &str) -> Result<Value> {
+    if !crate::config::get().review.learning.unwrap_or(true) {
+        return Ok(json!({"saved": false}));
+    }
+    let request: Value = serde_json::from_str(body).context("cuerpo JSON no válido")?;
+    let question =
+        request["question"].as_str().map(str::trim).filter(|q| !q.is_empty()).context("falta la pregunta")?;
+    let Some(verdict @ ("yes" | "no")) = request["verdict"].as_str() else { bail!("verdict debe ser yes o no") };
+    let terms: Vec<(String, String)> = request["terms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|term| {
+            Some((term["term"].as_str()?.to_owned(), term["meaning"].as_str().unwrap_or_default().to_owned()))
+        })
+        .take(20)
+        .collect();
+    load_review(app, session)?;
+    let review_id = app.review.as_ref().map(|(review, _)| review.session_id.clone()).context("revisión no cargada")?;
+    app.store.record_check(&review_id, question, verdict, &terms)?;
+    Ok(json!({"saved": true}))
 }
 
 /// Recorrido guiado de una revisión (de una tarea o de una sesión): lo escribe un

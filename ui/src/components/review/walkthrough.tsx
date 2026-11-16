@@ -28,11 +28,29 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { ReviewResult, ReviewStep, StoredWalkthrough, WalkStop } from '@/lib/api'
 import { dateTime } from '@/lib/format'
-import { useAskCode, useExplainCode, useSetReviewStatus, useWalkthrough } from '@/lib/queries'
+import { useAskCode, useExplainCode, useRecordCheck, useSetReviewStatus, useWalkthrough } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 type Walk = StoredWalkthrough['walkthrough']
 type Terms = { term: string; meaning: string }[]
+
+/** Los términos que aparecen en un texto. */
+const termsIn = (terms: Terms, text: string) => terms.filter((term) => text.toLowerCase().includes(term.term.toLowerCase()))
+
+/** Lo aprendido, para esta lectura: qué términos ya sabes y cuáles te costaron. */
+function learned(review: ReviewResult, terms: Terms) {
+  const all = review.learning?.terms ?? []
+  const of = (term: string) => all.find((item) => item.term === term.toLowerCase())
+  const known = terms.filter((term) => {
+    const found = of(term.term)
+    return found !== undefined && found.known > found.missed
+  })
+  const shaky = terms.filter((term) => {
+    const found = of(term.term)
+    return found !== undefined && found.missed >= found.known
+  })
+  return { known, shaky }
+}
 
 const stepName = (step: ReviewStep | undefined) => step?.symbol ?? step?.display_path ?? 'Paso'
 /** El título de una parada; la que añadió Huella no trae texto, solo su símbolo. */
@@ -181,17 +199,29 @@ function Guided({
   footer: ReactNode
 }) {
   const walk = stored.walkthrough
-  const terms: Terms = useMemo(() => [...walk.terms, ...(review.storyline?.concepts ?? [])], [walk.terms, review.storyline])
+  const allTerms: Terms = useMemo(() => [...walk.terms, ...(review.storyline?.concepts ?? [])], [walk.terms, review.storyline])
+  const memory = useMemo(() => learned(review, allTerms), [review, allTerms])
+  // Lo que ya sabes no se vuelve a subrayar: menos ruido, más foco en lo nuevo.
+  const terms: Terms = useMemo(() => allTerms.filter((term) => !memory.known.includes(term)), [allTerms, memory])
+  const recordCheck = useRecordCheck(session)
   const [moment, setMoment] = useState<Moment>('overview')
   const [stop, setStop] = useState(0)
   const [beat, setBeat] = useState(0)
   const [seen, setSeen] = useState<Set<number>>(() => new Set([0]))
-  const [known, setKnown] = useState<Record<number, 'yes' | 'no'>>({})
+  // Las respuestas ya dadas en esta revisión se recuerdan.
+  const [known, setKnown] = useState<Record<number, 'yes' | 'no'>>(() =>
+    Object.fromEntries(
+      walk.checks.flatMap((check, index) => {
+        const verdict = review.learning?.checks[check.question]
+        return verdict ? [[index, verdict]] : []
+      }),
+    ),
+  )
   const [playing, setPlaying] = useState(false)
   const [voice, setVoice] = useState(false)
   const [focusMode, setFocusMode] = useState(false)
   const askRef = useRef<HTMLTextAreaElement>(null)
-  const [feed, setFeed] = useState<Message[]>(() => arrival(walk, 0))
+  const [feed, setFeed] = useState<Message[]>(() => arrival(walk, 0, memory.shaky))
   const say = (kind: Message['kind'], text: string) =>
     setFeed((before) => [...before, { id: `${Date.now()}-${before.length}`, kind, text }])
   const current = walk.stops[stop]
@@ -202,7 +232,7 @@ function Guided({
   const goStop = (index: number, atEnd = false) => {
     const next = Math.min(Math.max(index, 0), walk.stops.length - 1)
     setStop(next)
-    if (!seen.has(next)) setFeed((before) => [...before, ...arrival(walk, next)])
+    if (!seen.has(next)) setFeed((before) => [...before, ...arrival(walk, next, memory.shaky)])
     setSeen((before) => new Set(before).add(next))
     const nextKeys = keyLines(review.steps[walk.stops[next].step], walk.stops[next])
     setBeat(atEnd ? nextKeys.length : 0)
@@ -316,7 +346,7 @@ function Guided({
         })}
       </nav>
 
-      {moment === 'overview' && <Overview review={review} walk={walk} source={stored.source} terms={terms} onStart={() => setMoment('walk')} onStop={(index) => { setMoment('walk'); goStop(index) }} />}
+      {moment === 'overview' && <Overview review={review} walk={walk} source={stored.source} terms={terms} memory={memory} onStart={() => setMoment('walk')} onStop={(index) => { setMoment('walk'); goStop(index) }} />}
 
       {moment === 'walk' && current && step && (
         <div className={cn('grid items-start gap-4', focusMode ? 'mx-auto w-full max-w-5xl' : 'lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(0,1fr)_300px]')}>
@@ -398,7 +428,12 @@ function Guided({
           walk={walk}
           terms={terms}
           known={known}
-          onKnown={(index, value) => setKnown((before) => ({ ...before, [index]: value }))}
+          onKnown={(index, value) => {
+            setKnown((before) => ({ ...before, [index]: value }))
+            const check = walk.checks[index]
+            if (review.learning !== null && review.learning !== undefined)
+              recordCheck.mutate({ question: check.question, verdict: value, terms: termsIn(allTerms, `${check.question} ${check.answer}`) })
+          }}
           onStop={(index) => {
             setMoment('walk')
             goStop(index)
@@ -441,6 +476,7 @@ function Overview({
   walk,
   source,
   terms,
+  memory,
   onStart,
   onStop,
 }: {
@@ -448,6 +484,7 @@ function Overview({
   walk: Walk
   source: StoredWalkthrough['source']
   terms: Terms
+  memory: { known: Terms; shaky: Terms }
   onStart: () => void
   onStop: (index: number) => void
 }) {
@@ -535,6 +572,29 @@ function Overview({
           </table>
         </div>
       </Panel>
+      {(memory.known.length > 0 || memory.shaky.length > 0) && (
+        <Panel className="flex flex-col gap-3">
+          <h2 className="font-semibold">Lo que ya has visto en otras revisiones</h2>
+          {memory.shaky.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-sm font-medium text-warn">Para repasar: te costó antes</p>
+              <ul className="flex flex-col gap-1 text-sm">
+                {memory.shaky.map((term) => (
+                  <li key={term.term}>
+                    <span className="font-semibold">{term.term}</span> <span className="text-muted-foreground">— {term.meaning}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {memory.known.length > 0 && (
+            <p className="text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">Ya lo sabes, así que no lo subrayo: </span>
+              {memory.known.map((term) => term.term).join(', ')}.
+            </p>
+          )}
+        </Panel>
+      )}
       {walk.blocks.length > 0 && <StoryBlocks blocks={walk.blocks} />}
     </div>
   )
@@ -851,7 +911,7 @@ function HopCard({
 type Message = { id: string; kind: 'huella' | 'me' | 'warn'; text: string }
 
 /** Lo que dice el acompañante al llegar a una parada: qué mirar y, si el salto es de vuelta o no se ve, por qué. */
-function arrival(walk: Walk, position: number): Message[] {
+function arrival(walk: Walk, position: number, shaky: Terms = []): Message[] {
   const stop = walk.stops[position]
   if (!stop) return []
   const out: Message[] = []
@@ -871,6 +931,8 @@ function arrival(walk: Walk, position: number): Message[] {
     add('huella', `Ojo al salto: esta parada no viene de la anterior. Cuando una función termina, el control vuelve a quien la llamó; aquí vuelve a la parada ${(stop.hop.from ?? 0) + 1} y desde ahí sigue.`)
   if (stop.hop?.kind === 'none') add('warn', 'Aquí el hilo se rompe: ninguna parada anterior llama a esta. Antes de fiarte del orden, mira quién la llama de verdad.')
   if (walk.forks.some((fork) => fork.step === stop.step)) add('huella', 'Aquí el camino puede cambiar: abre los «¿Y si…?» para ver qué pasaría con otro caso.')
+  for (const term of termsIn(shaky, `${stop.title} ${stop.transition} ${stop.arrives} ${stop.does} ${stop.leaves}`).slice(0, 2))
+    add('huella', `Aquí sale «${term.term}», que te costó la otra vez: ${term.meaning}`)
   return out
 }
 

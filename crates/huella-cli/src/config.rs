@@ -60,6 +60,8 @@ pub struct Review {
     pub narrative_code: Option<bool>,
     /// Pedir al agente que cuente la lectura guiada al terminar (`huella_walkthrough`).
     pub agent_walkthrough: Option<bool>,
+    /// Recordar lo que se comprueba (respuestas y términos); sin definir, sí.
+    pub learning: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]

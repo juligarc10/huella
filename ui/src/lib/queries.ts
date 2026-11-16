@@ -183,6 +183,17 @@ export function useDeleteTask() {
 }
 
 /** Vuelve a traer el remoto y a construir la revisión. */
+/** Guarda la respuesta a una pregunta de comprobación, con los términos que aparecían. */
+export function useRecordCheck(session: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (check: { question: string; verdict: 'yes' | 'no'; terms: { term: string; meaning: string }[] }) =>
+      api.post(`review/${encodeURIComponent(session)}/learning`, check),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
+    onError: (error) => toast.error(error.message),
+  })
+}
+
 /** Prepara el recorrido guiado de una revisión; llega con la revisión. */
 export function useWalkthrough(session: string) {
   const client = useQueryClient()

@@ -455,6 +455,24 @@ const MIGRATIONS: &[&str] = &[
         content         TEXT NOT NULL
     );
 ",
+    // 28: lo que la persona comprobó que entiende: sus respuestas a las preguntas
+    // de cada revisión y, de los términos que aparecían, cuántas veces los supo.
+    r"
+    CREATE TABLE learning_check (
+        review_id       TEXT NOT NULL,
+        question        TEXT NOT NULL,
+        verdict         TEXT NOT NULL,
+        answered_at     TEXT NOT NULL,
+        PRIMARY KEY (review_id, question)
+    );
+    CREATE TABLE learning_term (
+        term            TEXT PRIMARY KEY,
+        meaning         TEXT NOT NULL,
+        known           INTEGER NOT NULL DEFAULT 0,
+        missed          INTEGER NOT NULL DEFAULT 0,
+        last_at         TEXT NOT NULL
+    );
+",
 ];
 
 /// Lo que no cuadra entre un guion y su código, guardado.
@@ -2240,6 +2258,82 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Guarda la respuesta a una pregunta de comprobación (`yes`: la sabía; `no`:
+    /// no la sabía) y cuenta los términos que aparecían en ella. Si ya se había
+    /// respondido, se corrige: los términos no se cuentan dos veces.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn record_check(
+        &mut self,
+        review_id: &str,
+        question: &str,
+        verdict: &str,
+        terms: &[(String, String)],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let before: Option<String> = tx
+            .query_row(
+                "SELECT verdict FROM learning_check WHERE review_id = ?1 AND question = ?2",
+                [review_id, question],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "INSERT INTO learning_check (review_id, question, verdict, answered_at)
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(review_id, question) DO UPDATE SET verdict = excluded.verdict, answered_at = excluded.answered_at",
+            params![review_id, question, verdict],
+        )?;
+        for (term, meaning) in terms {
+            let key = term.trim().to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            // Lo que contaba la respuesta anterior se descuenta antes de contar la nueva.
+            let undo = match before.as_deref() {
+                Some("yes") => "known = MAX(known - 1, 0)",
+                Some("no") => "missed = MAX(missed - 1, 0)",
+                _ => "known = known",
+            };
+            let count = if verdict == "yes" { "known = known + 1" } else { "missed = missed + 1" };
+            tx.execute(
+                "INSERT INTO learning_term (term, meaning, last_at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(term) DO NOTHING",
+                params![key, meaning],
+            )?;
+            tx.execute(&format!("UPDATE learning_term SET {undo} WHERE term = ?1"), [&key])?;
+            tx.execute(
+                &format!("UPDATE learning_term SET {count}, meaning = ?2, last_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE term = ?1"),
+                params![key, meaning],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Las respuestas a las preguntas de una revisión: `(pregunta, veredicto)`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn checks(&self, review_id: &str) -> Result<Vec<(String, String)>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT question, verdict FROM learning_check WHERE review_id = ?1")?;
+        let rows = statement.query_map([review_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Lo que se sabe de cada término: `(término, significado, veces sabido, veces fallado)`.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn learned_terms(&self) -> Result<Vec<(String, String, u32, u32)>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT term, meaning, known, missed FROM learning_term ORDER BY last_at DESC")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// La última auditoría del guion de una revisión.
     ///
     /// # Errors
@@ -3940,6 +4034,20 @@ mod tests {
         assert!(!found[0].quote.contains("a8f3k2j9") && !found[0].answer.contains("a8f3k2j9"));
         assert!(store.delete_code_question(id).unwrap());
         assert_eq!(store.code_questions("/r/a.ts").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn checks_are_remembered_and_count_their_terms_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let terms = vec![("Semilla".to_owned(), "fija el azar".to_owned())];
+        store.record_check("task:A", "¿misma mazmorra?", "no", &terms).unwrap();
+        assert_eq!(store.learned_terms().unwrap(), vec![("semilla".into(), "fija el azar".into(), 0, 1)]);
+        // Se corrige: la respuesta anterior se descuenta.
+        store.record_check("task:A", "¿misma mazmorra?", "yes", &terms).unwrap();
+        assert_eq!(store.learned_terms().unwrap(), vec![("semilla".into(), "fija el azar".into(), 1, 0)]);
+        store.record_check("task:B", "otra", "yes", &terms).unwrap();
+        assert_eq!(store.learned_terms().unwrap()[0].2, 2);
+        assert_eq!(store.checks("task:A").unwrap(), vec![("¿misma mazmorra?".into(), "yes".into())]);
     }
 
     #[test]
