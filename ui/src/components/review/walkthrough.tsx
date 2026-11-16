@@ -35,6 +35,8 @@ type Walk = StoredWalkthrough['walkthrough']
 type Terms = { term: string; meaning: string }[]
 
 const stepName = (step: ReviewStep | undefined) => step?.symbol ?? step?.display_path ?? 'Paso'
+/** El título de una parada; la que añadió Huella no trae texto, solo su símbolo. */
+const stopTitle = (stop: WalkStop, step: ReviewStep | undefined) => stop.title || `Paso intermedio: ${shortName(step)}`
 const shortName = (step: ReviewStep | undefined) => stepName(step).split(/\.|::/).slice(-2).join('.')
 const reduced = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -233,7 +235,7 @@ function Guided({
       ? ''
       : beat > 0
         ? `Línea ${keys[beat - 1].index + 1}: ${keys[beat - 1].value}`
-        : `Parada ${stop + 1} de ${walk.stops.length}: ${current.title}. ${hopSentence(current, walk, review)}`
+        : `Parada ${stop + 1} de ${walk.stops.length}: ${stopTitle(current, step)}. ${hopSentence(current, walk, review)}`
   useEffect(() => {
     if (moment !== 'walk' || !current) return
     if (voice && 'speechSynthesis' in window) {
@@ -268,6 +270,13 @@ function Guided({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('huella:reading', { detail: moment === 'walk' }))
+    return () => {
+      window.dispatchEvent(new CustomEvent('huella:reading', { detail: false }))
+    }
+  }, [moment])
 
   const gaps = walk.stops.filter((item) => item.hop?.kind === 'none').length
   return (
@@ -511,7 +520,7 @@ function Overview({
                             'inline-flex items-center gap-1.5 rounded-lg border bg-background px-2 py-0.5 font-mono text-xs whitespace-nowrap hover:border-brand',
                             stop.hop?.kind === 'none' && 'border-warn',
                           )}
-                          aria-label={`Parada ${index + 1}: ${stop.title}`}
+                          aria-label={`Parada ${index + 1}: ${stopTitle(stop, review.steps[stop.step])}`}
                         >
                           {shortName(review.steps[stop.step])}
                           {stop.hop?.kind === 'back' && <span className="font-sans text-[10px] text-muted-foreground">↩ vuelve</span>}
@@ -560,7 +569,7 @@ function WalkMap({ review, walk, stop, seen, onStop }: { review: ReviewResult; w
               type="button"
               onClick={() => onStop(index)}
               aria-current={index === stop ? 'step' : undefined}
-              aria-label={`Parada ${index + 1}: ${item.title}`}
+              aria-label={`Parada ${index + 1}: ${stopTitle(item, step)}${item.bridge ? ', añadida por Huella' : ''}`}
               className={cn('flex min-h-11 w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-muted', index === stop && 'bg-card shadow-[0_0_0_1px_var(--color-border)]')}
             >
               <span
@@ -573,8 +582,8 @@ function WalkMap({ review, walk, stop, seen, onStop }: { review: ReviewResult; w
                 {seen.has(index) && index !== stop ? '✓' : index + 1}
               </span>
               <span className="flex min-w-0 flex-col">
-                <span className="text-pretty">
-                  {item.title} {item.hop?.kind === 'none' && <TriangleAlert className="inline size-3.5 text-warn" aria-hidden="true" />}
+                <span className={cn('text-pretty', item.bridge && 'text-muted-foreground italic')}>
+                  {stopTitle(item, step)} {item.hop?.kind === 'none' && <TriangleAlert className="inline size-3.5 text-warn" aria-hidden="true" />}
                 </span>
                 <span className="truncate font-mono text-xs text-muted-foreground">{shortName(step)}</span>
               </span>
@@ -626,7 +635,7 @@ function StopScene({
   const now = beat > 0 ? keys[beat - 1].index : null
   const forks = walk.forks.filter((fork) => fork.step === stop.step)
   return (
-    <article className="flex flex-col gap-3" aria-label={`Parada ${position + 1}: ${stop.title}`}>
+    <article className="flex flex-col gap-3" aria-label={`Parada ${position + 1}: ${stopTitle(stop, step)}`}>
       <p className="flex flex-wrap items-baseline gap-x-2 text-xs text-muted-foreground">
         Parada {position + 1} de {walk.stops.length} · <Mono className="text-foreground">{stepName(step)}</Mono>
       </p>
@@ -639,12 +648,22 @@ function StopScene({
           </span>
         </p>
       )}
-      <h2 className="text-2xl font-semibold tracking-tight text-pretty">{stop.title}</h2>
-      <div className="grid gap-2.5 md:grid-cols-[1fr_1.5fr_1fr]">
-        <Phase label="Llega" text={stop.arrives} terms={terms} />
-        <Phase label="Pasa" text={stop.does} terms={terms} strong />
-        <Phase label="Sale" text={stop.leaves} terms={terms} />
-      </div>
+      <h2 className="text-2xl font-semibold tracking-tight text-pretty">{stopTitle(stop, step)}</h2>
+      {stop.bridge ? (
+        <p className="flex items-start gap-2 rounded-xl border border-dashed px-3.5 py-2.5 text-sm text-muted-foreground">
+          <Route className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" />
+          <span>
+            <span className="font-semibold text-foreground">Huella añadió esta parada para unir el camino.</span> Quien contó el recorrido se la
+            saltó, pero el código la necesita: es la que llama a la siguiente parada. Lee su código para ver qué hace.
+          </span>
+        </p>
+      ) : (
+        <div className="grid gap-2.5 md:grid-cols-[1fr_1.5fr_1fr]">
+          <Phase label="Llega" text={stop.arrives} terms={terms} />
+          <Phase label="Pasa" text={stop.does} terms={terms} strong />
+          <Phase label="Sale" text={stop.leaves} terms={terms} />
+        </div>
+      )}
       {stop.why && (
         <p className="max-w-prose text-sm leading-relaxed">
           <span className="font-semibold">Por qué así: </span>
@@ -678,7 +697,7 @@ function StopScene({
         </div>
       )}
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Mono className="text-xs text-muted-foreground">{step.display_path}</Mono>
+        <Mono className="min-w-0 text-xs break-all text-muted-foreground">{step.display_path}</Mono>
         <span className="text-xs text-muted-foreground">
           · {keys.length} {keys.length === 1 ? 'línea clave' : 'líneas clave'} con su valor en el caso
         </span>
@@ -842,8 +861,12 @@ function arrival(walk: Walk, position: number): Message[] {
     'huella',
     position === 0
       ? 'Empezamos. Pulsa Reproducir o → y verás cómo cada línea clave se ilumina con su valor en el caso.'
-      : `Parada ${position + 1}: ${stop.title.charAt(0).toLowerCase() + stop.title.slice(1)}.${keys ? ` Fíjate en ${keys === 1 ? 'la línea marcada' : `las ${keys} líneas marcadas`}.` : ''}`,
+      : stop.title
+        ? `Parada ${position + 1}: ${stop.title.charAt(0).toLowerCase() + stop.title.slice(1)}.${keys ? ` Fíjate en ${keys === 1 ? 'la línea marcada' : `las ${keys} líneas marcadas`}.` : ''}`
+        : `Parada ${position + 1}: un paso intermedio.`,
   )
+  if (stop.bridge)
+    add('huella', 'Esta parada la he añadido yo: quien contó el recorrido se la saltó, y sin ella no se entiende cómo se llega a la siguiente.')
   if (stop.hop?.kind === 'back')
     add('huella', `Ojo al salto: esta parada no viene de la anterior. Cuando una función termina, el control vuelve a quien la llamó; aquí vuelve a la parada ${(stop.hop.from ?? 0) + 1} y desde ahí sigue.`)
   if (stop.hop?.kind === 'none') add('warn', 'Aquí el hilo se rompe: ninguna parada anterior llama a esta. Antes de fiarte del orden, mira quién la llama de verdad.')

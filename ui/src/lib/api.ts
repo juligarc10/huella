@@ -787,6 +787,8 @@ export interface WalkStop {
   values: { quote: string; value: string; from_test?: boolean }[]
   /** No se ve en el código cómo se llega aquí. */
   gap: string | null
+  /** La añadió Huella para unir el camino: quien contó el recorrido se la saltó. */
+  bridge?: boolean
   /** Cómo se llega aquí, sacado del código: la parada que la llama y en qué línea. */
   hop: { kind: 'direct' | 'back' | 'none'; from: number | null; line: number | null; text: string } | null
 }

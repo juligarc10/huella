@@ -63,8 +63,20 @@ const SIDEBAR_MAX = 420
 export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sidebar, setSidebar] = useStoredNumber('huella-sidebar', SIDEBAR_INITIAL)
-  const [hidden, setHidden] = useStoredNumber('huella-sidebar-hidden', 0)
-  const toggleSidebar = () => setHidden(hidden ? 0 : 1)
+  const [stored, setHidden] = useStoredNumber('huella-sidebar-hidden', 0)
+  // Una vista que necesita todo el ancho (la lectura guiada) la pliega mientras
+  // dura, sin cambiar la preferencia guardada; ⌘B la vuelve a abrir.
+  const [reading, setReading] = useState(false)
+  useEffect(() => {
+    const onReading = (event: Event) => setReading(Boolean((event as CustomEvent<boolean>).detail))
+    window.addEventListener('huella:reading', onReading)
+    return () => window.removeEventListener('huella:reading', onReading)
+  }, [])
+  const hidden = stored || reading
+  const toggleSidebar = () => {
+    if (reading) setReading(false)
+    else setHidden(stored ? 0 : 1)
+  }
   const location = useLocation()
   const wide = useWide()
   const folded = wide ? { width: 0, opacity: 0 } : { height: 0, opacity: 0 }
