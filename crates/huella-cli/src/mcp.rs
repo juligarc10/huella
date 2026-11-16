@@ -161,6 +161,7 @@ fn tools() -> Value {
         list.insert(at + 1, storyline_tool());
         list.insert(at + 2, recorded_tool());
         list.insert(at + 3, walkthrough_tool());
+        list.insert(at + 4, symbol_guide_tool());
     }
     tools
 }
@@ -287,6 +288,84 @@ fn walkthrough_tool() -> Value {
     })
 }
 
+/// `huella_symbol_guide`: el agente escribe la guía de una clase entera para quien
+/// tenga que entenderla, con la forma de la que prepara el modelo revisor.
+fn symbol_guide_tool() -> Value {
+    let text = || json!({"type": "string"});
+    let list = |fields: &[(&str, &str)]| {
+        let properties: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|(name, what)| ((*name).to_owned(), json!({"type": "string", "description": what})))
+            .collect();
+        json!({"type": "array", "items": {"type": "object", "properties": properties}})
+    };
+    json!({
+        "name": "huella_symbol_guide",
+        "description": "Escribe la guía de una clase (o función) entera para quien tenga que entenderla y no conozca ni el \
+                        código ni el dominio: para qué existe, glosario, casos de uso, dependencias, estado, TODAS sus reglas \
+                        de negocio (cada una con el texto exacto de la línea donde se decide, en quote, y los tests que la \
+                        comprueban de verdad), recorridos, por qué es así, lo dudoso, en qué orden leerla y preguntas. \
+                        Úsala cuando te pidan explicar una clase, o al crear o cambiar mucho un servicio de dominio. Huella \
+                        comprueba que el símbolo exista, que cada regla esté en una línea suya y que los tests existan, y te \
+                        responde lo que no cuadre: arréglalo y vuelve a llamarla con la guía completa.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Ruta absoluta del fichero"},
+                "symbol": {"type": "string", "description": "La clase o función (Clase o Clase.metodo)"},
+                "purpose": {"type": "string", "description": "Para qué existe, qué responsabilidad tiene y qué no le toca"},
+                "glossary": list(&[("term", "Término del dominio"), ("meaning", "Qué significa aquí")]),
+                "map": list(&[("method", "Método público o punto de entrada"), ("use_case", "Qué pide quien lo llama, en palabras del dominio")]),
+                "dependencies": list(&[("name", "Con quién habla"), ("role", "Para qué")]),
+                "state": {"type": "array", "items": text()},
+                "rules": {"type": "array", "items": {"type": "object", "properties": {
+                    "kind": {"type": "string", "enum": ["validation", "invariant", "error", "calculation", "state", "permission", "other"]},
+                    "when": {"type": "string", "description": "La situación, con los valores límite exactos"},
+                    "then": {"type": "string", "description": "Qué pasa, con el nombre exacto del error o estado"},
+                    "why": {"type": "string", "description": "Por qué existe la regla"},
+                    "method": {"type": "string", "description": "El método donde se decide"},
+                    "quote": {"type": "string", "description": "El texto exacto de la línea donde se decide"},
+                    "tests": {"type": "array", "items": text(), "description": "Nombres de los tests que la comprueban de verdad"}},
+                    "required": ["kind", "when", "then", "method", "quote", "tests"]}},
+                "flows": {"type": "array", "items": {"type": "object", "properties": {
+                    "title": text(), "method": text(), "steps": {"type": "array", "items": text()}}}},
+                "why": list(&[("text", "Una decisión o petición que explica por qué es así"), ("source", "history, declared o code")]),
+                "doubts": {"type": "array", "items": text(), "description": "Reglas sin test, casos que no contempla, cosas raras"},
+                "reading_order": list(&[("method", "Método"), ("why", "Por qué leerlo en ese orden")]),
+                "questions": list(&[("question", "Pregunta para comprobar que se ha entendido"), ("answer", "Su respuesta")])
+            },
+            "required": ["file", "symbol", "purpose", "rules"]
+        }
+    })
+}
+
+/// `huella_symbol_guide`: guarda la guía del agente y le dice qué no cuadra con el código.
+fn symbol_guide(store: &Store, arguments: &Value) -> Result<String> {
+    let file = arguments["file"].as_str().ok_or_else(|| anyhow::anyhow!("falta `file`"))?;
+    let symbol = arguments["symbol"].as_str().ok_or_else(|| anyhow::anyhow!("falta `symbol`"))?;
+    let path = std::fs::canonicalize(file).map_err(|error| anyhow::anyhow!("no encuentro {file}: {error}"))?;
+    let mut content = arguments.clone();
+    if let Some(object) = content.as_object_mut() {
+        object.remove("file");
+        object.remove("symbol");
+    }
+    let told = huella_engine::symbol_guide::record_told(store, &path, symbol, content)?;
+    let rules = told.guide.content["rules"].as_array().map_or(0, Vec::len);
+    let mut text = format!(
+        "Guía de `{}` registrada (#{}): {rules} reglas. Se verá en «Entender» de ese símbolo.",
+        told.guide.explanation.symbol.as_deref().unwrap_or(symbol),
+        told.guide.explanation.id
+    );
+    if !told.problems.is_empty() {
+        let _ = write!(
+            text,
+            " No cuadra con el código: {}. Arréglalo y vuelve a llamar a huella_symbol_guide con la guía completa.",
+            told.problems.join("; ")
+        );
+    }
+    Ok(text)
+}
+
 /// `huella_walkthrough`: guarda el recorrido del agente y le dice qué no cuadra con el código.
 fn walkthrough(store: &Store, arguments: &Value) -> Result<String> {
     let told: huella_engine::walkthrough::ToldWalk = serde_json::from_value(arguments.clone())
@@ -393,6 +472,9 @@ fn call(context: &mut Context, name: &str, arguments: &Value) -> Result<String> 
     }
     if name == "huella_walkthrough" {
         return walkthrough(&context.store, arguments);
+    }
+    if name == "huella_symbol_guide" {
+        return symbol_guide(&context.store, arguments);
     }
     // Lo nuevo de las transcripciones se indexa antes de responder.
     huella_engine::index(&mut context.store, &context.sources)?;
@@ -618,6 +700,7 @@ mod tests {
                 "huella_storyline",
                 "huella_recorded",
                 "huella_walkthrough",
+                "huella_symbol_guide",
                 "huella_sessions"
             ]
         );

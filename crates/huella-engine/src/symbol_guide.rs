@@ -125,6 +125,148 @@ pub fn saved_guide(store: &Store, path: &Path, symbol: &str, source: &str) -> Re
         }))
 }
 
+/// La guía que escribió el agente, ya comprobada, y lo que no cuadra con el código.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToldGuide {
+    pub guide: SymbolGuide,
+    pub problems: Vec<String>,
+}
+
+/// Guarda la guía de un símbolo que escribió el agente (`huella_symbol_guide`),
+/// con la misma forma que la del modelo revisor. Comprueba que el símbolo
+/// exista, que cada regla esté en una línea suya (por el texto de esa línea,
+/// `quote`) y que los tests que cita nombren de verdad la clase; lo que no
+/// cuadre se le devuelve para que lo arregle.
+///
+/// # Errors
+/// Si el fichero o el símbolo no existen, la guía no dice para qué existe el
+/// símbolo, o falla la base de datos.
+pub fn record_told(store: &Store, path: &Path, symbol: &str, mut content: Value) -> Result<ToldGuide> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| EngineError::Invalid(format!("no se pudo leer {}: {error}", path.display())))?;
+    let symbols = symbols_of(path, &source);
+    let target = symbols
+        .iter()
+        .find(|s| s.qualified_name == symbol)
+        .or_else(|| symbols.iter().find(|s| short_name(&s.qualified_name) == short_name(symbol)))
+        .cloned()
+        .ok_or_else(|| EngineError::Invalid(format!("no encuentro `{symbol}` en {}", path.display())))?;
+    if content["purpose"].as_str().is_none_or(|purpose| purpose.trim().is_empty()) {
+        return Err(EngineError::Invalid("la guía necesita purpose: para qué existe y qué no le toca".into()));
+    }
+    for list in
+        ["glossary", "map", "dependencies", "state", "rules", "flows", "why", "doubts", "reading_order", "questions"]
+    {
+        if !content[list].is_array() {
+            content[list] = json!([]);
+        }
+    }
+    let members = members_of(&symbols, &target);
+    let range_of = |method: &str| {
+        members.iter().find(|m| short_name(&m.qualified_name) == short_name(method)).map(|m| (m.start_line, m.end_line))
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    let mut problems = Vec::new();
+
+    // Los tests que nombran la clase o sus métodos: los que una regla puede citar.
+    let mut names: Vec<String> = vec![short_name(&target.qualified_name).to_owned()];
+    names.extend(members.iter().map(|m| short_name(&m.qualified_name).to_owned()));
+    names.retain(|name| name.len() > 2 && crate::definition::is_identifier(name));
+    names.dedup();
+    names.truncate(10);
+    let tests = tests_naming(path, &names, TestBudget { tests: MAX_TESTS, lines: TEST_LINES });
+
+    if let Some(rules) = content["rules"].as_array_mut() {
+        problems.extend(check_rules(rules, &target, &members, &lines, &tests));
+    }
+    if let Some(map) = content["map"].as_array_mut() {
+        for entry in map {
+            entry["lines"] = entry["method"].as_str().and_then(range_of).map_or(Value::Null, |(a, b)| json!([a, b]));
+        }
+    }
+    content["tests_found"] = json!(
+        tests.iter().map(|t| json!({"name": t.name, "path": t.display_path, "line": t.start_line})).collect::<Vec<_>>()
+    );
+    content["methods"] = json!(
+        members
+            .iter()
+            .map(|m| json!({"name": m.qualified_name, "lines": [m.start_line, m.end_line]}))
+            .collect::<Vec<_>>()
+    );
+
+    let code = code_of(&source, &target);
+    let key = normalize_path(path, None);
+    let id = store.add_code_explanation(&NewCodeExplanation {
+        path: &key,
+        kind: "symbol",
+        symbol: Some(&target.qualified_name),
+        start_line: target.start_line,
+        end_line: target.end_line,
+        quote: &code,
+        code_hash: &code_hash(&code),
+        content: &content.to_string(),
+        model: "agent",
+    })?;
+    let explanation = store
+        .code_explanations(&key)?
+        .into_iter()
+        .find(|explanation| explanation.id == id)
+        .ok_or_else(|| EngineError::Model("no se encontró la guía recién guardada".into()))?;
+    Ok(ToldGuide { guide: SymbolGuide { explanation, content, stale: false }, problems })
+}
+
+/// Ancla cada regla de la guía del agente a la línea de su `quote`, dentro de su
+/// método, y dice qué no cuadra: líneas que no están, métodos que no son de la
+/// clase y tests que no la nombran.
+fn check_rules(
+    rules: &mut [Value],
+    target: &Symbol,
+    members: &[Symbol],
+    lines: &[&str],
+    tests: &[crate::explain::TestRef],
+) -> Vec<String> {
+    let range_of = |method: &str| {
+        members.iter().find(|m| short_name(&m.qualified_name) == short_name(method)).map(|m| (m.start_line, m.end_line))
+    };
+    let mut problems = Vec::new();
+    for (index, rule) in rules.iter_mut().enumerate() {
+        let label = format!("regla {} («{}»)", index + 1, clip(rule["when"].as_str().unwrap_or_default(), 50));
+        let (start, end) = rule["method"].as_str().and_then(range_of).unwrap_or((target.start_line, target.end_line));
+        let quote = rule["quote"].as_str().map(str::trim).unwrap_or_default().to_owned();
+        let found = (!quote.is_empty())
+            .then(|| {
+                (start..=end.min(lines.len()))
+                    .find(|&n| lines[n - 1].trim() == quote || (quote.len() > 3 && lines[n - 1].contains(&quote)))
+            })
+            .flatten();
+        rule["lines"] = found.map_or(Value::Null, |line| json!([line, line]));
+        if found.is_none() {
+            problems.push(format!(
+                "{label}: no encuentro su línea; pon en quote el texto exacto de la línea donde se decide"
+            ));
+        }
+        if let Some(method) = rule["method"].as_str().filter(|m| !m.is_empty())
+            && range_of(method).is_none()
+            && short_name(method) != short_name(&target.qualified_name)
+        {
+            problems.push(format!("{label}: `{method}` no es un método de `{}`", target.qualified_name));
+        }
+        if !rule["tests"].is_array() {
+            rule["tests"] = json!([]);
+        }
+        for test in rule["tests"].as_array().cloned().unwrap_or_default() {
+            let name = test.as_str().unwrap_or_default();
+            if !tests.iter().any(|t| t.name == name || short_name(&t.name) == short_name(name)) {
+                problems.push(format!("{label}: no encuentro el test `{name}` entre los que nombran la clase"));
+            }
+        }
+        if let Some(object) = rule.as_object_mut() {
+            object.remove("quote");
+        }
+    }
+    problems
+}
+
 /// Escribe (o reutiliza) la guía de un símbolo. `progress(hechos, total)` se
 /// llama con cada método resumido.
 ///
@@ -881,6 +1023,38 @@ export class Pedidos {
         let guide = understand_symbol(&store, None, &model, ask, &|_, _| {}).unwrap();
         assert_eq!(*model.calls.borrow(), vec![2, 1, 1]);
         assert_eq!(guide.content["methods"].as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_agent_guide_is_checked_against_the_code() {
+        let dir = repo("told");
+        let path = dir.join("src/pedidos.ts");
+        let store = Store::open_in_memory().unwrap();
+        let told = json!({
+            "purpose": "Gestiona las reservas de stock.",
+            "map": [{"method": "reservar", "use_case": "Reservar unidades"}],
+            "rules": [
+                {"kind": "error", "when": "más que el stock", "then": "SinStock", "why": "", "method": "reservar",
+                 "quote": "if (cantidad > stock) throw new Error('SinStock')", "tests": ["sin stock falla"]},
+                {"kind": "validation", "when": "cantidad negativa", "then": "nada", "why": "", "method": "liberar",
+                 "quote": "una línea que no está", "tests": ["un test inventado"]},
+                {"kind": "other", "when": "x", "then": "y", "why": "", "method": "noExiste", "quote": "", "tests": []}
+            ]
+        });
+        let told = record_told(&store, &path, "Pedidos", told).unwrap();
+        let rules = told.guide.content["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["lines"], json!([3, 3]), "la regla, en la línea de su quote");
+        assert_eq!(told.guide.content["map"][0]["lines"], json!([2, 5]));
+        assert_eq!(told.guide.explanation.model, "agent");
+        let problems = told.problems.join(" | ");
+        assert!(problems.contains("regla 2") && problems.contains("un test inventado"), "{problems}");
+        assert!(problems.contains("`noExiste` no es un método"), "{problems}");
+        assert!(!problems.contains("regla 1"), "{problems}");
+        // Se ve como la guía del símbolo.
+        let saved = saved_guide(&store, &path, "Pedidos", &std::fs::read_to_string(&path).unwrap()).unwrap().unwrap();
+        assert_eq!(saved.explanation.model, "agent");
+        assert!(record_told(&store, &path, "Pedidos", json!({"purpose": " "})).is_err(), "sin para qué existe no vale");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
