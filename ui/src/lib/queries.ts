@@ -119,6 +119,8 @@ export function useReview(session: string | undefined) {
     queryFn: () => api.get<ReviewResult>(`review/${encodeURIComponent(session ?? '')}`),
     enabled: Boolean(session),
     staleTime: 60_000,
+    // En una tarea, al volver a la ventana: el servidor la rehace solo si alguna rama tiene commits nuevos.
+    refetchOnWindowFocus: session?.startsWith('task:') ? 'always' : false,
     // Mientras el modelo responde una pregunta, se consulta a menudo.
     refetchInterval: (state) => {
       const data = state.state.data
@@ -136,7 +138,8 @@ export function useReview(session: string | undefined) {
 }
 
 export function useTasks() {
-  return useQuery({ queryKey: ['tasks'], queryFn: () => api.get<{ tasks: TaskSummary[] }>('tasks') })
+  // Al volver a la ventana: un commit hecho fuera cambia lo que hay que revisar.
+  return useQuery({ queryKey: ['tasks'], queryFn: () => api.get<{ tasks: TaskSummary[] }>('tasks'), refetchOnWindowFocus: 'always' })
 }
 
 /** Una tarea y cómo está cada repositorio; `fetch` trae antes el remoto. */
@@ -145,6 +148,8 @@ export function useTask(key: string, fetch: boolean) {
     queryKey: ['task', key, fetch],
     queryFn: () => api.get<TaskDetail>(`tasks/${encodeURIComponent(key)}${query({ fetch: fetch ? '1' : null })}`),
     retry: false,
+    // Sin traer el remoto, que es lento: solo cómo están las ramas locales.
+    refetchOnWindowFocus: fetch ? false : 'always',
   })
 }
 

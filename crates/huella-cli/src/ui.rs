@@ -67,6 +67,9 @@ pub(crate) struct App {
     impact: Option<Value>,
     /// Si la revisión cargada es de una tarea, cómo está cada repositorio.
     task_repos: Option<Vec<huella_engine::task::RepoSync>>,
+    /// En una tarea, cómo estaban sus ramas al cargar la revisión: si cambian
+    /// (un commit nuevo), la de memoria ya no vale.
+    review_stamp: Option<String>,
     /// Cobertura en curso por sesión: `None` mientras se calcula, o el error.
     covering: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Guías en curso por sesión.
@@ -189,6 +192,7 @@ impl App {
             activity: Vec::new(),
             impact: None,
             task_repos: None,
+            review_stamp: None,
             covering: Arc::new(Mutex::new(HashMap::new())),
             guiding: Arc::new(Mutex::new(HashMap::new())),
             storylining: Arc::new(Mutex::new(HashMap::new())),
@@ -2040,7 +2044,16 @@ fn mark(app: &mut App, session: &str, body: &str) -> Result<Value> {
 /// (trayendo antes el remoto). Se queda en memoria hasta que se pide otra.
 fn load_review(app: &mut App, session: &str) -> Result<()> {
     let cached = app.review.as_ref().is_some_and(|(review, _)| review.session_id.starts_with(session));
-    if cached {
+    // Una tarea solo revisa lo que está en commits: tras uno nuevo, la de memoria
+    // se queda vieja (o vacía, si se cargó antes del primero). Mirarlo es un
+    // `git rev-parse` por rama, sin traer el remoto.
+    let fresh = || match (&app.task_repos, &app.review_stamp) {
+        (Some(repos), Some(stamp)) if session.starts_with("task:") => {
+            huella_engine::task::branches_stamp(repos) == *stamp
+        }
+        _ => true,
+    };
+    if cached && fresh() {
         return Ok(());
     }
     let review = if let Some(key) = session.strip_prefix("task:") {
@@ -2055,12 +2068,14 @@ fn load_review(app: &mut App, session: &str) -> Result<()> {
         if let Err(error) = huella_engine::revisions::record(&app.store, &task.review.session_id, &task.repos) {
             eprintln!("huella: no se pudo guardar el momento de la revisión: {error}");
         }
+        app.review_stamp = Some(huella_engine::task::branches_stamp(&task.repos));
         app.task_repos = Some(task.repos);
         task.review
     } else {
         let review = huella_engine::session_review(&app.sources, session)?;
         app.activity = huella_engine::evidence::session_activity(&app.sources, &review.session_id)?;
         app.task_repos = None;
+        app.review_stamp = None;
         review
     };
     let plan = huella_review::flow::plan(&review);
