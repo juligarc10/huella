@@ -1,9 +1,9 @@
-import { CircleAlert, CircleCheck, Layers, ListChecks, Loader2, RefreshCw, Route, Trash2, TriangleAlert } from 'lucide-react'
+import { CircleAlert, CircleCheck, GraduationCap, Layers, ListChecks, Loader2, RefreshCw, Route, Trash2, TriangleAlert } from 'lucide-react'
 import { useState } from 'react'
 
 import { ThinkMore } from '@/components/review/think-more'
 import { Button } from '@/components/ui/button'
-import type { AskThinking, CodeExplanation, ExplainDepth, PendingExplain, Rule } from '@/lib/api'
+import type { AskThinking, CodeExplanation, Detail, ExplainDepth, PendingExplain, Rule } from '@/lib/api'
 import { dateTime, justNow } from '@/lib/format'
 import { useDeleteCodeExplanation, useDismissExplain } from '@/lib/queries'
 import { cn } from '@/lib/utils'
@@ -49,8 +49,8 @@ export function ExplanationCard({
 }: {
   explanation: CodeExplanation
   path: string
-  /** Volver a pedirla al modelo (el código es el mismo, pero se quiere otra). */
-  onRefresh?: () => void
+  /** Volver a pedirla al modelo (el código es el mismo, pero se quiere otra), con otro nivel si se dice. */
+  onRefresh?: (detail?: Detail) => void
 }) {
   const remove = useDeleteCodeExplanation(path)
   const Icon = depthIcon[explanation.kind] ?? Layers
@@ -77,7 +77,18 @@ export function ExplanationCard({
         </span>
         <span className="ml-auto flex gap-1">
           {onRefresh && (
-            <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" onClick={onRefresh}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-muted-foreground"
+              onClick={() => onRefresh('first_time')}
+              title="La vuelve a escribir para alguien sin contexto del código ni del dominio"
+            >
+              <GraduationCap aria-hidden="true" /> Como si fuera la primera vez
+            </Button>
+          )}
+          {onRefresh && (
+            <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" onClick={() => onRefresh()}>
               <RefreshCw aria-hidden="true" /> Rehacer
             </Button>
           )}

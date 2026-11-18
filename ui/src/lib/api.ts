@@ -617,6 +617,8 @@ export interface Settings {
   agent_walkthrough: { value: boolean }
   /** Recordar lo que se comprueba. */
   learning: { value: boolean }
+  /** Nivel de detalle de las explicaciones, para el agente y el modelo revisor. */
+  detail: { value: Detail; options: { code: Detail; label: string; audience: string }[] }
   /** Nunca la clave: de dónde sale y si se puede leer. */
   key: { from: 'env' | 'file' | 'missing'; env: string; file?: string; problem?: string | null }
   problem: string | null
@@ -636,7 +638,11 @@ export type SettingsChange = Partial<{
   narrative_code: boolean
   agent_walkthrough: boolean
   learning: boolean
+  detail: Detail
 }>
+
+/** A quién va dirigida una explicación: sin contexto, conoce el dominio o conoce el código. */
+export type Detail = 'first_time' | 'domain' | 'code'
 
 /** Quién escribió una línea de la rama. */
 export type LineOrigin =

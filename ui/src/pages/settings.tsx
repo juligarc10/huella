@@ -1,4 +1,4 @@
-import { BookOpenText, CheckCircle2, CircleAlert, KeyRound, Languages, Loader2, PlugZap } from 'lucide-react'
+import { BookOpenText, CheckCircle2, GraduationCap, CircleAlert, KeyRound, Languages, Loader2, PlugZap } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Mono, PageHeader, Panel } from '@/components/bits'
@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { Settings, SettingsChange } from '@/lib/api'
+import type { Detail, Settings, SettingsChange } from '@/lib/api'
 import { useSaveKey, useSaveSettings, useSettings, useTestModel } from '@/lib/queries'
 
 type Provider = 'anthropic' | 'openai-compatible'
@@ -187,6 +187,8 @@ export function SettingsPage() {
 
       <LanguagePanel settings={settings} />
 
+      <DetailPanel settings={settings} />
+
       <ReadingPanel settings={settings} />
 
       <KeyPanel settings={settings} provider={form.provider} />
@@ -300,6 +302,40 @@ function ReadingPanel({ settings }: { settings: Settings }) {
           </span>
         </span>
       </label>
+    </Panel>
+  )
+}
+
+function DetailPanel({ settings }: { settings: Settings }) {
+  const save = useSaveSettings()
+  const { detail } = settings
+  const chosen = detail.options.find((option) => option.code === detail.value)
+  return (
+    <Panel className="flex flex-col gap-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold">
+        <GraduationCap className="size-4 text-muted-foreground" aria-hidden="true" /> Nivel de detalle de las explicaciones
+      </h2>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        value={detail.value}
+        onValueChange={(value) => value && save.mutate({ detail: value as Detail })}
+        disabled={save.isPending}
+        aria-label="Nivel de detalle de las explicaciones"
+        className="flex-wrap"
+      >
+        {detail.options.map((option) => (
+          <ToggleGroupItem key={option.code} value={option.code} className="px-3">
+            {option.label}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      {chosen && <p className="text-sm leading-relaxed">Se pide así: «{chosen.audience}».</p>}
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        Lo recibe el agente que escribe el código, en sus instrucciones y al contar el guion (lo que le falta al guion depende del
+        nivel), y el modelo revisor en todo lo que le pidas. Al modelo revisor puedes pedirle otro nivel en directo, junto a cada
+        pregunta. Lo ya escrito se queda como está: usa «Rehacer» para volver a escribirlo.
+      </p>
     </Panel>
   )
 }

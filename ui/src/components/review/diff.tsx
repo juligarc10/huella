@@ -8,7 +8,7 @@ import { CommentCard, CommentComposer } from '@/components/review/comments'
 import { DefinitionPeek } from '@/components/review/definition-peek'
 import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
-import type { AskThinking, CodeExplanation, CodeQuestion, CommentHint, ExplainDepth, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
+import type { AskThinking, CodeExplanation, CodeQuestion, CommentHint, Detail, ExplainDepth, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
 import { useAddComment, useAskCode, useCodeExplanations, useCodeQuestions, useExplainCode } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
@@ -175,8 +175,8 @@ export function StepDiff({
     return null
   }
   // «Profundizar»: el recorrido o las reglas de un trozo; sale bajo su última línea al estar lista.
-  const deepen = (quote: string, depth: ExplainDepth, think: boolean, refresh = false) =>
-    explain.mutate({ quote, depth, think: think || undefined, refresh: refresh || undefined })
+  const deepen = (quote: string, depth: ExplainDepth, think: boolean, refresh = false, detail?: Detail) =>
+    explain.mutate({ quote, depth, think: think || undefined, refresh: refresh || undefined, detail })
   const blockCode = step.lines
     .filter((line) => line.kind !== 'removed')
     .map((line) => line.text)
@@ -303,7 +303,7 @@ export function StepDiff({
                   <ExplanationCard
                     explanation={explanation}
                     path={step.path}
-                    onRefresh={() => deepen(explanation.quote, explanation.kind, false, true)}
+                    onRefresh={(detail) => deepen(explanation.quote, explanation.kind, false, true, detail)}
                   />
                 </div>
               ))}
