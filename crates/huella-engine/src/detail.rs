@@ -126,9 +126,37 @@ impl Detail {
     }
 }
 
+/// El nivel que fija el repositorio de `path` (un fichero o una carpeta) en su
+/// `.huella.toml` (`[explain] detail`): lo decide el equipo y manda sobre el de
+/// cada persona. `None` si no lo fija, no es un repositorio o el fichero no se lee.
+#[must_use]
+pub fn of_repo(path: &std::path::Path) -> Option<Detail> {
+    let dir = if path.is_dir() { path } else { path.parent()? };
+    let root = crate::task::repo_root(dir)?;
+    crate::triage::load_policy(Some(&root)).ok()?.detail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_can_fix_the_level_for_everyone() {
+        let root = std::env::temp_dir().join(format!("huella-detail-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let status = std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap();
+        assert!(status.success());
+        let file = root.join("src/a.ts");
+        std::fs::write(&file, "export const a = 1;\n").unwrap();
+        assert_eq!(of_repo(&file), None, "sin .huella.toml no lo fija");
+        std::fs::write(root.join(".huella.toml"), "[explain]\ndetail = \"code\"\n").unwrap();
+        assert_eq!(of_repo(&file), Some(Detail::Code));
+        assert_eq!(of_repo(&root), Some(Detail::Code), "también desde la carpeta");
+        std::fs::write(root.join(".huella.toml"), "[explain]\ndetail = \"todo\"\n").unwrap();
+        assert_eq!(of_repo(&file), None, "un nivel desconocido no se usa");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn codes_round_trip_and_unknown_ones_are_rejected() {

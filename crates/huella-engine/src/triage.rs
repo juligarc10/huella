@@ -115,6 +115,15 @@ pub struct StepTriage {
 struct PolicyFile {
     review: ReviewSection,
     checkpoints: Checkpoints,
+    explain: ExplainSection,
+}
+
+/// Cómo se explica el código de este repositorio (`[explain]`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExplainSection {
+    /// El nivel de detalle para todo el equipo; manda sobre el de cada persona.
+    detail: Option<crate::detail::Detail>,
 }
 
 /// Puntos de control mientras el agente trabaja (`[checkpoints]`).
@@ -161,6 +170,8 @@ pub struct Policy {
     /// De dónde sale: el fichero del repositorio, o `None` si es la de por defecto.
     pub source: Option<PathBuf>,
     pub checkpoints: Checkpoints,
+    /// El nivel de detalle que fija el repositorio (`[explain] detail`), si lo fija.
+    pub detail: Option<crate::detail::Detail>,
 }
 
 impl Default for Policy {
@@ -195,6 +206,7 @@ impl Policy {
             default,
             source: None,
             checkpoints: Checkpoints::default(),
+            detail: None,
         }
     }
 
@@ -219,6 +231,7 @@ impl Policy {
         }
         policy.source = Some(source);
         policy.checkpoints = file.checkpoints;
+        policy.detail = file.explain.detail;
         policy
     }
 }

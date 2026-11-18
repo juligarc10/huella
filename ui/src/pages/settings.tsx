@@ -334,7 +334,8 @@ function DetailPanel({ settings }: { settings: Settings }) {
       <p className="text-sm leading-relaxed text-muted-foreground">
         Lo recibe el agente que escribe el código, en sus instrucciones y al contar el guion (lo que le falta al guion depende del
         nivel), y el modelo revisor en todo lo que le pidas. Al modelo revisor puedes pedirle otro nivel en directo, junto a cada
-        pregunta. Lo ya escrito se queda como está: usa «Rehacer» para volver a escribirlo.
+        pregunta. Un repositorio puede fijarlo para todo el equipo en su <code>.huella.toml</code> (<code>[explain] detail</code>), y entonces
+        manda sobre este. Lo ya escrito se queda como está: usa «Rehacer» para volver a escribirlo.
       </p>
     </Panel>
   )
