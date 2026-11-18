@@ -22,6 +22,36 @@ const BLOCKS = '[data-diff-line], p, li, h1, h2, h3, h4, td, th, pre, button, la
 /** Un carácter sin tilde ni mayúscula; siempre uno, para que las posiciones sigan valiendo. */
 const fold = (char: string) => char.normalize('NFD')[0]?.toLowerCase() ?? char
 
+/** Un texto sin tildes ni mayúsculas, para comparar como lo hace el buscador. */
+export const foldText = (text: string) => [...text].map(fold).join('')
+
+/** Coincidencias fuera de lo que se ve (otra diapositiva): qué es y cómo ir. */
+export type Elsewhere = { label: string; go: () => void }
+type Provider = (query: string) => Elsewhere[]
+
+/**
+ * Lo que tiene más contenido del que pinta (la presentación, una diapositiva cada
+ * vez) dice aquí dónde más aparece lo que se busca. Uno a la vez: el de la página abierta.
+ */
+let provider: Provider | null = null
+const providerListeners = new Set<() => void>()
+
+export function useSearchElsewhere(find: Provider) {
+  const latest = useRef(find)
+  useEffect(() => {
+    latest.current = find
+  })
+  useEffect(() => {
+    const mine: Provider = (query) => latest.current(query)
+    provider = mine
+    providerListeners.forEach((listener) => listener())
+    return () => {
+      if (provider === mine) provider = null
+      providerListeners.forEach((listener) => listener())
+    }
+  }, [])
+}
+
 /** Las coincidencias de `query` en el contenido de `root`, como rangos del DOM. */
 function findRanges(root: HTMLElement, query: string): Range[] {
   const wanted = [...query].map(fold).join('')
@@ -146,14 +176,38 @@ export function PageSearch() {
     }
   }, [open, query, current, search])
 
+  // Quien pinta menos de lo que tiene (la presentación) dice dónde más aparece.
+  const [, setProviderVersion] = useState(0)
+  useEffect(() => {
+    const changed = () => setProviderVersion((version) => version + 1)
+    providerListeners.add(changed)
+    return () => {
+      providerListeners.delete(changed)
+    }
+  }, [])
+  const elsewhere = open && query.trim().length > 1 && provider ? provider(query) : []
+
   const close = () => {
     setOpen(false)
     clear()
   }
 
+  // A otra diapositiva: se busca de nuevo cuando ya se ha pintado.
+  const jump = (target: Elsewhere) => {
+    target.go()
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent(SEARCH_EVENT, { detail: { query } }))
+      window.setTimeout(() => show(ranges.current[search(query, 0)]), 60)
+    }, 250)
+  }
+
   const move = (step: number) => {
-    if (ranges.current.length === 0) return
-    const index = (current + step + ranges.current.length) % ranges.current.length
+    const total = ranges.current.length
+    // Al pasar de la última (o antes de la primera), a la siguiente diapositiva que coincide.
+    const past = total === 0 || (step > 0 ? current === total - 1 : current === 0)
+    if (past && elsewhere.length > 0) return jump(step > 0 ? elsewhere[0] : elsewhere[elsewhere.length - 1])
+    if (total === 0) return
+    const index = (current + step + total) % total
     setCurrent(index)
     paint(ranges.current, index)
     show(ranges.current[index])
@@ -161,11 +215,8 @@ export function PageSearch() {
 
   if (!open) return null
   return (
-    <div
-      data-page-search
-      role="search"
-      className="fixed top-3 right-4 z-50 flex items-center gap-1 rounded-xl border bg-card py-1 pr-1 pl-3 shadow-lg"
-    >
+    <div data-page-search role="search" className="fixed top-3 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-1 rounded-xl border bg-card shadow-lg">
+    <div className="flex items-center gap-1 py-1 pr-1 pl-3">
       <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <input
         ref={input}
@@ -186,17 +237,38 @@ export function PageSearch() {
         className="w-56 bg-transparent py-1 text-sm outline-none placeholder:text-muted-foreground"
       />
       <span className="min-w-16 text-right text-xs text-muted-foreground tabular-nums" aria-live="polite">
-        {query.trim() ? (count > 0 ? `${current + 1} de ${count}` : 'Sin resultados') : ''}
+        {query.trim() ? (count > 0 ? `${current + 1} de ${count}` : elsewhere.length > 0 ? 'Aquí no' : 'Sin resultados') : ''}
       </span>
-      <Button size="icon" variant="ghost" className="size-7" onClick={() => move(-1)} disabled={count === 0} aria-label="Anterior (Mayúsculas+Enter)">
+      <Button size="icon" variant="ghost" className="size-7" onClick={() => move(-1)} disabled={count === 0 && elsewhere.length === 0} aria-label="Anterior (Mayúsculas+Enter)">
         <ChevronUp aria-hidden="true" />
       </Button>
-      <Button size="icon" variant="ghost" className="size-7" onClick={() => move(1)} disabled={count === 0} aria-label="Siguiente (Enter)">
+      <Button size="icon" variant="ghost" className="size-7" onClick={() => move(1)} disabled={count === 0 && elsewhere.length === 0} aria-label="Siguiente (Enter)">
         <ChevronDown aria-hidden="true" />
       </Button>
       <Button size="icon" variant="ghost" className="size-7" onClick={close} aria-label="Cerrar (Escape)">
         <X aria-hidden="true" />
       </Button>
     </div>
+    {elsewhere.length > 0 && (
+      <div className="flex max-w-96 flex-wrap items-center gap-1 border-t px-3 py-1.5 text-xs">
+        <span className="text-muted-foreground">También en:</span>
+        {elsewhere.slice(0, ELSEWHERE_SHOWN).map((target, index) => (
+          <button
+            key={index}
+            type="button"
+            onClick={() => jump(target)}
+            className="max-w-48 truncate rounded-md bg-muted px-1.5 py-0.5 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            title={target.label}
+          >
+            {target.label}
+          </button>
+        ))}
+        {elsewhere.length > ELSEWHERE_SHOWN && <span className="text-muted-foreground">y {elsewhere.length - ELSEWHERE_SHOWN} más</span>}
+      </div>
+    )}
+    </div>
   )
 }
+
+/** Otras diapositivas que se nombran en la barra; Enter pasa por todas. */
+const ELSEWHERE_SHOWN = 5

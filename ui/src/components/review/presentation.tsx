@@ -22,6 +22,7 @@ import { FreshLines, StepDiff } from '@/components/review/diff'
 import { FlowMap } from '@/components/review/flow-map'
 import { StoryBlocks } from '@/components/review/blocks'
 import { GuidePanel } from '@/components/review/guide'
+import { foldText, useSearchElsewhere } from '@/components/page-search'
 import { LineScope } from '@/components/review/line-links'
 import { RecordCoverage } from '@/components/review/record-coverage'
 import { AuditPanel, CheckFirst, Checks, findingsFor, IdeaExplanation, IdeaWarnings, Points, ScenarioChips } from '@/components/review/idea-parts'
@@ -80,6 +81,52 @@ function slidesOf(story: Storyline, steps: ReviewStep[], visible: (step: number)
     }),
     { kind: 'closing' },
   ]
+}
+
+/** Todo el texto de una diapositiva, también el que no se ve: para buscar en las que no están en pantalla. */
+function slideText(slide: Slide, story: Storyline, steps: ReviewStep[]): string {
+  const stepText = (index: number) => {
+    const step = steps[index]
+    return step ? [step.symbol ?? '', step.display_path, ...step.lines.map((line) => line.text)].join('\n') : ''
+  }
+  switch (slide.kind) {
+    case 'cover':
+      return [story.summary, story.problem, story.impact, story.solution, story.before, story.after].join('\n')
+    case 'chapter': {
+      const chapter = story.chapters[slide.chapter]
+      return chapter ? [chapter.title, chapter.intent, chapter.narration].join('\n') : ''
+    }
+    case 'idea': {
+      const idea = story.chapters[slide.chapter]?.ideas[slide.idea]
+      if (!idea) return ''
+      const told = [idea.title, idea.explanation, idea.what, idea.why, idea.breaks, ...idea.points.map((point) => point.text)]
+      return [...told, ...slide.steps.map(stepText)].join('\n')
+    }
+    case 'file':
+      return slide.steps.map(stepText).join('\n')
+    case 'step':
+      return stepText(slide.step)
+    case 'closing':
+      return ''
+  }
+}
+
+/** Cómo se nombra una diapositiva en «También en» del buscador. */
+function slideLabel(slide: Slide, story: Storyline, steps: ReviewStep[]): string {
+  switch (slide.kind) {
+    case 'cover':
+      return 'Portada'
+    case 'chapter':
+      return story.chapters[slide.chapter]?.title ?? 'Capítulo'
+    case 'idea':
+      return story.chapters[slide.chapter]?.ideas[slide.idea]?.title ?? 'Idea'
+    case 'file':
+      return slide.path.split('/').pop() ?? slide.path
+    case 'step':
+      return steps[slide.step] ? stepName(steps[slide.step]) : 'Paso'
+    case 'closing':
+      return 'Cierre'
+  }
 }
 
 /** Lo que no está en ninguna idea se presenta por fichero: nadie asimila un método por diapositiva. */
@@ -212,6 +259,17 @@ export function Presentation({
     if (target.kind === 'step') onCurrent(target.step)
     if (target.kind === 'idea' || target.kind === 'file') onCurrent(target.steps[0])
   }
+  // Cmd+F: las demás diapositivas donde aparece lo que se busca, empezando por la siguiente.
+  const texts = useMemo(() => (story ? slides.map((item) => foldText(slideText(item, story, review.steps))) : []), [slides, story, review.steps])
+  useSearchElsewhere((query) => {
+    if (!story) return []
+    const wanted = foldText(query.trim())
+    const order = slides.map((_, index) => (position + 1 + index) % slides.length).filter((index) => index !== position)
+    return order
+      .filter((index) => texts[index]?.includes(wanted))
+      .map((index) => ({ label: slideLabel(slides[index], story, review.steps), go: () => go(index) }))
+  })
+
   const goToStep = (step: number) => {
     const at = slides.findIndex((s) => showsStep(s, step))
     if (at >= 0) return go(at)
