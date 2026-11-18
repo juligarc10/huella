@@ -47,6 +47,21 @@ pub struct FlowStep {
     /// Pasos de la sesión que escribieron sus líneas.
     pub sources: Vec<usize>,
     pub lines: Vec<DiffLine>,
+    /// El número de cada línea de `lines`, en el mismo orden. Hace falta aparte
+    /// porque las líneas de un paso vienen de varios trozos del diff y se recorta
+    /// el contexto: no se pueden contar desde la primera.
+    pub numbers: Vec<LineNumber>,
+}
+
+/// Las líneas de un paso mientras se reparten, con sus números y los pasos de la sesión que las escribieron.
+type Group = (Vec<DiffLine>, Vec<LineNumber>, BTreeSet<usize>);
+
+/// Dónde está una línea del diff: en el fichero final (las que quedan) y en el
+/// inicial (las que había). Una añadida solo tiene `new`; una quitada, solo `old`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct LineNumber {
+    pub old: Option<usize>,
+    pub new: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -148,9 +163,9 @@ fn file_steps(index: usize, file: &FileReview) -> Vec<(FlowStep, BTreeSet<String
             .max_by_key(|(_, s)| s.depth)
             .map(|(i, _)| i)
     };
-    let mut groups: BTreeMap<Option<usize>, (Vec<DiffLine>, BTreeSet<usize>)> = BTreeMap::new();
+    let mut groups: BTreeMap<Option<usize>, Group> = BTreeMap::new();
     for hunk in &file.hunks {
-        let mut new_line = hunk.new_start;
+        let (mut old_line, mut new_line) = (hunk.old_start, hunk.new_start);
         let mut previous = None;
         for line in &hunk.lines {
             // Una línea en blanco fuera de todo símbolo va con la anterior: no
@@ -164,19 +179,28 @@ fn file_steps(index: usize, file: &FileReview) -> Vec<(FlowStep, BTreeSet<String
             group.0.push(line.clone());
             match line {
                 DiffLine::Added { source, .. } => {
-                    group.1.extend(source);
+                    group.1.push(LineNumber { old: None, new: Some(new_line) });
+                    group.2.extend(source);
                     new_line += 1;
                 }
-                DiffLine::Removed(_) => group.1.extend(hunk.sources.iter().copied()),
-                DiffLine::Context(_) => new_line += 1,
+                DiffLine::Removed(_) => {
+                    group.1.push(LineNumber { old: Some(old_line), new: None });
+                    group.2.extend(hunk.sources.iter().copied());
+                    old_line += 1;
+                }
+                DiffLine::Context(_) => {
+                    group.1.push(LineNumber { old: Some(old_line), new: Some(new_line) });
+                    old_line += 1;
+                    new_line += 1;
+                }
             }
         }
     }
 
     groups
         .into_iter()
-        .filter(|(_, (lines, _))| lines.iter().any(|line| !matches!(line, DiffLine::Context(_))))
-        .map(|(owner, (lines, sources))| {
+        .filter(|(_, (lines, _, _))| lines.iter().any(|line| !matches!(line, DiffLine::Context(_))))
+        .map(|(owner, (lines, numbers, sources))| {
             let symbol = owner.map(|i| &symbols[i]);
             let role = match symbol {
                 None => StepRole::Other,
@@ -199,8 +223,11 @@ fn file_steps(index: usize, file: &FileReview) -> Vec<(FlowStep, BTreeSet<String
                 depth: 0,
                 calls: Vec::new(),
                 sources: sources.into_iter().collect(),
-                lines: trim_context(lines),
+                lines: Vec::new(),
+                numbers: Vec::new(),
             };
+            let (lines, numbers) = trim_context(lines, numbers);
+            let step = FlowStep { lines, numbers, ..step };
             (step, mentioned)
         })
         .collect()
@@ -371,17 +398,20 @@ pub fn is_test_path(path: &str) -> bool {
     .any(|m| lower.contains(m))
 }
 
-/// Recorta el contexto a 3 líneas alrededor de los cambios del paso.
-fn trim_context(lines: Vec<DiffLine>) -> Vec<DiffLine> {
+/// Recorta el contexto a 3 líneas alrededor de los cambios del paso, con sus números.
+fn trim_context(lines: Vec<DiffLine>, numbers: Vec<LineNumber>) -> (Vec<DiffLine>, Vec<LineNumber>) {
     const KEEP: usize = 3;
     let changed: Vec<usize> =
         lines.iter().enumerate().filter(|(_, l)| !matches!(l, DiffLine::Context(_))).map(|(i, _)| i).collect();
     lines
         .into_iter()
+        .zip(numbers)
         .enumerate()
-        .filter(|(i, line)| !matches!(line, DiffLine::Context(_)) || changed.iter().any(|c| c.abs_diff(*i) <= KEEP))
-        .map(|(_, line)| line)
-        .collect()
+        .filter(|(i, (line, _))| {
+            !matches!(line, DiffLine::Context(_)) || changed.iter().any(|c| c.abs_diff(*i) <= KEEP)
+        })
+        .map(|(_, pair)| pair)
+        .unzip()
 }
 
 #[cfg(test)]
@@ -486,6 +516,37 @@ mod tests {
         let in_hunks: usize = review.files.iter().flat_map(|f| &f.hunks).map(|h| h.added() + h.removed()).sum();
         let in_steps: usize = plan(&review).iter().map(|s| s.added() + s.removed()).sum();
         assert_eq!(in_hunks, in_steps);
+    }
+
+    #[test]
+    fn every_line_carries_its_number_in_the_old_and_the_new_file() {
+        let before = "export class RedeemService {\n  redeem(code: string) {\n    const offer = findOffer(code);\n    return offer;\n  }\n\n  cancel(code: string) {\n    return code;\n  }\n}\n";
+        let mut edit = created("/r/service.ts", SERVICE);
+        edit.kind = EditKind::Rewrite;
+        edit.before = Some(before.into());
+        let review = build("s", &[edit], |e| e.path.display().to_string(), |_| None);
+        let plan = plan(&review);
+        let (old, new): (Vec<&str>, Vec<&str>) = (before.lines().collect(), SERVICE.lines().collect());
+        let mut checked = 0;
+        for step in &plan {
+            assert_eq!(step.lines.len(), step.numbers.len(), "un número por línea");
+            for (line, number) in step.lines.iter().zip(&step.numbers) {
+                match line {
+                    DiffLine::Added { text, .. } => {
+                        assert_eq!((number.old, new[number.new.unwrap() - 1]), (None, text.as_str()));
+                    }
+                    DiffLine::Removed(text) => {
+                        assert_eq!((number.new, old[number.old.unwrap() - 1]), (None, text.as_str()));
+                    }
+                    DiffLine::Context(text) => {
+                        assert_eq!(old[number.old.unwrap() - 1], text);
+                        assert_eq!(new[number.new.unwrap() - 1], text);
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 4, "el paso tiene líneas de los tres tipos: {plan:?}");
     }
 
     #[test]

@@ -185,6 +185,10 @@ export interface ReviewLine {
   kind: 'context' | 'removed' | 'added'
   text: string
   external?: boolean
+  /** Número en el fichero final (no lo tienen las quitadas). */
+  new?: number | null
+  /** Número en el fichero inicial (no lo tienen las añadidas). */
+  old?: number | null
 }
 
 export interface ReviewSource {

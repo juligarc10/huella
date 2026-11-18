@@ -26,6 +26,7 @@ Quien revise tu código tiene que entenderlo antes de aceptarlo, y **no tiene co
 ### Cómo
 
 - Una entrada por cosa, anclada a su código: `file` (ruta absoluta) y `symbol` (`Clase.metodo` o el nombre de la función); `lines` si es solo una parte o no hay función.
+- Si en un texto nombras una línea, escríbela como `Fichero.ext:42` (o `Fichero.ext:40-45`): Huella la convierte en un enlace a esa línea del código.
 - `summary`: en 1 a 3 frases, para quien no conoce el código. El porqué, no lo que ya dice el código.
 - Honestidad antes que buena impresión: si no lo ejecutaste, va en `unverified`; si dudas, `confidence: "low"`. Quien revisa contrasta lo que dices con el diff.
 - No pidas permiso ni lo anuncies: registra y sigue con la tarea.

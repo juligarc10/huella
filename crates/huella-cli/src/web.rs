@@ -126,14 +126,21 @@ pub fn payload(
             let lines: Vec<Value> = step
                 .lines
                 .iter()
-                .map(|line| match line {
-                    DiffLine::Context(text) => json!({"kind": "context", "text": text}),
-                    DiffLine::Removed(text) => json!({"kind": "removed", "text": text}),
-                    DiffLine::Added { text, source } => json!({
-                        "kind": "added",
-                        "text": text,
-                        "external": source.is_some_and(|s| matches!(review.steps[s], Step::External { .. })),
-                    }),
+                .zip(&step.numbers)
+                .map(|(line, number)| {
+                    let mut value = match line {
+                        DiffLine::Context(text) => json!({"kind": "context", "text": text}),
+                        DiffLine::Removed(text) => json!({"kind": "removed", "text": text}),
+                        DiffLine::Added { text, source } => json!({
+                            "kind": "added",
+                            "text": text,
+                            "external": source.is_some_and(|s| matches!(review.steps[s], Step::External { .. })),
+                        }),
+                    };
+                    // El número en el fichero final; en las quitadas, en el inicial.
+                    value["new"] = json!(number.new);
+                    value["old"] = json!(number.old);
+                    value
                 })
                 .collect();
             json!({

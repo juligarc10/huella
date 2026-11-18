@@ -206,6 +206,7 @@ actual.
 - Distingue lo que dijo el agente de lo que deduces tú del código.
 - Si el contexto no basta para responder, dilo y explica qué habría que mirar.
 - Si ves un problema real relacionado con la pregunta (un caso límite, un error), señálalo.
+- Si nombras una línea, escríbela como `Fichero.ext:42` (o `Fichero.ext:40-45`), con el número del fichero: se convierte en un enlace al código.
 - Escribe en el idioma de la pregunta, en markdown breve.";
 
 /// Pregunta a la sesión, sobre un paso (`step`, su índice en el plan) o

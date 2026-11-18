@@ -2,6 +2,7 @@ import { CircleAlert, Loader2, MessageCircleQuestion, Send, Trash2 } from 'lucid
 import { useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
 
+import { WithLines } from '@/components/review/line-links'
 import { ThinkMore } from '@/components/review/think-more'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -30,7 +31,9 @@ export function CodeQuestionCard({ question, path }: { question: CodeQuestion; p
           <pre className="mt-1.5 overflow-x-auto rounded-lg bg-[var(--diff-removed)] px-3 py-2 font-mono leading-5">{question.removed}</pre>
         </details>
       )}
-      <div className="rounded-lg bg-muted px-3.5 py-2.5 leading-relaxed whitespace-pre-line">{question.answer}</div>
+      <div className="rounded-lg bg-muted px-3.5 py-2.5 leading-relaxed whitespace-pre-line">
+        <WithLines text={question.answer} />
+      </div>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span>
           {question.model.replace(/^[^:]+:/, '')} · {dateTime(question.created_at)}
