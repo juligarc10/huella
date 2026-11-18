@@ -116,6 +116,15 @@ struct PolicyFile {
     review: ReviewSection,
     checkpoints: Checkpoints,
     explain: ExplainSection,
+    impact: ImpactSection,
+}
+
+/// Dónde más mirar el impacto (`[impact]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ImpactSection {
+    /// Otros repositorios que llaman a este o a los que llama (rutas relativas a su raíz).
+    repos: Vec<String>,
 }
 
 /// Cómo se explica el código de este repositorio (`[explain]`).
@@ -172,6 +181,8 @@ pub struct Policy {
     pub checkpoints: Checkpoints,
     /// El nivel de detalle que fija el repositorio (`[explain] detail`), si lo fija.
     pub detail: Option<crate::detail::Detail>,
+    /// Repositorios vecinos donde buscar quién usa sus rutas y temas (`[impact] repos`), ya resueltos.
+    pub neighbors: Vec<PathBuf>,
 }
 
 impl Default for Policy {
@@ -207,6 +218,7 @@ impl Policy {
             source: None,
             checkpoints: Checkpoints::default(),
             detail: None,
+            neighbors: Vec::new(),
         }
     }
 
@@ -229,9 +241,11 @@ impl Policy {
         if let Some(default) = review.default {
             policy.default = default;
         }
+        let home = source.parent().map(Path::to_path_buf).unwrap_or_default();
         policy.source = Some(source);
         policy.checkpoints = file.checkpoints;
         policy.detail = file.explain.detail;
+        policy.neighbors = file.impact.repos.iter().map(|repo| home.join(repo)).filter(|path| path.is_dir()).collect();
         policy
     }
 }
