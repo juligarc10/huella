@@ -1005,7 +1005,7 @@ function StepSlide({
           <p className="text-[13px] text-muted-foreground">{story.chapters[chapter].intent || story.chapters[chapter].title}</p>
           <h2 className="font-mono text-2xl font-semibold tracking-tight break-words">{stepName(step)}</h2>
           <Mono className="text-xs break-all text-muted-foreground">{step.display_path}</Mono>
-          <TriageChips triage={step.triage} policy={review.policy} />
+          <TriageChips triage={step.triage} policy={review.policy} task={Boolean(review.task)} />
         </header>
         <IdeaWarnings warnings={[]} findings={findingsFor(review, [step.index])} />
         <DeclaredPanel entries={step.declared} />

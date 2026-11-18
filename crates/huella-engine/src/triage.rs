@@ -554,7 +554,14 @@ fn findings(review: &SessionReview, step: &FlowStep) -> Vec<Finding> {
     let externals =
         step.sources.iter().filter(|&&source| matches!(review.steps[source], Step::External { .. })).count();
     if externals > 0 {
-        add(Tag::Unexplained, "líneas cambiadas fuera de las ediciones del agente".into());
+        // En una tarea es lo normal: código que no escribió ningún agente registrado.
+        // En una sesión, algo cambió entre las ediciones del agente.
+        let reason = if review.session_id.starts_with("task:") {
+            "lo escribió una persona u otra herramienta, no un agente registrado: no hay explicación suya"
+        } else {
+            "líneas cambiadas fuera de las ediciones del agente"
+        };
+        add(Tag::Unexplained, reason.into());
     }
 
     if is_formatting_only(step) {
@@ -653,6 +660,55 @@ mod tests {
         let mixed = "import a from './a';\nconst password = a();\n";
         let (review, plan) = plan_of("/w/src/y.ts", None, mixed);
         assert!(tags(&review, &plan, &Policy::default()).iter().any(|(level, _)| *level != Level::Skip));
+    }
+
+    #[test]
+    fn code_without_an_agent_reads_as_normal_in_a_task_and_as_odd_in_a_session() {
+        // El agente escribe `a`; antes de su segunda edición alguien cambió el fichero a mano.
+        let edit = |event: &str, before: Option<&str>, after: &str| FileEdit {
+            origin: EditOrigin {
+                agent: "t",
+                session_id: "s".into(),
+                event_id: event.into(),
+                timestamp: None,
+                cwd: None,
+            },
+            path: PathBuf::from("/r/src/a.ts"),
+            kind: if before.is_some() { EditKind::Replace } else { EditKind::Create },
+            before: before.map(str::to_owned),
+            after: AfterState::Known(after.into()),
+            user_modified: false,
+            context: EditContext::default(),
+        };
+        let (written, by_hand) = ("export function a() {\n  return 1;\n}\n", "export function b() {\n  return 2;\n}\n");
+        let edits = [
+            edit("e1", None, written),
+            // Entre medias apareció `b`, que el agente no escribió; él solo vuelve a tocar `a`.
+            edit(
+                "e2",
+                Some(&format!("{written}\n{by_hand}")),
+                &format!("export function a() {{\n  return 3;\n}}\n\n{by_hand}"),
+            ),
+        ];
+        let reason = |id: &str| {
+            let review = huella_review::build(id, &edits, |e| e.path.display().to_string(), |_| None);
+            let plan = huella_review::flow::plan(&review);
+            triage(&review, &plan, &Policy::default(), &BTreeSet::new(), &BTreeSet::new())
+                .into_iter()
+                .flat_map(|t| t.findings)
+                .find(|finding| finding.tag == Tag::Unexplained)
+                .map(|finding| finding.reason)
+        };
+        assert!(
+            reason("task:DENMS-1").is_some_and(|text| text.contains("no un agente")),
+            "{:?}",
+            reason("task:DENMS-1")
+        );
+        assert!(
+            reason("s").is_some_and(|text| text.contains("fuera de las ediciones del agente")),
+            "{:?}",
+            reason("s")
+        );
     }
 
     #[test]

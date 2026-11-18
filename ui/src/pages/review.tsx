@@ -397,7 +397,7 @@ export function Review({
             </span>
             {unexplained > 0 && (
               <span>
-                <strong className="text-warn">{unexplained}</strong> pasos con líneas sin explicación
+                <strong className="text-warn">{unexplained}</strong>{review.task ? ' pasos con código que no escribió un agente' : ' pasos con líneas sin explicación'}
               </span>
             )}
           </div>
@@ -537,7 +537,7 @@ export function Review({
                 </Button>
               </div>
               <h2 className="font-mono text-xl font-medium">{step.symbol ?? baseName(step.path)}</h2>
-              <TriageChips triage={step.triage} policy={review.policy} />
+              <TriageChips triage={step.triage} policy={review.policy} task={Boolean(review.task)} />
               {note && (
                 <p className="text-[15px] leading-relaxed">
                   <span className="font-semibold">Nota del modelo:</span> {note}

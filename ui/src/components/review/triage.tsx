@@ -40,7 +40,9 @@ export const shownBy = (filter: TriageFilter) => (step: ReviewStep) =>
   filter === 'all' || (filter === 'focus' ? step.triage.level !== 'skip' : step.triage.level === 'must')
 
 /** Nivel y etiquetas del paso, con lo que disparó cada una. */
-export function TriageChips({ triage, policy }: { triage: StepTriage; policy: ReviewPolicy }) {
+export function TriageChips({ triage, policy, task = false }: { triage: StepTriage; policy: ReviewPolicy; task?: boolean }) {
+  // En una tarea, el código sin agente es lo normal (a mano, un formateador): no es que falte una explicación.
+  const label = (tag: TriageTag) => (task && tag === 'unexplained' ? 'sin agente' : tagLabel[tag])
   const view = levelView[triage.level]
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -51,7 +53,7 @@ export function TriageChips({ triage, policy }: { triage: StepTriage; policy: Re
           className={cn('rounded-full border px-2 py-0.5', policy.levels[finding.tag] === 'must' && 'border-destructive/40 text-destructive')}
           title={finding.reason}
         >
-          {tagLabel[finding.tag]}
+          {label(finding.tag)}
           <span className="text-muted-foreground"> · {finding.reason}</span>
         </span>
       ))}
