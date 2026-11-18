@@ -62,6 +62,9 @@ pub struct Review {
     pub agent_walkthrough: Option<bool>,
     /// Recordar lo que se comprueba (respuestas y términos); sin definir, sí.
     pub learning: Option<bool>,
+    /// Nivel de detalle de las explicaciones (`first_time`, `domain` o `code`);
+    /// sin definir, `first_time`. Lo reciben el agente y el modelo revisor.
+    pub detail: Option<String>,
 }
 
 #[derive(Default, Deserialize)]

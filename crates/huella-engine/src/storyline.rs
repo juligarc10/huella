@@ -26,6 +26,7 @@ use crate::blocks::StoryBlock;
 use crate::coverage::RequirementStatus;
 use crate::declared::DeclaredView;
 use crate::declared::plain_symbol;
+use crate::detail::Detail;
 use crate::triage::{Level, StepTriage};
 use crate::workspace::git;
 use crate::{EngineError, Result};
@@ -83,8 +84,6 @@ const DIFF_BUDGET: usize = 2400;
 const STEP_LINES: (usize, usize) = (60, 6);
 /// Ficheros sin mencionar que se le dicen al agente de una vez.
 const MAX_UNMENTIONED: usize = 40;
-/// Menos que esto no explica nada a quien no conoce el código.
-const MIN_EXPLANATION: usize = 80;
 
 // ---------------------------------------------------------------------------
 // El formato común: huella.storyline/v1.
@@ -896,32 +895,34 @@ fn locate_point(quote: &str, steps: &[usize], plan: &[FlowStep]) -> Option<(usiz
     None
 }
 
-/// Lo que le falta a un guion para que lo entienda alguien sin contexto. Se le
+/// Lo que le falta a un guion para el nivel de detalle que se pide. Se le
 /// devuelve al agente para que lo complete mientras aún lo sabe.
 #[must_use]
-pub fn gaps(story: &Story) -> Vec<String> {
+pub fn gaps(story: &Story, detail: Detail) -> Vec<String> {
     let mut found = Vec::new();
     if story.before.trim().is_empty() || story.after.trim().is_empty() {
         found.push("before y after: cómo se comportaba el sistema antes y cómo ahora".to_owned());
     }
-    if story.problem.trim().is_empty() || story.impact.trim().is_empty() || story.solution.trim().is_empty() {
+    if detail.needs_context()
+        && (story.problem.trim().is_empty() || story.impact.trim().is_empty() || story.solution.trim().is_empty())
+    {
         found.push(
             "problem, impact y solution: qué fallaba o faltaba, a quién afectaba y con qué consecuencias, y la idea \
              de la solución y por qué así"
                 .to_owned(),
         );
     }
-    if story.scenarios.len() < 2 {
+    if detail.needs_context() && story.scenarios.len() < 2 {
         found.push(
             "scenarios: 2 a 4 casos concretos con datos de verdad (el normal y los límites), con qué pasaba antes y \
              qué pasa ahora"
                 .to_owned(),
         );
     }
-    if story.example.scenario.trim().is_empty() || story.example.walk.is_empty() {
+    if detail.needs_context() && (story.example.scenario.trim().is_empty() || story.example.walk.is_empty()) {
         found.push("example: un caso concreto con datos de verdad, de principio a fin".to_owned());
     }
-    if story.concepts.is_empty() {
+    if detail.needs_concepts() && story.concepts.is_empty() {
         found.push("concepts: los términos del dominio y del código que hay que conocer".to_owned());
     }
     // Quien lee ve títulos, nunca los ids del guion.
@@ -958,11 +959,8 @@ pub fn gaps(story: &Story) -> Vec<String> {
                     idea.title
                 ));
             }
-            if told < MIN_EXPLANATION {
-                found.push(format!(
-                    "explanation de «{}»: es demasiado breve para quien no conoce el código",
-                    idea.title
-                ));
+            if told < detail.min_explanation() {
+                found.push(format!("explanation de «{}»: es demasiado breve para {}", idea.title, detail.reader()));
             }
             if idea.anchors.is_empty() {
                 found.push(format!("anchors de «{}»: di qué código la forma", idea.title));
@@ -1196,12 +1194,12 @@ fn unmentioned(told: &Story, root: &Path) -> Option<String> {
 ///
 /// # Errors
 /// Si el guion no tiene capítulos, ninguna ancla se puede resolver o falla la base de datos.
-pub fn record(store: &mut Store, mut told: Story) -> Result<Recorded> {
+pub fn record(store: &mut Store, mut told: Story, detail: Detail) -> Result<Recorded> {
     if told.chapters.is_empty() {
         return Err(EngineError::Invalid("el guion no tiene capítulos".into()));
     }
     told.version = Some(VERSION.to_owned());
-    let mut gaps = gaps(&told);
+    let mut gaps = gaps(&told, detail);
     let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
     let mut repos: BTreeSet<(String, String)> = BTreeSet::new();
     let mut unresolved = Vec::new();
@@ -2004,7 +2002,7 @@ mod tests {
             "flow": [{"from": "C1", "to": "C2", "label": "suma"}], "risks": ["sin redondeo"]
         }))
         .unwrap();
-        let recorded = record(&mut store, told).unwrap();
+        let recorded = record(&mut store, told, Detail::FirstTime).unwrap();
         assert_eq!((recorded.chapters, recorded.anchors, recorded.unresolved.len()), (2, 3, 0));
 
         let paths = [repo.join("total.ts").display().to_string(), repo.join("other.ts").display().to_string()];
@@ -2031,7 +2029,7 @@ mod tests {
         let missing: Story = serde_json::from_value(json!({"summary": "x", "chapters": [{"id": "C1", "title": "t",
             "intent": "i", "anchors": [{"file": "/no/existe.ts"}]}]}))
         .unwrap();
-        assert!(record(&mut store, missing).unwrap_err().to_string().contains("ninguna ancla"));
+        assert!(record(&mut store, missing, Detail::FirstTime).unwrap_err().to_string().contains("ninguna ancla"));
         std::fs::remove_dir_all(&repo).unwrap();
     }
 
@@ -2064,7 +2062,12 @@ mod tests {
                 }
             }
         }
-        record(&mut store, serde_json::from_value(json!({"summary": "s", "chapters": chapters})).unwrap()).unwrap();
+        record(
+            &mut store,
+            serde_json::from_value(json!({"summary": "s", "chapters": chapters})).unwrap(),
+            Detail::FirstTime,
+        )
+        .unwrap();
         let paths = [
             repo.join("cart.ts").display().to_string(),
             repo.join("other.ts").display().to_string(),
@@ -2131,7 +2134,7 @@ mod tests {
             {"id": "C1", "title": "Usuarios", "intent": "i", "anchors": [{"file": file, "symbol": "UserService"}]}
         ]}))
         .unwrap();
-        record(&mut store, told).unwrap();
+        record(&mut store, told, Detail::FirstTime).unwrap();
         let path = file.display().to_string();
         let (review, plan) = review_of(&[(&path, SERVICE)]);
         let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
@@ -2179,7 +2182,7 @@ mod tests {
             ]}]}),
         )
         .unwrap();
-        record(&mut store, told).unwrap();
+        record(&mut store, told, Detail::FirstTime).unwrap();
         let path = file.display().to_string();
         let (review, plan) = review_of(&[(&path, SERVICE)]);
         let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
@@ -2209,7 +2212,7 @@ mod tests {
             {"id": "C2", "title": "Ajustes", "kind": "config", "intent": "i", "narration": "n", "anchors": [{"file": "b.toml"}]}
         ]}))
         .unwrap();
-        let found = gaps(&thin);
+        let found = gaps(&thin, Detail::FirstTime);
         for expected in [
             "before y after",
             "problem, impact y solution",
@@ -2223,6 +2226,19 @@ mod tests {
         }
         assert!(!found.iter().any(|gap| gap.contains("Ajustes")), "la configuración no necesita ideas: {found:?}");
 
+        // Para quien ya conoce el código no se pide contexto ni glosario, pero sí explicar cada idea.
+        let known = gaps(&thin, Detail::Code);
+        for skipped in ["problem", "scenarios", "example", "concepts"] {
+            assert!(!known.iter().any(|gap| gap.starts_with(skipped)), "no hace falta «{skipped}»: {known:?}");
+        }
+        assert!(known.iter().any(|gap| gap.starts_with("before y after")), "{known:?}");
+        assert!(known.iter().any(|gap| gap.starts_with("ideas de «Lógica»")), "{known:?}");
+        let domain = gaps(&thin, Detail::Domain);
+        assert!(
+            !domain.iter().any(|gap| gap.starts_with("concepts"))
+                && domain.iter().any(|gap| gap.starts_with("example"))
+        );
+
         let full: Story = serde_json::from_value(json!({"summary": "s", "before": "b", "after": "a",
             "problem": "p", "impact": "i", "solution": "s",
             "scenarios": [{"title": "a", "situation": "x", "before": "b", "after": "a"}, {"title": "b", "situation": "y", "before": "b", "after": "a"}],
@@ -2231,14 +2247,18 @@ mod tests {
                 {"title": "I", "explanation": "Una explicación con suficiente detalle para alguien que no conoce nada de este código.", "what": "w", "why": "y", "points": [{"text": "t", "quote": "q"}], "anchors": [{"file": "a.ts"}]}
             ]}]}))
         .unwrap();
-        assert_eq!(gaps(&full), Vec::<String>::new());
+        assert_eq!(gaps(&full, Detail::FirstTime), Vec::<String>::new());
 
         let with_id: Story = serde_json::from_value(json!({"summary": "s", "chapters": [
             {"id": "C1", "title": "Puertos", "kind": "config", "intent": "i", "narration": "n"},
             {"id": "C2", "title": "Adaptadores", "kind": "config", "intent": "i", "narration": "Implementan los puertos de C1."}
         ]}))
         .unwrap();
-        assert!(gaps(&with_id).iter().any(|gap| gap.starts_with("«Adaptadores» nombra C1")), "{:?}", gaps(&with_id));
+        assert!(
+            gaps(&with_id, Detail::FirstTime).iter().any(|gap| gap.starts_with("«Adaptadores» nombra C1")),
+            "{:?}",
+            gaps(&with_id, Detail::FirstTime)
+        );
     }
 
     #[test]
@@ -2254,7 +2274,7 @@ mod tests {
             "concepts": [{"term": "Carrito", "meaning": "Lo que el cliente va a comprar"}],
             "chapters": [{"id": "C1", "title": "T", "intent": "i", "anchors": [{"file": file, "symbol": "Cart"}]}]}))
             .unwrap();
-        record(&mut store, told).unwrap();
+        record(&mut store, told, Detail::FirstTime).unwrap();
         let path = file.display().to_string();
         let (review, plan) = review_of(&[(&path, CART)]);
         let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
@@ -2329,7 +2349,7 @@ mod tests {
             }
         }
         let mut store = Store::open_in_memory().unwrap();
-        record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        record(&mut store, serde_json::from_value(guion).unwrap(), Detail::FirstTime).unwrap();
         let refs: Vec<(&str, &str)> = paths.iter().map(|(path, content)| (path.as_str(), *content)).collect();
         let (review, plan) = review_of(&refs);
         let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
@@ -2400,7 +2420,7 @@ mod tests {
             }
         }
         let mut store = Store::open_in_memory().unwrap();
-        record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        record(&mut store, serde_json::from_value(guion).unwrap(), Detail::FirstTime).unwrap();
         let path = repo.join("src/total.ts").display().to_string();
         let (review, plan) = review_of(&[(&path, TOTAL)]);
         let repos = vec![(RepoRef::new(&repo.display().to_string()), "feature/A-1".to_owned())];
@@ -2441,7 +2461,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let guion = json!({"summary": "s", "chapters": [
             {"id": "C1", "title": "T", "intent": "i", "narration": "n", "anchors": [{"file": repo.join("told.ts")}]}]});
-        let recorded = record(&mut store, serde_json::from_value(guion).unwrap()).unwrap();
+        let recorded = record(&mut store, serde_json::from_value(guion).unwrap(), Detail::FirstTime).unwrap();
         std::fs::remove_dir_all(&repo).unwrap();
         let gap = recorded.gaps.iter().find(|gap| gap.starts_with("ficheros que cambian")).expect("avisa");
         assert!(gap.contains("respecto a main"), "{gap}");

@@ -1298,6 +1298,14 @@ fn record_check(app: &mut App, session: &str, body: &str) -> Result<Value> {
     Ok(json!({"saved": true}))
 }
 
+/// El nivel de detalle que pide una petición al modelo revisor; sin pedirlo, el de Ajustes.
+fn detail_of(request: &Value) -> Result<Option<huella_engine::detail::Detail>> {
+    match request["detail"].as_str() {
+        None | Some("") => Ok(None),
+        Some(code) => huella_engine::detail::Detail::parse(code).map(Some).context("nivel de detalle desconocido"),
+    }
+}
+
 /// Recorrido guiado de una revisión (de una tarea o de una sesión): lo escribe un
 /// hilo con el modelo configurado. Lo que se pidió sale de la tarea o de las
 /// peticiones de la sesión; el guion, si lo hay, va como pista.
@@ -1305,8 +1313,9 @@ fn start_walkthrough(app: &mut App, session: &str, body: &str) -> Result<(u16, V
     if let Some(problem) = crate::model_problem(&app.model) {
         bail!(problem);
     }
-    let think =
-        serde_json::from_str::<Value>(body).ok().and_then(|request| request["think"].as_bool()).filter(|think| *think);
+    let request = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let think = request["think"].as_bool().filter(|think| *think);
+    let detail = detail_of(&request)?;
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let project = review_project(app, &review.session_id)?;
@@ -1347,7 +1356,7 @@ fn start_walkthrough(app: &mut App, session: &str, body: &str) -> Result<(u16, V
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let llm = crate::build_model_thinking(&model, think)?;
+            let llm = crate::build_model_with(&model, think, detail)?;
             let input = huella_engine::walkthrough::WalkInput { intent: &intent, hints: &hints };
             huella_engine::walkthrough::generate(&store, &review, &plan, input, llm.as_ref(), context_tokens)?;
             Ok(())
@@ -1607,6 +1616,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let removed = request["removed"].as_str().unwrap_or_default().to_owned();
     let place = huella_engine::code_ask::RemovedPlace::parse(request["place"].as_str().unwrap_or_default());
     let think = request["think"].as_bool().filter(|think| *think);
+    let detail = detail_of(&request)?;
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
     let key = huella_engine::normalize_path(&path, None);
@@ -1625,7 +1635,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let llm = crate::build_model_thinking(&model, think)?;
+            let llm = crate::build_model_with(&model, think, detail)?;
             huella_engine::code_ask::ask_code(
                 &store,
                 Some(&sources),
@@ -1736,6 +1746,7 @@ fn explain_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let depth_name = text("depth").unwrap_or_default();
     let depth = huella_engine::explain::Depth::parse(&depth_name).context("depth debe ser walk o rules")?;
     let think = request["think"].as_bool().filter(|think| *think);
+    let detail = detail_of(&request)?;
     let refresh = request["refresh"].as_bool().unwrap_or(false);
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
@@ -1762,7 +1773,7 @@ fn explain_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let llm = crate::build_model_thinking(&model, think)?;
+            let llm = crate::build_model_with(&model, think, detail)?;
             huella_engine::explain::explain_code(
                 &store,
                 Some(&sources),
@@ -1804,6 +1815,7 @@ fn understand_symbol(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let path = PathBuf::from(text("path").context("falta el fichero")?);
     let symbol = text("symbol").context("falta el símbolo")?;
     let think = request["think"].as_bool().filter(|think| *think);
+    let detail = detail_of(&request)?;
     let refresh = request["refresh"].as_bool().unwrap_or(false);
     let key = huella_engine::normalize_path(&path, None);
     let pending = PendingGuide { path: key, symbol: symbol.clone(), done: 0, total: 0, error: None };
@@ -1828,7 +1840,7 @@ fn understand_symbol(app: &mut App, body: &str) -> Result<(u16, Value)> {
         };
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let llm = crate::build_model_thinking(&model, think)?;
+            let llm = crate::build_model_with(&model, think, detail)?;
             let ask =
                 huella_engine::symbol_guide::UnderstandSymbol { path: &path, symbol: &symbol, reviewed: None, refresh };
             huella_engine::symbol_guide::understand_symbol(&store, Some(&sources), llm.as_ref(), ask, &progress)?;
@@ -1963,6 +1975,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
         .to_owned();
     let step = request["step"].as_u64().and_then(|s| usize::try_from(s).ok());
     let think = request["think"].as_bool().filter(|think| *think);
+    let detail = detail_of(&request)?;
     if let Some(problem) = crate::model_problem(&app.model) {
         bail!(problem);
     }
@@ -1976,7 +1989,7 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open(&db)?;
-            let extractor = crate::build_model_thinking(&model, think)?;
+            let extractor = crate::build_model_with(&model, think, detail)?;
             huella_engine::review_loop::ask(
                 &store,
                 extractor.as_ref(),

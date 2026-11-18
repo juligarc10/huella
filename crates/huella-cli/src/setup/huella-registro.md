@@ -50,7 +50,7 @@ Ejemplo:
 
 Cuando acabes la tarea (o una parte grande que se vaya a revisar), relee lo que registraste con `huella_recorded` y cuenta el cambio con `huella_storyline`. Huella lo presenta diapositiva a diapositiva: **tu explicación es lo que leerá quien revise**, y tú eres quien mejor conoce el cambio.
 
-Escribe para **alguien que llega de nuevas al código y al dominio**, y que debe acabar sin dudas y lo antes posible:
+Escribe para **alguien que llega de nuevas al código y al dominio**, y que debe acabar sin dudas y lo antes posible. Si las instrucciones de Huella o la respuesta de `huella_recorded` dicen otro **nivel de detalle** («Conozco el dominio», «Conozco el código»), manda ese: es lo que ha elegido quien revisa, y lo que `huella_storyline` te diga que falta ya va según ese nivel.
 
 - Di qué es cada pieza la primera vez que la nombres. Si usas un término, está en `concepts`.
 - Explica el porqué antes que el cómo, y no repitas el código línea a línea.
