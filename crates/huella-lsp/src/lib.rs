@@ -33,6 +33,8 @@ use lsp_types::{
 
 /// Ediciones que se muestran en el hover; el resto se resume en una línea.
 const HOVER_ENTRIES: usize = 3;
+/// Declaraciones del agente en el hover, la más concreta primero.
+const HOVER_DECLARED: usize = 4;
 /// Caracteres de cada respuesta en el hover.
 const HOVER_ANSWER: usize = 1500;
 /// Comando de la acción «preguntar sobre estas líneas».
@@ -421,8 +423,27 @@ impl Server {
             .into_iter()
             .filter(|located| located.lines.is_some_and(|(start, end)| (start..=end).contains(&line)))
             .collect();
-        let mut value =
-            memory.as_ref().map(|memory| huella_engine::render_markdown(memory, HOVER_ENTRIES)).unwrap_or_default();
+        // Lo que declaró el agente al escribirlo va primero: es el porqué, la historia viene después.
+        let declared: Vec<_> = huella_engine::declared::at_line(&self.store, &path, source, line)
+            .inspect_err(|error| eprintln!("huella: declaraciones de {}: {error}", path.display()))
+            .unwrap_or_default()
+            .into_iter()
+            .take(HOVER_DECLARED)
+            .collect();
+        let mut value = if declared.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "**Lo que declaró el agente al escribirlo** (su versión: contrástala con el código)\n\n{}",
+                huella_engine::declared::render(&declared)
+            )
+        };
+        if let Some(memory) = &memory {
+            if !value.is_empty() {
+                value.push_str("\n---\n\n");
+            }
+            value.push_str(&huella_engine::render_markdown(memory, HOVER_ENTRIES));
+        }
         for located in &questions {
             if !value.is_empty() {
                 value.push_str("\n\n---\n\n");
@@ -443,7 +464,8 @@ impl Server {
         let range = match (&memory, questions.first().and_then(|located| located.lines)) {
             (Some(memory), _) => line_range(memory.symbol.start_line, memory.symbol.end_line),
             (None, Some((start, end))) => line_range(start, end),
-            (None, None) => return None,
+            // Solo hay lo que declaró el agente: la línea del cursor.
+            (None, None) => line_range(line, line),
         };
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value }),

@@ -139,24 +139,30 @@ dice que el registro depende demasiado de la buena voluntad del agente, y todo l
 - Probar una tarea real de trabajo (varios micros, rama de sprint) y las guías del modelo local, que aún no se han visto con el contexto nuevo.
 - Ajustar la skill (`crates/huella-cli/src/setup/huella-registro.md`) según lo que salga.
 
-### 4. La presentación «mágica»
+### 4. Lo construido que aún no se ha usado
 
-Que el modelo local use el guion como libreto, para que la revisión se lea seguida.
+Ya existen, pero el uso real (base de datos, 2026-11-16) es cero: antes de construir más, usarlos y ver
+si sirven.
 
-- **Auditar el guion del agente**. Un botón en la portada hace que el modelo revisor contraste lo declarado con el diff y la descripción: requisitos que dice cumplidos y no se ven, capítulos cuyo código no hace lo que cuentan, cambios que no menciona. El resultado se muestra junto al guion, sin sustituirlo.
+- **Auditar el guion del agente**: «Contrastar con el diff» en la portada (v0.7.0, `review_audit`).
+- **Preguntas activas y aprendizaje**: «Comprobar» y los términos sabidos o por repasar (v0.8.0,
+  `learning_check` y `learning_term`, con su interruptor en Ajustes).
+- **Devolver al agente lo que pide la revisión**: `huella_review_feedback` y «Pedir cambios».
+- **Profundizar**, **lectura guiada** y **guía de símbolo** (v0.8.0).
 
-### 5. Preguntas activas y aprendizaje
+Si alguno no se usa porque está escondido (la auditoría depende de un botón), valorar lanzarlo solo al
+abrir la tarea.
 
-Del documento de producto (registro declarado, preguntas activas y aprendizaje).
+### 5. Pendientes
 
-- Al final de cada capítulo, las `questions` del guion se responden con tus palabras y un modelo evalúa la respuesta con el código y el guion como contexto.
-- Guardar las respuestas y los conceptos fallados, y reforzarlos en tareas futuras. Iría en un crate propio, con un interruptor en la configuración (`[learning] enabled`) para no estorbar a quien solo quiere revisar.
+- El impacto de un paso en una tarea solo busca en su repositorio; los usos desde otro micro (por HTTP o
+  por eventos) no se ven. Necesita diseño: cómo reconocer una llamada HTTP o un evento entre repos.
+- Que Cmd+F busque también en las diapositivas que no se ven, y el nivel de detalle por repositorio en
+  `.huella.toml` (del bloque 1).
 
-### 6. Pendientes pequeños
-
-- En una tarea, el código escrito a mano sale como «sin explicación». Es correcto, pero conviene decirlo de otra forma: no lo escribió un agente.
-- Lo que declara el agente debería salir también en el hover del editor (LSP), junto a las preguntas sobre el código.
-- El impacto de un paso en una tarea solo busca en su repositorio; los usos desde otro micro (por HTTP o por eventos) no se ven.
+**Hecho** (2026-11-18): en una tarea, el código que no escribió un agente sale como «sin agente» y no
+como «sin explicación»; y el hover del editor enseña lo que declaró el agente, recolocado por su símbolo,
+antes que la historia de ediciones.
 
 ## Más adelante
 
