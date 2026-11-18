@@ -172,7 +172,18 @@ require_declarations = true  # also always ask for must-review steps it didn't d
 
 [explain]
 detail = "domain" # how much to explain, for the whole team: first_time, domain or code (default: each person's setting)
+
+[impact]
+repos = ["../billing", "../gateway"] # other services that call this one or that it calls (paths relative to this repository)
 ```
+
+**Cross-service impact**: each step's impact also shows what it offers to other
+services (Spring routes with their class prefix, or the OpenAPI operations its
+controller implements; the topics it consumes or publishes) and who uses it in the
+task's other repositories and those in `[impact] repos`: callers of the route (a
+literal, a constant, a generated `…Api` client by `operationId`, a Feign client),
+publishers or consumers of the topic, and copies of the route in their spec. It is
+rule-based, without a model: a URL built piece by piece can slip through.
 
 When a turn ends, the agent is asked to record the code of that turn it left
 unexplained (not tests, docs or config; must-review first) and, if its branch has

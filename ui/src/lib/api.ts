@@ -721,6 +721,32 @@ export interface StepImpact {
   uses: ImpactUse[]
   total: number
   generic: boolean
+  /** Lo que ofrece a otros micros (rutas, temas) y quién lo usa desde otros repositorios. */
+  remote?: StepRemote
+}
+
+/** Una ruta HTTP que expone o un tema que consume o publica. */
+export interface Contract {
+  offer: 'exposes' | 'consumes' | 'publishes'
+  method: string | null
+  name: string
+}
+
+export interface RemoteUse {
+  repo: string
+  /** Ruta absoluta. */
+  path: string
+  line: number
+  text: string
+  kind: 'calls' | 'publishes' | 'consumes' | 'configures' | 'specifies' | 'mentions'
+  /** La ruta o el tema que los une. */
+  contract: string
+}
+
+export interface StepRemote {
+  contracts: Contract[]
+  uses: RemoteUse[]
+  total: number
 }
 
 export interface ImpactResult {

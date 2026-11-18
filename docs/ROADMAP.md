@@ -155,8 +155,11 @@ abrir la tarea.
 
 ### 5. Pendientes
 
-- El impacto de un paso en una tarea solo busca en su repositorio; los usos desde otro micro (por HTTP o
-  por eventos) no se ven. Necesita diseño: cómo reconocer una llamada HTTP o un evento entre repos.
+- **Impacto entre micros, hecho** (rama `feature/impacto-entre-micros`): rutas de Spring y operaciones
+  OpenAPI, temas de Kafka/Rabbit/JMS, y sus usos en los otros repositorios de la tarea y los de
+  `[impact] repos`. Probado contra un repositorio Spring real (contract-first); falta un caso real entre
+  dos repositorios. Sin cubrir: especificaciones en JSON o con `$ref` a otros ficheros, anotaciones en
+  varias líneas y URLs que se arman por trozos.
 
 **Hecho** (2026-11-18): en una tarea, el código que no escribió un agente sale como «sin agente» y no
 como «sin explicación»; y el hover del editor enseña lo que declaró el agente, recolocado por su símbolo,
