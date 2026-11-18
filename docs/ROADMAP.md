@@ -117,7 +117,12 @@ Ajustes y, para el modelo revisor, en directo junto a cada «Pensar más». Pend
   - el contador «3 de 12»;
   - en la presentación, busca también en las diapositivas que no se ven y salta a ellas.
 
-### 2. Que el agente registre lo que hace (en curso, rama `feature/registro-obligatorio`)
+### 2. Que el agente registre lo que hace (hecho en la rama `feature/hook-registro`)
+
+**Hecho** (2026-11-18), con un ajuste tras probarlo sobre una sesión real: solo se pide lo del **último
+turno con código**, porque pedirlo todo daba 175 pasos de golpe en una sesión larga. La portada de
+DUNGEON-1 dice ahora «7 de 168 pasos con algo registrado». Queda ver con una tarea nueva si el agente
+responde bien a la petición y si sube esa proporción.
 
 El uso real (36 registros en 11 días, 27 de tipo `decision`; DUNGEON-1 con 155 ediciones y 12 registros)
 dice que el registro depende demasiado de la buena voluntad del agente, y todo lo demás sale de él.

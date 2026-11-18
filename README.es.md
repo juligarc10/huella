@@ -361,9 +361,15 @@ Para agentes sin skills, `huella agents-md` da el mismo texto para `AGENTS.md`.
 Cada declaración se ancla al símbolo con el texto que tenía. En la revisión, el
 paso la muestra como **lo que declaró el agente**, su versión, que hay que
 contrastar con el código, y avisa si el código cambió después. La guía y las
-preguntas sobre el código también la usan. Con `require_declarations` (abajo), si
-el agente termina el turno con pasos obligatorios sin declarar, el hook le pide
-que los registre antes de terminar; solo una vez por turno.
+preguntas sobre el código también la usan.
+
+Registrar no depende de que el agente se acuerde: al acabar cada turno, el hook
+le pide que registre el código del turno que escribió sin explicar (no los tests,
+la documentación ni la configuración; primero lo obligatorio) y, si la rama
+tiene commits que ningún guion cuenta, que la cuente con `huella_storyline`.
+Cada cosa se pide **una sola vez** por cómo es: si responde que no hay nada que
+contar, no se le insiste, y si el código o la rama cambian, se le vuelve a
+pedir. Se desactiva con `ask_record = false` (abajo).
 
 #### Puntos de control mientras el agente trabaja
 
@@ -383,7 +389,8 @@ junto a los que ya tengas):
 [checkpoints]
 notify = true     # el aviso al acabar cada turno (por defecto, sí)
 block_after = 5   # parar al agente con 5 obligatorios sin revisar (por defecto, nunca)
-require_declarations = true  # pedirle que declare lo obligatorio antes de terminar (por defecto, no)
+ask_record = true # pedirle una vez que registre lo que escribió sin explicar y cuente las ramas sin guion (por defecto, sí)
+require_declarations = true  # además, pedirle siempre lo obligatorio sin declarar (por defecto, no)
 ```
 
 Si algo falla en Huella, el hook sale sin decir nada: nunca para al agente por

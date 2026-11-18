@@ -52,6 +52,13 @@ fn respond(event: HookEvent, input: &Value, db: Option<PathBuf>, projects: Optio
             if !continuing && let Some(request) = huella_engine::checkpoint::declare_request(&checkpoint) {
                 return Ok(Some(continue_output(&request)));
             }
+            // Lo que escribió sin explicar y las ramas sin guion: una vez por cosa.
+            if !continuing
+                && let Some(request) =
+                    huella_engine::record_ask::request(&mut store, &checkpoint.session_id, &checkpoint.record)?
+            {
+                return Ok(Some(continue_output(&request)));
+            }
             Ok(huella_engine::checkpoint::notice(&checkpoint).map(|notice| stop_output(&notice)))
         }
         HookEvent::PreEdit => {

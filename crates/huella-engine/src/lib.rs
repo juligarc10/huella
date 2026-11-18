@@ -22,6 +22,7 @@ pub mod lineage;
 pub mod narration;
 mod paths;
 mod query;
+pub mod record_ask;
 pub mod refactor_bench;
 mod render;
 mod review;
