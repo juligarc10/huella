@@ -206,6 +206,42 @@ pub fn for_steps(
     Ok(result)
 }
 
+/// Lo que declaró el agente sobre el código que hay ahora en una línea de un
+/// fichero (para el hover del editor): cada declaración se recoloca por su
+/// símbolo, porque el código se mueve, y la más concreta va primero (la de un
+/// método antes que la de su clase).
+///
+/// # Errors
+/// Si falla la base de datos.
+pub fn at_line(store: &Store, path: &Path, source: &str, line: usize) -> Result<Vec<DeclaredView>> {
+    let mut found = store.declarations(&crate::normalize_path(path, None))?;
+    if let Ok(real) = std::fs::canonicalize(path) {
+        let real = crate::normalize_path(&real, None);
+        if real != crate::normalize_path(path, None) {
+            found.extend(store.declarations(&real)?);
+        }
+    }
+    let text: Vec<&str> = source.lines().collect();
+    let mut placed: Vec<(usize, DeclaredView)> = found
+        .into_iter()
+        .filter_map(|declaration| {
+            let (_, (start, end)) = anchor(
+                path,
+                source,
+                declaration.symbol.as_deref(),
+                Some((declaration.start_line, declaration.end_line)),
+            );
+            (start..=end).contains(&line).then(|| {
+                let current = text.get(start.saturating_sub(1)..end.min(text.len())).map(|slice| slice.join("\n"));
+                (end - start, view(declaration, &current.unwrap_or_default()))
+            })
+        })
+        .collect();
+    // La más concreta primero y, a igualdad, la más reciente.
+    placed.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.declaration.id.cmp(&x.declaration.id)));
+    Ok(placed.into_iter().map(|(_, view)| view).collect())
+}
+
 /// Una declaración junto al texto que tiene ahora su código: desactualizada si
 /// cambió algo más que espacios.
 #[must_use]

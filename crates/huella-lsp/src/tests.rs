@@ -228,6 +228,47 @@ fn hover_shows_prompts_and_rationale_of_the_symbol_under_the_cursor() {
 }
 
 #[test]
+fn hover_shows_what_the_agent_declared_even_after_the_code_moved() {
+    let fixture = Fixture::new("declared");
+    fixture.index();
+    std::fs::create_dir_all(fixture.source.parent().unwrap()).unwrap();
+    std::fs::write(&fixture.source, V2).unwrap();
+    let store = Store::open(&fixture.db).unwrap();
+    huella_engine::declared::record(
+        &store,
+        &huella_engine::declared::NewDeclaration {
+            file: fixture.source.clone(),
+            symbol: Some("UserService.register".into()),
+            lines: None,
+            kind: "decision".into(),
+            summary: "Recorto el email al guardarlo para que « a@b.com » y «a@b.com» sean el mismo usuario.".into(),
+            how: None,
+            alternatives: Vec::new(),
+            assumptions: Vec::new(),
+            unverified: vec!["emails con espacios en medio".into()],
+            confidence: Some("medium".into()),
+            review_hint: None,
+        },
+    )
+    .unwrap();
+    drop(store);
+
+    let mut client = Client::start(config(&fixture, None), false);
+    let uri = fixture.uri();
+    // Dos líneas nuevas encima: el método baja, y la declaración va con él.
+    client.open(&uri, &format!("// usuarios\n\n{V2}"));
+    let hover = client.hover(&uri, 4);
+    let text = hover["contents"]["value"].as_str().unwrap();
+    assert!(text.starts_with("**Lo que declaró el agente al escribirlo**"), "{text}");
+    assert!(
+        text.contains("[decisión] Recorto el email") && text.contains("Sin comprobar: emails con espacios"),
+        "{text}"
+    );
+    assert!(text.contains("`UserService.register` · 2 ediciones"), "y después la historia: {text}");
+    client.shutdown();
+}
+
+#[test]
 fn hover_uses_the_unsaved_buffer_and_warns_about_drift() {
     let fixture = Fixture::new("drift");
     fixture.index();
