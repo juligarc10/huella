@@ -394,11 +394,23 @@ require_declarations = true  # además, pedirle siempre lo obligatorio sin decla
 
 [explain]
 detail = "domain" # cuánto explicar, para todo el equipo: first_time, domain o code (por defecto, el de cada persona)
+
+[impact]
+repos = ["../billing", "../gateway"] # otros micros que llaman a este o a los que llama (rutas relativas a este repositorio)
 ```
 
 El nivel de detalle de `[explain]` lo reciben el agente (en sus instrucciones y al
 contar el guion) y el modelo revisor, y manda sobre el que cada persona tenga en
 Ajustes. Lo que se pida en directo junto a una pregunta sigue mandando sobre todo.
+
+**Impacto entre micros.** En el impacto de cada paso, Huella dice qué ofrece hacia
+fuera (las rutas de Spring, con el prefijo de la clase, o las operaciones de su
+especificación OpenAPI si el controlador la implementa; los temas que consume o
+publica) y quién lo usa desde los demás repositorios de la tarea y los de
+`[impact] repos`: quién llama a la ruta (un literal, una constante, un cliente
+`…Api` generado por su `operationId` o un Feign), quién publica o consume el tema
+y quién tiene la ruta en su copia de la especificación. Es por reglas, sin
+modelo: una URL armada por trozos puede escaparse y una ruta parecida colarse.
 
 Si algo falla en Huella, el hook sale sin decir nada: nunca para al agente por
 un error suyo. A mano: `huella hook stop` y `huella hook pre-edit` leen el

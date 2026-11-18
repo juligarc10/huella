@@ -186,7 +186,7 @@ fn own_ranges(review: &SessionReview, plan: &[FlowStep]) -> BTreeMap<PathBuf, Ve
 
 /// Ficheros del repositorio, respetando `.gitignore`; si no es un repositorio,
 /// un recorrido que salta las carpetas de dependencias y compilados.
-fn project_files(project: &Path) -> Vec<PathBuf> {
+pub(crate) fn project_files(project: &Path) -> Vec<PathBuf> {
     let listed = Command::new("git")
         .arg("-C")
         .arg(project)

@@ -7,6 +7,7 @@ pub mod blocks;
 pub mod branch;
 pub mod checkpoint;
 pub mod code_ask;
+pub mod contracts;
 pub mod coverage;
 mod decisions;
 pub mod declared;

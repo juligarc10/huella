@@ -1562,6 +1562,23 @@ fn prior_context(app: &mut App, session: &str, params: &HashMap<String, String>)
     Ok(json!({"items": items}))
 }
 
+/// Añade a cada paso lo que ofrece a otros micros (rutas, temas) y quién lo usa
+/// en `repos` y sus vecinos (`[impact] repos` de su `.huella.toml`).
+fn with_remote(steps: Vec<Value>, review: &SessionReview, plan: &[FlowStep], repos: &[PathBuf]) -> Vec<Value> {
+    let roots = huella_engine::contracts::search_roots(repos);
+    let remote = huella_engine::contracts::remote(review, plan, &roots);
+    steps
+        .into_iter()
+        .zip(remote)
+        .map(|(mut step, found)| {
+            if !found.contracts.is_empty() {
+                step["remote"] = serde_json::to_value(&found).unwrap_or_default();
+            }
+            step
+        })
+        .collect()
+}
+
 fn impact(app: &mut App, session: &str) -> Result<Value> {
     load_review(app, session)?;
     if let Some(cached) = &app.impact {
@@ -1586,6 +1603,9 @@ fn impact(app: &mut App, session: &str) -> Result<Value> {
                     .unwrap_or_else(|| json!({"name": null, "uses": [], "total": 0, "generic": false}))
             })
             .collect();
+        // Entre micros: los demás repositorios de la tarea y sus vecinos.
+        let roots: Vec<PathBuf> = repos.iter().map(|repo| PathBuf::from(&repo.repo)).collect();
+        let steps = with_remote(steps, review, plan, &roots);
         let value = json!({"project": repos.first().map(|repo| &repo.repo), "steps": steps});
         app.impact = Some(value.clone());
         return Ok(value);
@@ -1593,7 +1613,13 @@ fn impact(app: &mut App, session: &str) -> Result<Value> {
     let project = huella_engine::session_project(&app.store, &review.session_id)?;
     let value = match project.as_deref().map(Path::new).filter(|path| path.is_dir()) {
         Some(project) => {
-            json!({"project": project, "steps": huella_engine::impact::impact(project, review, plan)})
+            let steps: Vec<Value> = huella_engine::impact::impact(project, review, plan)
+                .iter()
+                .map(|found| serde_json::to_value(found).unwrap_or_default())
+                .collect();
+            // En una sesión, los vecinos que declare su repositorio.
+            let steps = with_remote(steps, review, plan, &[project.to_path_buf()]);
+            json!({"project": project, "steps": steps})
         }
         None => json!({"project": project, "steps": [], "missing": true}),
     };
