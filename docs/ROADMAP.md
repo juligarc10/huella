@@ -66,6 +66,15 @@ La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y s
 
 Lo que se nota en cada revisión. Es poco trabajo y va antes que lo nuevo.
 
+**Hecho en `feature/registro-obligatorio`** (2026-11-18): los cinco puntos, con lo que se describe abajo. El
+nivel de detalle tiene tres niveles (*primera vez*, *conozco el dominio*, *conozco el código*); se elige en
+Ajustes y, para el modelo revisor, en directo junto a cada «Pensar más». Pendiente:
+
+- Que Cmd+F busque también en las diapositivas de la presentación que no se ven y salte a ellas: hoy solo
+  busca en lo que hay en pantalla.
+- El nivel de detalle por repositorio en `.huella.toml`.
+- Probar los niveles con el Qwen local.
+
 - **Tras un commit, la tarea dice que no hay nada que revisar hasta reiniciar.** Causa: `load_review`
   (`crates/huella-cli/src/ui.rs`) deja en memoria la última revisión cargada y no mira si la rama ha
   avanzado. Como una tarea solo revisa lo que está en commits, la revisión vacía de antes del commit se
