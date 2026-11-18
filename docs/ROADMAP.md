@@ -7,9 +7,9 @@ revisar y comprender el código que escribe la IA, por tarea (lo que se va a
 mergear), con lo que el agente declara mientras trabaja y una presentación
 guiada del cambio.
 
-## Dónde estamos (2026-11-17)
+## Dónde estamos (2026-11-18)
 
-**Publicada**: v0.8.0 (migraciones 25 a 28: `huella setup` hace copia antes).
+**Publicada**: v0.9.0 (migración 29: `huella setup` hace copia antes).
 
 - **Revisión por tarea** (desde v0.4.0): una rama por micro contra la rama a la que se mergea, solo lo que está en commits.
 - **El agente explica el cambio**, para alguien sin contexto del código ni del dominio:
@@ -41,6 +41,15 @@ guiada del cambio.
 - Colores del código con tipos, métodos, campos y anotaciones distintos (paleta de GitHub).
 - Las ediciones de ficheros grandes que Claude Code guarda sin el original se reconstruyen; la revisión de sesiones en worktrees compara con el worktree; tareas con «/» en la clave, borrar tareas.
 - Sin probar con el modelo local: generar la lectura guiada con términos, preguntas y bloques.
+
+**Desde v0.9.0**: que el agente registre lo que hace y leer más cómodo.
+
+- **El fin de turno pide el registro** (migración 29): el código del turno sin nada registrado y las ramas con commits sin guion, una vez por cosa. La portada dice cuánto dejó explicado el agente.
+- **Nivel de detalle** de las explicaciones (primera vez, conozco el dominio, conozco el código) para el agente y el modelo revisor: en Ajustes, en directo junto a cada pregunta y por repositorio (`[explain] detail`).
+- **Leer más cómodo**: números de línea, enlaces de «línea 42» al código, Cmd+F (también en las diapositivas que no se ven) y la revisión de una tarea que se rehace tras un commit.
+- **Impacto entre micros**: rutas de Spring y OpenAPI y temas de eventos de cada paso, y quién los usa en los otros repositorios de la tarea y en `[impact] repos`.
+- En el editor, lo que declaró el agente sale en el hover; en una tarea, el código sin agente sale como «sin agente».
+- Sin probar con una tarea real: si el agente responde bien a la petición de registro, y el impacto entre dos repositorios.
 
 La primera prueba con un agente real fue DUNGEON-1: de 113 a 21 diapositivas y sin errores de fondo, pero las explicaciones aún describen más que explican, y calla cosas que solo se ven contrastando con el código.
 
