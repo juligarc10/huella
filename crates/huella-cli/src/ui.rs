@@ -1302,10 +1302,12 @@ fn record_check(app: &mut App, session: &str, body: &str) -> Result<Value> {
     Ok(json!({"saved": true}))
 }
 
-/// El nivel de detalle que pide una petición al modelo revisor; sin pedirlo, el de Ajustes.
-fn detail_of(request: &Value) -> Result<Option<huella_engine::detail::Detail>> {
+/// El nivel de detalle para una petición al modelo revisor: el que pide en
+/// directo; si no, el que fija el repositorio de `place` en su `.huella.toml`;
+/// si tampoco, `None` (el de Ajustes).
+fn detail_of(request: &Value, place: Option<&Path>) -> Result<Option<huella_engine::detail::Detail>> {
     match request["detail"].as_str() {
-        None | Some("") => Ok(None),
+        None | Some("") => Ok(place.and_then(huella_engine::detail::of_repo)),
         Some(code) => huella_engine::detail::Detail::parse(code).map(Some).context("nivel de detalle desconocido"),
     }
 }
@@ -1319,10 +1321,13 @@ fn start_walkthrough(app: &mut App, session: &str, body: &str) -> Result<(u16, V
     }
     let request = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
     let think = request["think"].as_bool().filter(|think| *think);
-    let detail = detail_of(&request)?;
+    let detail = detail_of(&request, None)?;
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
     let project = review_project(app, &review.session_id)?;
+    // Sin nivel pedido, el del repositorio de la revisión.
+    let detail =
+        detail.or_else(|| project.as_deref().and_then(|project| huella_engine::detail::of_repo(Path::new(project))));
     let points = huella_review::attention::attention(&review, &plan);
     let Assessment { triage, .. } = assess(&app.store, &review, &plan, &points, &app.activity, project.as_deref())?;
     let declared = huella_engine::declared::for_steps(&app.store, &review, &plan)?;
@@ -1620,7 +1625,7 @@ fn ask_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let removed = request["removed"].as_str().unwrap_or_default().to_owned();
     let place = huella_engine::code_ask::RemovedPlace::parse(request["place"].as_str().unwrap_or_default());
     let think = request["think"].as_bool().filter(|think| *think);
-    let detail = detail_of(&request)?;
+    let detail = detail_of(&request, Some(&path))?;
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
     let key = huella_engine::normalize_path(&path, None);
@@ -1750,7 +1755,7 @@ fn explain_code(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let depth_name = text("depth").unwrap_or_default();
     let depth = huella_engine::explain::Depth::parse(&depth_name).context("depth debe ser walk o rules")?;
     let think = request["think"].as_bool().filter(|think| *think);
-    let detail = detail_of(&request)?;
+    let detail = detail_of(&request, Some(&path))?;
     let refresh = request["refresh"].as_bool().unwrap_or(false);
     let line = |key: &str| request[key].as_u64().and_then(|n| usize::try_from(n).ok());
     let lines = line("start").zip(line("end"));
@@ -1819,7 +1824,7 @@ fn understand_symbol(app: &mut App, body: &str) -> Result<(u16, Value)> {
     let path = PathBuf::from(text("path").context("falta el fichero")?);
     let symbol = text("symbol").context("falta el símbolo")?;
     let think = request["think"].as_bool().filter(|think| *think);
-    let detail = detail_of(&request)?;
+    let detail = detail_of(&request, Some(&path))?;
     let refresh = request["refresh"].as_bool().unwrap_or(false);
     let key = huella_engine::normalize_path(&path, None);
     let pending = PendingGuide { path: key, symbol: symbol.clone(), done: 0, total: 0, error: None };
@@ -1979,12 +1984,16 @@ fn ask(app: &mut App, session: &str, body: &str) -> Result<(u16, Value)> {
         .to_owned();
     let step = request["step"].as_u64().and_then(|s| usize::try_from(s).ok());
     let think = request["think"].as_bool().filter(|think| *think);
-    let detail = detail_of(&request)?;
+    let detail = detail_of(&request, None)?;
     if let Some(problem) = crate::model_problem(&app.model) {
         bail!(problem);
     }
     load_review(app, session)?;
     let (review, plan) = app.review.clone().context("revisión no cargada")?;
+    // Sin nivel pedido, el del repositorio de la revisión.
+    let project = review_project(app, &review.session_id)?;
+    let detail =
+        detail.or_else(|| project.as_deref().and_then(|project| huella_engine::detail::of_repo(Path::new(project))));
     let session_id = review.session_id.clone();
     let background = ask_background(app, &review, &plan, step)?;
     let pending = PendingAsk { question: question.clone(), step, error: None };

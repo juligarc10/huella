@@ -391,7 +391,14 @@ notify = true     # el aviso al acabar cada turno (por defecto, sí)
 block_after = 5   # parar al agente con 5 obligatorios sin revisar (por defecto, nunca)
 ask_record = true # pedirle una vez que registre lo que escribió sin explicar y cuente las ramas sin guion (por defecto, sí)
 require_declarations = true  # además, pedirle siempre lo obligatorio sin declarar (por defecto, no)
+
+[explain]
+detail = "domain" # cuánto explicar, para todo el equipo: first_time, domain o code (por defecto, el de cada persona)
 ```
+
+El nivel de detalle de `[explain]` lo reciben el agente (en sus instrucciones y al
+contar el guion) y el modelo revisor, y manda sobre el que cada persona tenga en
+Ajustes. Lo que se pida en directo junto a una pregunta sigue mandando sobre todo.
 
 Si algo falla en Huella, el hook sale sin decir nada: nunca para al agente por
 un error suyo. A mano: `huella hook stop` y `huella hook pre-edit` leen el

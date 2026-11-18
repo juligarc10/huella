@@ -59,7 +59,8 @@ pub fn handle(context: &mut Context, message: &Value) -> Option<Value> {
             "serverInfo": {"name": "huella", "version": env!("CARGO_PKG_VERSION")},
             "instructions": format!(
                 "{INSTRUCTIONS}{}{}{}{}",
-                crate::language::detail().agent_rule(),
+                // El MCP arranca en la carpeta del proyecto: vale el nivel que fije su repositorio.
+                crate::language::detail_in(std::env::current_dir().ok().as_deref()).agent_rule(),
                 crate::language::agent_rule().unwrap_or_default(),
                 crate::language::narrative_rule().unwrap_or_default(),
                 crate::language::walkthrough_rule().unwrap_or_default()
@@ -210,12 +211,27 @@ fn inline(value: &mut Value, defs: &Value) {
     }
 }
 
+/// El primer fichero que nombra alguna ancla del guion: dice de qué repositorio es.
+fn first_file(value: &Value) -> Option<PathBuf> {
+    match value {
+        Value::Object(object) => object
+            .get("file")
+            .and_then(Value::as_str)
+            .filter(|file| file.starts_with('/'))
+            .map(PathBuf::from)
+            .or_else(|| object.values().find_map(first_file)),
+        Value::Array(items) => items.iter().find_map(first_file),
+        _ => None,
+    }
+}
+
 /// `huella_storyline`: guarda el guion del agente, anclado al código.
 fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
     let told: huella_engine::storyline::Story = serde_json::from_value(arguments.clone())
         .map_err(|error| anyhow::anyhow!("el guion no sigue el esquema: {error}"))?;
     // Se relee aquí y no al arrancar: si se cambia en Ajustes, vale ya para esta sesión.
-    let detail = crate::language::current_detail();
+    // Y vale el que fije el repositorio del código que cuenta.
+    let detail = crate::language::detail_in(first_file(arguments).as_deref());
     let recorded = huella_engine::storyline::record(store, told, detail)?;
     let mut text = format!(
         "Guion registrado (#{}): {} capítulos, {} anclas resueltas. Se presentará así al revisar la tarea.",
@@ -408,6 +424,7 @@ fn recorded_tool() -> Value {
 
 fn recorded(store: &Store, arguments: &Value) -> Result<String> {
     let files: Vec<&str> = arguments["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let place = files.first().map(PathBuf::from);
     let mut out = String::new();
     for file in files {
         let path = std::fs::canonicalize(file).unwrap_or_else(|_| PathBuf::from(file));
@@ -424,7 +441,7 @@ fn recorded(store: &Store, arguments: &Value) -> Result<String> {
         out.push_str("No hay nada registrado en esos ficheros.\n");
     }
     // Lo siguiente suele ser contarlo con huella_storyline: con el nivel de ahora, no el del arranque.
-    let detail = crate::language::current_detail();
+    let detail = crate::language::detail_in(place.as_deref());
     let _ = write!(out, "\nNivel de detalle que pide quien revisa: «{}»: {}.", detail.label(), detail.audience());
     Ok(out)
 }

@@ -157,12 +157,12 @@ abrir la tarea.
 
 - El impacto de un paso en una tarea solo busca en su repositorio; los usos desde otro micro (por HTTP o
   por eventos) no se ven. Necesita diseño: cómo reconocer una llamada HTTP o un evento entre repos.
-- Que Cmd+F busque también en las diapositivas que no se ven, y el nivel de detalle por repositorio en
-  `.huella.toml` (del bloque 1).
 
 **Hecho** (2026-11-18): en una tarea, el código que no escribió un agente sale como «sin agente» y no
 como «sin explicación»; y el hover del editor enseña lo que declaró el agente, recolocado por su símbolo,
-antes que la historia de ediciones.
+antes que la historia de ediciones. También: Cmd+F dice en qué otras diapositivas aparece lo que se
+busca y salta a ellas, y un repositorio puede fijar el nivel de detalle para todo el equipo
+(`[explain] detail` en `.huella.toml`).
 
 ## Más adelante
 

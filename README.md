@@ -169,6 +169,9 @@ notify = true     # tell you at the end of each turn (default)
 block_after = 5   # stop the agent at 5 unreviewed must-review steps (default: never)
 ask_record = true # ask it once to record what it wrote without explaining, and to tell branches with no storyline (default)
 require_declarations = true  # also always ask for must-review steps it didn't declare (default: no)
+
+[explain]
+detail = "domain" # how much to explain, for the whole team: first_time, domain or code (default: each person's setting)
 ```
 
 When a turn ends, the agent is asked to record the code of that turn it left

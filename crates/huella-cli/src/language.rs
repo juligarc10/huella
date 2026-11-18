@@ -54,6 +54,12 @@ pub(crate) fn current_detail() -> Detail {
     detail()
 }
 
+/// El nivel para el código de `place`: el que fija su repositorio en
+/// `.huella.toml` (lo decide el equipo) o, si no lo fija, el de Ajustes releído.
+pub(crate) fn detail_in(place: Option<&std::path::Path>) -> Detail {
+    place.and_then(huella_engine::detail::of_repo).unwrap_or_else(current_detail)
+}
+
 /// Lo que se añade a las instrucciones del servidor MCP para el agente que registra.
 pub(crate) fn agent_rule() -> Option<String> {
     configured().map(|name| {
