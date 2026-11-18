@@ -34,6 +34,8 @@ pub struct Checkpoint {
     pub new_pending: usize,
     /// Pendientes sobre los que el agente no ha declarado nada vigente.
     pub undeclared: Vec<Pending>,
+    /// Lo que habría que pedir al agente que registre o cuente (`[checkpoints] ask_record`).
+    pub record: crate::record_ask::RecordAsk,
     pub policy: Policy,
 }
 
@@ -107,6 +109,14 @@ pub fn check(
         .filter(|(index, _)| !declared.get(index).is_some_and(|entries| entries.iter().any(|entry| !entry.stale)))
         .map(|(_, pending)| pending)
         .collect();
+    let record = if assessment.policy.checkpoints.ask_record {
+        crate::record_ask::RecordAsk {
+            steps: crate::record_ask::unrecorded(&review, &plan, &assessment.triage, &declared),
+            stories: crate::record_ask::stories_due(store, &review)?,
+        }
+    } else {
+        crate::record_ask::RecordAsk::default()
+    };
     let previous = store.checkpoint(&review.session_id)?.map_or(0, |stored| stored.must_pending);
     store.save_checkpoint(&review.session_id, StoredCheckpoint { must_total, must_pending: pending.len() })?;
     Ok(Some(Checkpoint {
@@ -115,6 +125,7 @@ pub fn check(
         must_total,
         pending,
         undeclared,
+        record,
         policy: assessment.policy,
     }))
 }
@@ -294,6 +305,7 @@ mod tests {
                 .collect(),
             new_pending,
             undeclared: Vec::new(),
+            record: crate::record_ask::RecordAsk::default(),
             policy: Policy::default(),
         }
     }

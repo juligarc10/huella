@@ -167,8 +167,15 @@ Huella never stops the agent.
 [checkpoints]
 notify = true     # tell you at the end of each turn (default)
 block_after = 5   # stop the agent at 5 unreviewed must-review steps (default: never)
-require_declarations = true  # ask it to declare must-review steps before ending a turn (default: no)
+ask_record = true # ask it once to record what it wrote without explaining, and to tell branches with no storyline (default)
+require_declarations = true  # also always ask for must-review steps it didn't declare (default: no)
 ```
+
+When a turn ends, the agent is asked to record the code of that turn it left
+unexplained (not tests, docs or config; must-review first) and, if its branch has
+commits no storyline tells yet, to tell them with `huella_storyline`. Each thing
+is asked **once** for its current content: if the agent says there's nothing to
+add, it isn't asked again until the code or the branch changes.
 
 **Declarations**: with the `huella_record` MCP tool and the `huella-registro`
 skill that `huella setup` installs in Claude Code (`huella agents-md` prints the

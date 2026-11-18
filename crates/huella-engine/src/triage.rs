@@ -129,11 +129,15 @@ pub struct Checkpoints {
     /// Al acabar el turno, pedir al agente que declare (con `huella_record`)
     /// lo que decidió en los pasos obligatorios sin declaración.
     pub require_declarations: bool,
+    /// Al acabar el turno, pedir al agente (una vez por cosa) que registre el
+    /// código que escribió sin explicar y que cuente con `huella_storyline` las
+    /// ramas con commits sin guion. Activado por defecto.
+    pub ask_record: bool,
 }
 
 impl Default for Checkpoints {
     fn default() -> Self {
-        Self { notify: true, block_after: None, require_declarations: false }
+        Self { notify: true, block_after: None, require_declarations: false, ask_record: true }
     }
 }
 
@@ -713,7 +717,10 @@ mod tests {
         let policy = load_policy(Some(&dir)).unwrap();
         assert_eq!(
             (policy.preset, policy.checkpoints),
-            (Preset::Balanced, Checkpoints { notify: false, block_after: Some(5), require_declarations: false })
+            (
+                Preset::Balanced,
+                Checkpoints { notify: false, block_after: Some(5), require_declarations: false, ask_record: true }
+            )
         );
 
         std::fs::write(dir.join(POLICY_FILE), "[review]\npreset = \"loose\"\n").unwrap();
