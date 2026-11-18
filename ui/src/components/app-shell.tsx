@@ -20,6 +20,7 @@ import { NavLink, Outlet, useLocation } from 'react-router'
 
 import { Logo } from '@/components/brand'
 import { CommandPalette } from '@/components/command-palette'
+import { PageSearch } from '@/components/page-search'
 import { ResizeHandle, useStoredNumber } from '@/components/resizable'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { baseName } from '@/lib/format'
@@ -168,6 +169,7 @@ export function AppShell() {
         </div>
       </main>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <PageSearch />
     </div>
   )
 }

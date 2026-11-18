@@ -5,6 +5,7 @@ import { CodeText, useDiffTokens, usePeekKey, wordAt } from '@/components/review
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
 import { DeepenButtons, ExplanationCard, PendingExplainCard } from '@/components/review/explanations'
 import { CommentCard, CommentComposer } from '@/components/review/comments'
+import { SEARCH_EVENT } from '@/components/page-search'
 import { DefinitionPeek } from '@/components/review/definition-peek'
 import { REVEAL_EVENT, StepLineScope, type RevealDetail } from '@/components/review/line-links'
 import { StopBadge } from '@/components/review/guide'
@@ -75,8 +76,19 @@ export function StepDiff({
       const indexes = step.lines.flatMap((line, index) => (line.new && line.new >= from && line.new <= to ? [index] : []))
       if (indexes.length > 0) setRevealed((before) => new Set([...before, ...indexes]))
     }
+    // Cmd+F: lo plegado que contiene lo que se busca se despliega para que se encuentre.
+    const search = (event: Event) => {
+      const fold = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+      const wanted = fold((event as CustomEvent<{ query: string }>).detail.query)
+      const indexes = step.lines.flatMap((line, index) => (fold(line.text).includes(wanted) ? [index] : []))
+      if (indexes.length > 0) setRevealed((before) => new Set([...before, ...indexes]))
+    }
     window.addEventListener(REVEAL_EVENT, reveal)
-    return () => window.removeEventListener(REVEAL_EVENT, reveal)
+    window.addEventListener(SEARCH_EVENT, search)
+    return () => {
+      window.removeEventListener(REVEAL_EVENT, reveal)
+      window.removeEventListener(SEARCH_EVENT, search)
+    }
   }, [step])
   const add = useAddComment(session)
   const ask = useAskCode(step.path, session)
@@ -492,6 +504,7 @@ function LineNo({ line, digits }: { line: ReviewLine; digits: number }) {
   const number = line.new ?? line.old
   return (
     <span
+      data-search-skip
       className={cn('shrink-0 pl-3 text-right text-xs leading-6 text-muted-foreground/70 tabular-nums select-none', line.kind === 'removed' && 'line-through')}
       style={{ width: `${digits + 2}ch` }}
       title={line.kind === 'removed' && number ? `Línea ${number} del fichero de antes` : undefined}
