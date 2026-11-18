@@ -456,6 +456,17 @@ pub fn clearly_generated(path: &str) -> bool {
 }
 
 /// Las etiquetas que se ven en el propio paso: su fichero, su papel y sus líneas.
+/// Por qué hay líneas sin explicación del agente. En una tarea es lo normal:
+/// código que no escribió ningún agente registrado. En una sesión, algo cambió
+/// entre las ediciones del agente.
+fn unexplained_reason(review: &SessionReview) -> &'static str {
+    if review.session_id.starts_with("task:") {
+        "lo escribió una persona u otra herramienta, no un agente registrado: no hay explicación suya"
+    } else {
+        "líneas cambiadas fuera de las ediciones del agente"
+    }
+}
+
 fn findings(review: &SessionReview, step: &FlowStep) -> Vec<Finding> {
     let path = review.files[step.file].path.to_lowercase();
     let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
@@ -554,14 +565,7 @@ fn findings(review: &SessionReview, step: &FlowStep) -> Vec<Finding> {
     let externals =
         step.sources.iter().filter(|&&source| matches!(review.steps[source], Step::External { .. })).count();
     if externals > 0 {
-        // En una tarea es lo normal: código que no escribió ningún agente registrado.
-        // En una sesión, algo cambió entre las ediciones del agente.
-        let reason = if review.session_id.starts_with("task:") {
-            "lo escribió una persona u otra herramienta, no un agente registrado: no hay explicación suya"
-        } else {
-            "líneas cambiadas fuera de las ediciones del agente"
-        };
-        add(Tag::Unexplained, reason.into());
+        add(Tag::Unexplained, unexplained_reason(review).into());
     }
 
     if is_formatting_only(step) {
