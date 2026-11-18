@@ -1295,12 +1295,17 @@ fn model_problem(args: &ModelArgs) -> Option<String> {
 }
 
 fn build_model(args: &ModelArgs) -> Result<Box<dyn JsonModel>> {
-    build_model_thinking(args, None)
+    build_model_with(args, None, None)
 }
 
-/// Como `build_model`, con el razonamiento forzado para una petición concreta
-/// («pensar más» en una pregunta); `None` deja el de la configuración.
-fn build_model_thinking(args: &ModelArgs, thinking: Option<bool>) -> Result<Box<dyn JsonModel>> {
+/// Como `build_model`, con lo que pide una petición concreta: el razonamiento
+/// («pensar más» en una pregunta) y el nivel de detalle. `None` deja el de la
+/// configuración.
+fn build_model_with(
+    args: &ModelArgs,
+    thinking: Option<bool>,
+    detail: Option<huella_engine::detail::Detail>,
+) -> Result<Box<dyn JsonModel>> {
     let (model, base_url) = (args.model(), args.base_url());
     let built: Box<dyn JsonModel> = match args.provider() {
         Provider::Anthropic => {
@@ -1316,7 +1321,7 @@ fn build_model_thinking(args: &ModelArgs, thinking: Option<bool>) -> Result<Box<
             )
         }
     };
-    Ok(language::wrap(built))
+    Ok(language::wrap(built, detail))
 }
 
 fn extract(

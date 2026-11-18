@@ -5,6 +5,7 @@ import { Link } from 'react-router'
 import { Panel } from '@/components/bits'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { StepLineScope, WithLines } from '@/components/review/line-links'
 import { ThinkMore } from '@/components/review/think-more'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { AskThinking, PendingAsk, ReviewQuestion, ReviewStep } from '@/lib/api'
@@ -99,7 +100,9 @@ export function AskPanel({
         <div key={q.id} className="flex flex-col gap-1.5">
           <p className="text-sm font-semibold">{q.question}</p>
           <div className={cn('rounded-lg bg-muted px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-line', justNow(q.created_at) && 'answer-enter')}>
-            {q.answer}
+            <StepLineScope step={scope === 'step' ? step : undefined}>
+              <WithLines text={q.answer} />
+            </StepLineScope>
           </div>
           <p className="text-xs text-muted-foreground">
             {q.model.replace(/^[^:]+:/, '')} · {dateTime(q.created_at)}

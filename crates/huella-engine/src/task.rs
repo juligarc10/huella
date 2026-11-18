@@ -393,6 +393,34 @@ fn collect(
     Ok(())
 }
 
+/// Cómo están ahora las ramas de una tarea: el commit al que apunta cada rama y
+/// cada destino, sin traer el remoto. Si cambia, la revisión que se calculó antes
+/// ya no vale (un commit nuevo, un rebase, el destino que avanza). Una rama que
+/// aún no existe cuenta como «-», para notar cuando aparece.
+#[must_use]
+pub fn branches_stamp(repos: &[RepoSync]) -> String {
+    let at = |repo: &str, reference: &str| {
+        git(Path::new(repo), &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+            .map_or_else(|_| "-".to_owned(), |sha| sha.trim().to_owned())
+    };
+    repos
+        .iter()
+        .map(|state| {
+            // La local y la que se revisa: si al cargar solo estaba en el remoto, un
+            // commit en la local también debe notarse.
+            let local = at(&state.repo, &state.branch);
+            let reviewed = state.branch_ref.as_deref().map_or_else(|| "-".to_owned(), |branch| at(&state.repo, branch));
+            let target = state
+                .target_ref
+                .as_deref()
+                .or(state.target.as_deref())
+                .map_or_else(|| "-".to_owned(), |target| at(&state.repo, target));
+            format!("{}:{local}:{reviewed}:{target}", state.repo)
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// Raíz del repositorio que contiene `dir`.
 #[must_use]
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
@@ -580,6 +608,28 @@ mod tests {
         run(&work, &["merge", "-q", "--no-edit", "origin/sprint/42"]);
         run(&work, &["update-ref", "refs/remotes/origin/sprint/42", "sprint/42"]);
         (root, work)
+    }
+
+    #[test]
+    fn the_stamp_changes_with_a_new_commit_and_nothing_else() {
+        let (root, work) = fixture("stamp");
+        let state = sync(&work, "feature/DENMS-1", Some("sprint/42"), false);
+        let before = branches_stamp(std::slice::from_ref(&state));
+        assert!(!before.contains(":-:"), "la rama y el destino existen: {before}");
+        std::fs::write(work.join("b.ts"), "tarea\nsin commit\n").unwrap();
+        assert_eq!(
+            branches_stamp(std::slice::from_ref(&state)),
+            before,
+            "un cambio sin commit no entra en la revisión"
+        );
+        commit(&work, "b.ts", "tarea\ncon commit\n", "más tarea");
+        assert_ne!(branches_stamp(std::slice::from_ref(&state)), before, "un commit nuevo sí");
+
+        let missing = sync(&work, "feature/DENMS-2", Some("sprint/42"), false);
+        let empty = branches_stamp(std::slice::from_ref(&missing));
+        run(&work, &["branch", "feature/DENMS-2"]);
+        assert_ne!(branches_stamp(std::slice::from_ref(&missing)), empty, "una rama que aparece también");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

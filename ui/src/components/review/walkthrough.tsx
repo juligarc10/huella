@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Mono, Panel } from '@/components/bits'
 import { StoryBlocks } from '@/components/review/blocks'
 import { StepDiff } from '@/components/review/diff'
+import { LineScope } from '@/components/review/line-links'
 import { WithTerms } from '@/components/review/idea-parts'
 import { ThinkMore } from '@/components/review/think-more'
 import { Button } from '@/components/ui/button'
@@ -264,7 +265,7 @@ function Guided({
     moment !== 'walk' || !current
       ? ''
       : beat > 0
-        ? `Línea ${keys[beat - 1].index + 1}: ${keys[beat - 1].value}`
+        ? `Línea ${step?.lines[keys[beat - 1].index]?.new ?? keys[beat - 1].index + 1}: ${keys[beat - 1].value}`
         : `Parada ${stop + 1} de ${walk.stops.length}: ${stopTitle(current, step)}. ${hopSentence(current, walk, review)}`
   useEffect(() => {
     if (moment !== 'walk' || !current) return
@@ -310,6 +311,8 @@ function Guided({
 
   const gaps = walk.stops.filter((item) => item.hop?.kind === 'none').length
   return (
+    // Una «línea 42» del texto es de la parada que se ve.
+    <LineScope.Provider value={{ steps: review.steps, visible: current ? [current.step] : [] }}>
     <div className="flex flex-col gap-4">
       <p className="sr-only" aria-live="polite">
         {announce}
@@ -457,6 +460,7 @@ function Guided({
         />
       )}
     </div>
+    </LineScope.Provider>
   )
 }
 

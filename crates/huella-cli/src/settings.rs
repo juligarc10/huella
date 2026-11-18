@@ -83,6 +83,13 @@ pub(crate) fn view(args: &ModelArgs, probing: &Probing) -> Value {
         "narrative_code": {"value": config.review.narrative_code.unwrap_or(false)},
         "agent_walkthrough": {"value": config.review.agent_walkthrough.unwrap_or(false)},
         "learning": {"value": config.review.learning.unwrap_or(true)},
+        "detail": {
+            "value": crate::language::detail().code(),
+            "options": huella_engine::detail::Detail::ALL
+                .iter()
+                .map(|detail| json!({"code": detail.code(), "label": detail.label(), "audience": detail.audience()}))
+                .collect::<Vec<_>>(),
+        },
         "key": key_view(provider),
         "problem": crate::model_problem(args),
         "probe": probing.lock().unwrap_or_else(PoisonError::into_inner).clone(),
@@ -154,6 +161,12 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
                 }
                 Some(_) => bail!("idioma desconocido"),
             },
+            // El de por defecto no se escribe: así lo sigue si cambia.
+            "detail" => match plain(value, "el nivel de detalle", 20)?.as_deref() {
+                None | Some("first_time") => None,
+                Some(code) if huella_engine::detail::Detail::parse(code).is_some() => Some(code.into()),
+                Some(_) => bail!("nivel de detalle desconocido"),
+            },
             "view" => match plain(value, "la vista", 20)?.as_deref() {
                 None | Some("last") => None,
                 Some(view @ ("steps" | "presentation" | "walk")) => Some(view.into()),
@@ -187,6 +200,7 @@ fn save_in(path: &std::path::Path, body: &str) -> Result<()> {
             "narrative_code" => ("review", "narrative_code"),
             "agent_walkthrough" => ("review", "agent_walkthrough"),
             "learning" => ("review", "learning"),
+            "detail" => ("review", "detail"),
             _ => ("llm", "context_tokens"),
         };
         edits.push((table, key, edit));
@@ -312,6 +326,11 @@ mod tests {
             save_in(path, r#"{"agent_walkthrough": false}"#).unwrap();
             save_in(path, r#"{"learning": false}"#).unwrap();
             assert_eq!(config::get().review.learning, Some(false));
+            save_in(path, r#"{"detail": "code"}"#).unwrap();
+            assert_eq!(crate::language::detail(), huella_engine::detail::Detail::Code);
+            assert!(save_in(path, r#"{"detail": "todo"}"#).is_err());
+            save_in(path, r#"{"detail": "first_time"}"#).unwrap();
+            assert_eq!(config::get().review.detail, None, "el de por defecto no se escribe");
             save_in(path, r#"{"learning": true}"#).unwrap();
             assert_eq!(config::get().review.learning, None, "activado es lo de por defecto");
             assert!(crate::language::walkthrough_rule().is_none());

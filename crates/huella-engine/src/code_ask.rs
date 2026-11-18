@@ -40,6 +40,7 @@ líneas (lo que se pidió y lo que explicó el agente que las escribió) y sus c
 - Si se pregunta por líneas quitadas, explica qué hacían, qué las sustituye en el código actual (o si nada) y \
   qué dice la historia sobre quitarlas: la petición, la explicación del agente o el commit que las quitó.
 - Responde y termina: no ofrezcas hacer cambios ni acabes con preguntas, desde aquí no se puede editar.
+- Si nombras una línea, escríbela como `Fichero.ext:42` (o `Fichero.ext:40-45`), con el número del fichero: se convierte en un enlace al código.
 - Escribe en el idioma de la pregunta, en markdown breve.";
 
 /// Respuesta a una pregunta sobre código, ya guardada.

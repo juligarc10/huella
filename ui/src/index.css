@@ -241,6 +241,17 @@
     animation: line-flash 1200ms ease-out;
 }
 
+/* Cmd+F: todas las coincidencias y, más fuerte, la actual. */
+::highlight(page-search) {
+    background-color: color-mix(in oklab, var(--warn-strong, #e5a50a) 30%, transparent);
+    color: inherit;
+}
+
+::highlight(page-search-current) {
+    background-color: color-mix(in oklab, var(--warn-strong, #e5a50a) 75%, transparent);
+    color: var(--foreground);
+}
+
 @keyframes page-enter {
     from {
         opacity: 0;

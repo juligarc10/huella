@@ -5,10 +5,12 @@ import { CodeText, useDiffTokens, usePeekKey, wordAt } from '@/components/review
 import { CodeAskComposer, CodeQuestionCard, PendingCodeAskCard } from '@/components/review/code-questions'
 import { DeepenButtons, ExplanationCard, PendingExplainCard } from '@/components/review/explanations'
 import { CommentCard, CommentComposer } from '@/components/review/comments'
+import { SEARCH_EVENT } from '@/components/page-search'
 import { DefinitionPeek } from '@/components/review/definition-peek'
+import { REVEAL_EVENT, StepLineScope, type RevealDetail } from '@/components/review/line-links'
 import { StopBadge } from '@/components/review/guide'
 import { Button } from '@/components/ui/button'
-import type { AskThinking, CodeExplanation, CodeQuestion, CommentHint, ExplainDepth, LineRange, ReviewComment, ReviewStep, StepChange } from '@/lib/api'
+import type { AskThinking, CodeExplanation, CodeQuestion, CommentHint, Detail, ExplainDepth, LineRange, ReviewComment, ReviewLine, ReviewStep, StepChange } from '@/lib/api'
 import { useAddComment, useAskCode, useCodeExplanations, useCodeQuestions, useExplainCode } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
@@ -65,6 +67,29 @@ export function StepDiff({
   annotations?: Map<number, string>
 }) {
   const [unfolded, setUnfolded] = useState<Set<number>>(() => new Set())
+  // Las líneas a las que llevó un enlace («línea 42»): se quedan sin plegar.
+  const [revealed, setRevealed] = useState<Set<number>>(() => new Set())
+  useEffect(() => {
+    const reveal = (event: Event) => {
+      const { step: wanted, from, to } = (event as CustomEvent<RevealDetail>).detail
+      if (wanted !== step.index) return
+      const indexes = step.lines.flatMap((line, index) => (line.new && line.new >= from && line.new <= to ? [index] : []))
+      if (indexes.length > 0) setRevealed((before) => new Set([...before, ...indexes]))
+    }
+    // Cmd+F: lo plegado que contiene lo que se busca se despliega para que se encuentre.
+    const search = (event: Event) => {
+      const fold = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+      const wanted = fold((event as CustomEvent<{ query: string }>).detail.query)
+      const indexes = step.lines.flatMap((line, index) => (fold(line.text).includes(wanted) ? [index] : []))
+      if (indexes.length > 0) setRevealed((before) => new Set([...before, ...indexes]))
+    }
+    window.addEventListener(REVEAL_EVENT, reveal)
+    window.addEventListener(SEARCH_EVENT, search)
+    return () => {
+      window.removeEventListener(REVEAL_EVENT, reveal)
+      window.removeEventListener(SEARCH_EVENT, search)
+    }
+  }, [step])
   const add = useAddComment(session)
   const ask = useAskCode(step.path, session)
   const { data: codeQuestions } = useCodeQuestions(step.path, session)
@@ -175,8 +200,8 @@ export function StepDiff({
     return null
   }
   // «Profundizar»: el recorrido o las reglas de un trozo; sale bajo su última línea al estar lista.
-  const deepen = (quote: string, depth: ExplainDepth, think: boolean, refresh = false) =>
-    explain.mutate({ quote, depth, think: think || undefined, refresh: refresh || undefined })
+  const deepen = (quote: string, depth: ExplainDepth, think: boolean, refresh = false, detail?: Detail) =>
+    explain.mutate({ quote, depth, think: think || undefined, refresh: refresh || undefined, detail })
   const blockCode = step.lines
     .filter((line) => line.kind !== 'removed')
     .map((line) => line.text)
@@ -196,7 +221,13 @@ export function StepDiff({
 
   // Tramos lejos de lo que importa (4 líneas o más), plegados: el código de la idea se ve de un vistazo.
   const keep = (index: number) =>
-    (essentials ?? []).some((line) => Math.abs(line - index) <= 3) || placed.has(index) || answered.has(index) || explained.has(index) || selected(index) || composing === index
+    (essentials ?? []).some((line) => Math.abs(line - index) <= 3) ||
+    placed.has(index) ||
+    answered.has(index) ||
+    explained.has(index) ||
+    selected(index) ||
+    composing === index ||
+    revealed.has(index)
   const hidden = new Set<number>()
   const folds = new Map<number, number>()
   if (essentials && essentials.length > 0) {
@@ -216,6 +247,7 @@ export function StepDiff({
     }
   }
   const margin = stops.length > 0 || (marks?.size ?? 0) > 0
+  const digits = String(Math.max(0, ...step.lines.map((line) => line.new ?? line.old ?? 0))).length
   const badgeOf = (index: number) => {
     const mark = marks?.get(index)
     if (mark !== undefined) return mark
@@ -224,6 +256,7 @@ export function StepDiff({
   }
 
   return (
+    <StepLineScope step={step}>
     <div className="overflow-hidden rounded-2xl border bg-card" data-diff-step={step.index}>
       <div className="@container overflow-x-auto">
         <div className="min-w-max py-2 font-mono text-[13px] leading-6">
@@ -236,6 +269,7 @@ export function StepDiff({
                 className="sticky left-0 flex w-[100cqw] items-center gap-2 px-4 py-0.5 font-sans text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 <span aria-hidden="true">⋯</span> Ver {folds.get(index)} líneas que no cambian lo importante
+                {foldRange(step.lines, index, folds.get(index) ?? 0)}
               </button>
             ) : hidden.has(index) ? null : // En una clase, los huecos de los métodos que son otros pasos dejan
             // tiradas de líneas en blanco: basta con una.
@@ -244,6 +278,7 @@ export function StepDiff({
               <div
                 ref={focus?.[0] === index ? firstFocused : undefined}
                 data-diff-line={index}
+                data-line={line.new ?? undefined}
                 className={cn(
                   'group flex cursor-pointer pr-4 select-none',
                   line.kind === 'added' && (unexplained(line) ? 'bg-warn-soft' : 'bg-[var(--diff-added)]'),
@@ -261,6 +296,7 @@ export function StepDiff({
                     {badgeOf(index) !== null && <StopBadge number={badgeOf(index) ?? 0} className="size-4 text-[10px]" />}
                   </span>
                 )}
+                <LineNo line={line} digits={digits} />
                 <span
                   aria-hidden="true"
                   className={cn(
@@ -303,7 +339,7 @@ export function StepDiff({
                   <ExplanationCard
                     explanation={explanation}
                     path={step.path}
-                    onRefresh={() => deepen(explanation.quote, explanation.kind, false, true)}
+                    onRefresh={(detail) => deepen(explanation.quote, explanation.kind, false, true, detail)}
                   />
                 </div>
               ))}
@@ -413,6 +449,7 @@ export function StepDiff({
         </div>
       )}
     </div>
+    </StepLineScope>
   )
 }
 
@@ -460,4 +497,27 @@ function SelectionBar({
       {onDeepen && <DeepenButtons onDeepen={onDeepen} thinking={thinking} />}
     </div>
   )
+}
+
+/** El número de una línea, en su margen: el del fichero final o, si se quitó, el del inicial. */
+function LineNo({ line, digits }: { line: ReviewLine; digits: number }) {
+  const number = line.new ?? line.old
+  return (
+    <span
+      data-search-skip
+      className={cn('shrink-0 pl-3 text-right text-xs leading-6 text-muted-foreground/70 tabular-nums select-none', line.kind === 'removed' && 'line-through')}
+      style={{ width: `${digits + 2}ch` }}
+      title={line.kind === 'removed' && number ? `Línea ${number} del fichero de antes` : undefined}
+    >
+      {number ?? ''}
+    </span>
+  )
+}
+
+/** « (líneas 120–148)» de un tramo plegado, si sus líneas tienen número. */
+function foldRange(lines: ReviewLine[], start: number, count: number) {
+  const numbers = lines.slice(start, start + count).flatMap((line) => (line.new ? [line.new] : []))
+  if (numbers.length === 0) return null
+  const [first, last] = [Math.min(...numbers), Math.max(...numbers)]
+  return <span className="tabular-nums">{first === last ? ` (línea ${first})` : ` (líneas ${first}–${last})`}</span>
 }

@@ -22,6 +22,7 @@ import { FreshLines, StepDiff } from '@/components/review/diff'
 import { FlowMap } from '@/components/review/flow-map'
 import { StoryBlocks } from '@/components/review/blocks'
 import { GuidePanel } from '@/components/review/guide'
+import { LineScope } from '@/components/review/line-links'
 import { AuditPanel, CheckFirst, Checks, findingsFor, IdeaExplanation, IdeaWarnings, Points, ScenarioChips } from '@/components/review/idea-parts'
 import { ProblemToSolution, Scenarios } from '@/components/review/problem'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
@@ -821,6 +822,7 @@ function IdeaSlide({
   const declared = [...new Map(steps.flatMap((step) => step.declared).map((entry) => [entry.id, entry])).values()]
   const terms = termsIn(story, [idea.explanation, idea.what, idea.why, idea.breaks, ...idea.points.map((point) => point.text)].join(' '))
   return (
+    <LineScope.Provider value={{ steps: review.steps, visible: slide.steps }}>
     <SplitPane>
       <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-32 lg:max-h-[calc(100svh-13.5rem)] lg:overflow-y-auto lg:pr-1">
         <header className="flex flex-col gap-2">
@@ -861,6 +863,7 @@ function IdeaSlide({
         })}
       </div>
     </SplitPane>
+    </LineScope.Provider>
   )
 }
 

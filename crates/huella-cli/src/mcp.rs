@@ -58,7 +58,8 @@ pub fn handle(context: &mut Context, message: &Value) -> Option<Value> {
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "huella", "version": env!("CARGO_PKG_VERSION")},
             "instructions": format!(
-                "{INSTRUCTIONS}{}{}{}",
+                "{INSTRUCTIONS}{}{}{}{}",
+                crate::language::detail().agent_rule(),
                 crate::language::agent_rule().unwrap_or_default(),
                 crate::language::narrative_rule().unwrap_or_default(),
                 crate::language::walkthrough_rule().unwrap_or_default()
@@ -213,7 +214,9 @@ fn inline(value: &mut Value, defs: &Value) {
 fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
     let told: huella_engine::storyline::Story = serde_json::from_value(arguments.clone())
         .map_err(|error| anyhow::anyhow!("el guion no sigue el esquema: {error}"))?;
-    let recorded = huella_engine::storyline::record(store, told)?;
+    // Se relee aquí y no al arrancar: si se cambia en Ajustes, vale ya para esta sesión.
+    let detail = crate::language::current_detail();
+    let recorded = huella_engine::storyline::record(store, told, detail)?;
     let mut text = format!(
         "Guion registrado (#{}): {} capítulos, {} anclas resueltas. Se presentará así al revisar la tarea.",
         recorded.id, recorded.chapters, recorded.anchors
@@ -228,7 +231,8 @@ fn storyline(store: &mut Store, arguments: &Value) -> Result<String> {
     if !recorded.gaps.is_empty() {
         let _ = write!(
             text,
-            " Para que lo entienda alguien sin contexto, falta: {}. Complétalo y vuelve a llamar a huella_storyline con el guion completo.",
+            " Para que lo entienda {} (el nivel de detalle que se pide), falta: {}. Complétalo y vuelve a llamar a huella_storyline con el guion completo.",
+            detail.reader(),
             recorded.gaps.join("; ")
         );
     }
@@ -416,7 +420,13 @@ fn recorded(store: &Store, arguments: &Value) -> Result<String> {
             }
         }
     }
-    Ok(if out.is_empty() { "No hay nada registrado en esos ficheros.".to_owned() } else { out })
+    if out.is_empty() {
+        out.push_str("No hay nada registrado en esos ficheros.\n");
+    }
+    // Lo siguiente suele ser contarlo con huella_storyline: con el nivel de ahora, no el del arranque.
+    let detail = crate::language::current_detail();
+    let _ = write!(out, "\nNivel de detalle que pide quien revisa: «{}»: {}.", detail.label(), detail.audience());
+    Ok(out)
 }
 
 /// `huella_record`: el agente declara lo que decidió sobre el código que acaba de escribir.

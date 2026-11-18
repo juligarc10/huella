@@ -2,6 +2,7 @@ import { CircleAlert, ClipboardCheck, Eye, Loader2, ScanSearch, ShieldAlert, Spa
 import { Fragment, useState, type ReactNode } from 'react'
 
 import { StopBadge } from '@/components/review/guide'
+import { WithLines } from '@/components/review/line-links'
 import { Button } from '@/components/ui/button'
 import type { AuditFinding, ReviewResult, Storyline, StoryIdea } from '@/lib/api'
 import { dateTime } from '@/lib/format'
@@ -30,7 +31,8 @@ export function CheckFirst({ items, title = 'Qué tienes que comprobar' }: { ite
 /** Un texto con los términos del glosario subrayados: su significado, al pasar por encima o con el foco. */
 export function WithTerms({ text, concepts }: { text: string; concepts: Storyline['concepts'] }) {
   const terms = concepts.filter((concept) => concept.term.trim().length > 1)
-  if (terms.length === 0) return <>{text}</>
+  // Las referencias a líneas («línea 42») van como enlaces al código.
+  if (terms.length === 0) return <WithLines text={text} />
   const escaped = terms.map((concept) => concept.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   const pattern = new RegExp(`(${escaped.join('|')})`, 'gi')
   const seen = new Set<string>()
@@ -39,7 +41,12 @@ export function WithTerms({ text, concepts }: { text: string; concepts: Storylin
       {text.split(pattern).map((part, index) => {
         const concept = terms.find((term) => term.term.toLowerCase() === part.toLowerCase())
         // Solo la primera aparición de cada término: más subrayados distraen.
-        if (!concept || seen.has(concept.term)) return <Fragment key={index}>{part}</Fragment>
+        if (!concept || seen.has(concept.term))
+          return (
+            <Fragment key={index}>
+              <WithLines text={part} />
+            </Fragment>
+          )
         seen.add(concept.term)
         return (
           <abbr key={index} title={concept.meaning} tabIndex={0} className="cursor-help underline decoration-brand/60 decoration-dotted underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring">

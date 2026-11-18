@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 
+import { withDetail } from '@/lib/detail'
+
 import {
   api,
   query,
@@ -10,6 +12,7 @@ import {
   type SymbolGuideResult,
   type PriorContextResult,
   type ExplainDepth,
+  type Detail,
   type ImpactResult,
   type InboxSession,
   type ReviewStatus,
@@ -116,6 +119,8 @@ export function useReview(session: string | undefined) {
     queryFn: () => api.get<ReviewResult>(`review/${encodeURIComponent(session ?? '')}`),
     enabled: Boolean(session),
     staleTime: 60_000,
+    // En una tarea, al volver a la ventana: el servidor la rehace solo si alguna rama tiene commits nuevos.
+    refetchOnWindowFocus: session?.startsWith('task:') ? 'always' : false,
     // Mientras el modelo responde una pregunta, se consulta a menudo.
     refetchInterval: (state) => {
       const data = state.state.data
@@ -133,7 +138,8 @@ export function useReview(session: string | undefined) {
 }
 
 export function useTasks() {
-  return useQuery({ queryKey: ['tasks'], queryFn: () => api.get<{ tasks: TaskSummary[] }>('tasks') })
+  // Al volver a la ventana: un commit hecho fuera cambia lo que hay que revisar.
+  return useQuery({ queryKey: ['tasks'], queryFn: () => api.get<{ tasks: TaskSummary[] }>('tasks'), refetchOnWindowFocus: 'always' })
 }
 
 /** Una tarea y cómo está cada repositorio; `fetch` trae antes el remoto. */
@@ -142,6 +148,8 @@ export function useTask(key: string, fetch: boolean) {
     queryKey: ['task', key, fetch],
     queryFn: () => api.get<TaskDetail>(`tasks/${encodeURIComponent(key)}${query({ fetch: fetch ? '1' : null })}`),
     retry: false,
+    // Sin traer el remoto, que es lento: solo cómo están las ramas locales.
+    refetchOnWindowFocus: fetch ? false : 'always',
   })
 }
 
@@ -198,7 +206,7 @@ export function useRecordCheck(session: string) {
 export function useWalkthrough(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { think?: boolean }) => api.post(`review/${encodeURIComponent(session)}/walkthrough`, ask),
+    mutationFn: (ask: { think?: boolean; detail?: Detail }) => api.post(`review/${encodeURIComponent(session)}/walkthrough`, withDetail(ask)),
     onSuccess: () => client.invalidateQueries({ queryKey: ['review', session] }),
     onError: (error) => toast.error(error.message),
   })
@@ -404,7 +412,7 @@ export function useSymbolGuide(path: string | null, symbol: string | null) {
 export function useUnderstandSymbol(path: string, symbol: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { think?: boolean; refresh?: boolean }) => api.post('symbol/understand', { path, symbol, ...ask }),
+    mutationFn: (ask: { think?: boolean; refresh?: boolean; detail?: Detail }) => api.post('symbol/understand', { path, symbol, ...withDetail(ask) }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['symbol-guide', path, symbol] }),
     onError: (error) => toast.error(error.message),
   })
@@ -423,8 +431,8 @@ export function useDismissGuide(path: string, symbol: string) {
 export function useExplainCode(path: string, session?: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { quote: string; depth: ExplainDepth; start?: number; end?: number; think?: boolean; refresh?: boolean }) =>
-      api.post('code/explain', { path, session, ...ask }),
+    mutationFn: (ask: { quote: string; depth: ExplainDepth; start?: number; end?: number; think?: boolean; refresh?: boolean; detail?: Detail }) =>
+      api.post('code/explain', { path, session, ...withDetail(ask) }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['code-explanations', path] }),
     onError: (error) => toast.error(error.message),
   })
@@ -459,8 +467,9 @@ export function useAskCode(path: string, session?: string) {
       removed?: string
       place?: 'within' | 'before' | 'after'
       think?: boolean
+      detail?: Detail
     }) =>
-      api.post('code/ask', { path, session, ...ask }),
+      api.post('code/ask', { path, session, ...withDetail(ask) }),
     onSuccess: (_, ask) => {
       noteAsked(askId.line(path, ask.question), ask.question)
       client.invalidateQueries({ queryKey: ['code-questions', path] })
@@ -564,7 +573,7 @@ export function useClearQuestions(session: string) {
 export function useAsk(session: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (ask: { question: string; step: number | null; think?: boolean }) => api.post(`review/${encodeURIComponent(session)}/ask`, ask),
+    mutationFn: (ask: { question: string; step: number | null; think?: boolean; detail?: Detail }) => api.post(`review/${encodeURIComponent(session)}/ask`, withDetail(ask)),
     onSuccess: (_, ask) => {
       noteAsked(askId.general(ask.step, ask.question), ask.question)
       client.invalidateQueries({ queryKey: ['review', session] })
