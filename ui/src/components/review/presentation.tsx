@@ -23,6 +23,7 @@ import { FlowMap } from '@/components/review/flow-map'
 import { StoryBlocks } from '@/components/review/blocks'
 import { GuidePanel } from '@/components/review/guide'
 import { LineScope } from '@/components/review/line-links'
+import { RecordCoverage } from '@/components/review/record-coverage'
 import { AuditPanel, CheckFirst, Checks, findingsFor, IdeaExplanation, IdeaWarnings, Points, ScenarioChips } from '@/components/review/idea-parts'
 import { ProblemToSolution, Scenarios } from '@/components/review/problem'
 import { stepName, Trail, type Slide } from '@/components/review/trail'
@@ -557,6 +558,8 @@ function Cover({
       {story.source === 'declared' && (
         <AuditPanel review={review} session={session} stepLink={(step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />} />
       )}
+
+      <RecordCoverage review={review} stepLink={(step) => review.steps[step] && <StepLink key={step} review={review} step={review.steps[step]} onStep={onStep} />} />
 
       {/* Sin problema ni solución (guiones anteriores), el antes y el ahora van solos. */}
       {story.before && story.after && !story.problem && !story.solution && (
