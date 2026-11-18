@@ -473,6 +473,18 @@ const MIGRATIONS: &[&str] = &[
         last_at         TEXT NOT NULL
     );
 ",
+    // 29: lo que el hook de fin de turno ya pidió al agente que registrara: cada
+    // paso por su contenido y el guion por el commit de su rama, para pedirlo
+    // una sola vez y no insistir si el agente dice que no hay nada que contar.
+    r"
+    CREATE TABLE record_request (
+        session_id      TEXT NOT NULL,
+        item            TEXT NOT NULL,
+        fingerprint     TEXT NOT NULL,
+        requested_at    TEXT NOT NULL,
+        PRIMARY KEY (session_id, item)
+    );
+",
 ];
 
 /// Lo que no cuadra entre un guion y su código, guardado.
@@ -2458,6 +2470,39 @@ impl Store {
         Ok(())
     }
 
+    /// Lo que ya se le pidió registrar al agente en una sesión: cada cosa con
+    /// la huella de cómo era cuando se pidió.
+    ///
+    /// # Errors
+    /// Si falla la consulta.
+    pub fn record_requests(&self, session_id: &str) -> Result<HashMap<String, String>> {
+        let mut statement =
+            self.conn.prepare_cached("SELECT item, fingerprint FROM record_request WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Anota que se pidió registrar estas cosas, sustituyendo lo anterior de cada una.
+    ///
+    /// # Errors
+    /// Si falla la escritura.
+    pub fn save_record_requests(&mut self, session_id: &str, items: &[(String, String)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut statement = tx.prepare_cached(
+                "INSERT INTO record_request (session_id, item, fingerprint, requested_at)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 ON CONFLICT(session_id, item) DO UPDATE SET fingerprint = excluded.fingerprint,
+                     requested_at = excluded.requested_at",
+            )?;
+            for (item, fingerprint) in items {
+                statement.execute(params![session_id, item, fingerprint])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Coberturas guardadas de una sesión, por turno.
     ///
     /// # Errors
@@ -3979,6 +4024,12 @@ mod tests {
     fn checkpoints_are_replaced_per_session() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.checkpoint("s1").unwrap(), None);
+        let mut requests = Store::open_in_memory().unwrap();
+        requests.save_record_requests("s1", &[("paso".into(), "h1".into()), ("guion".into(), "c1".into())]).unwrap();
+        requests.save_record_requests("s1", &[("paso".into(), "h2".into())]).unwrap();
+        let asked = requests.record_requests("s1").unwrap();
+        assert_eq!((asked["paso"].as_str(), asked["guion"].as_str()), ("h2", "c1"));
+        assert!(requests.record_requests("otra").unwrap().is_empty());
         store.save_checkpoint("s1", StoredCheckpoint { must_total: 4, must_pending: 3 }).unwrap();
         store.save_checkpoint("s1", StoredCheckpoint { must_total: 5, must_pending: 1 }).unwrap();
         assert_eq!(store.checkpoint("s1").unwrap(), Some(StoredCheckpoint { must_total: 5, must_pending: 1 }));
